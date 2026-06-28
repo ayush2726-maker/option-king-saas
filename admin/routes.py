@@ -147,3 +147,79 @@ def make_admin(user_id: int, authorization: str = Header(None)):
     conn.close()
 
     return {"success": True, "message": f"User {user_id} is now admin"}
+
+# ── Stats Endpoint (mobile app ke liye) ──────────────────
+@router.get("/stats")
+def get_stats(authorization: str = Header(None)):
+    require_admin(authorization)
+    conn = get_db()
+
+    total_users = conn.execute(
+        "SELECT COUNT(*) as c FROM users"
+    ).fetchone()["c"]
+
+    active_subscriptions = conn.execute(
+        "SELECT COUNT(*) as c FROM users WHERE subscription_status='active'"
+    ).fetchone()["c"]
+
+    trial_users = conn.execute(
+        "SELECT COUNT(*) as c FROM users WHERE subscription_status='trial'"
+    ).fetchone()["c"]
+
+    total_revenue = conn.execute(
+        "SELECT SUM(amount) as r FROM subscriptions WHERE status='active'"
+    ).fetchone()["r"] or 0
+
+    try:
+        bot_active = conn.execute(
+            "SELECT COUNT(*) as c FROM bot_status WHERE is_running=1"
+        ).fetchone()["c"] > 0
+    except Exception:
+        bot_active = False
+
+    try:
+        trades_today = conn.execute(
+            "SELECT COUNT(*) as c FROM trades WHERE date(created_at)=date('now')"
+        ).fetchone()["c"]
+    except Exception:
+        trades_today = 0
+
+    conn.close()
+
+    return {
+        "total_users": total_users,
+        "active_subscriptions": active_subscriptions,
+        "trial_users": trial_users,
+        "total_revenue": round(total_revenue, 2),
+        "bot_active": bot_active,
+        "trades_today": trades_today,
+    }
+
+# ── Bot Control ───────────────────────────────────────────
+@router.post("/bot/start")
+def bot_start(authorization: str = Header(None)):
+    require_admin(authorization)
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO bot_status (id, is_running, started_at) VALUES (1, 1, datetime('now'))"
+        )
+        conn.commit()
+    except Exception:
+        pass
+    conn.close()
+    return {"success": True, "message": "Bot started"}
+
+@router.post("/bot/stop")
+def bot_stop(authorization: str = Header(None)):
+    require_admin(authorization)
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO bot_status (id, is_running, started_at) VALUES (1, 0, datetime('now'))"
+        )
+        conn.commit()
+    except Exception:
+        pass
+    conn.close()
+    return {"success": True, "message": "Bot stopped"}

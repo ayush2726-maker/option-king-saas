@@ -106,3 +106,15 @@ def init_db():
 
 if __name__ == "__main__":
     init_db()
+
+def init_bot_status_table():
+    conn = get_db()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS bot_status (
+            id INTEGER PRIMARY KEY,
+            is_running INTEGER DEFAULT 0,
+            started_at TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()

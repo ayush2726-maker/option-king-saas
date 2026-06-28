@@ -5,6 +5,7 @@ from auth.routes import router as auth_router
 from broker.routes import router as broker_router
 from subscription.routes import router as subscription_router
 from admin.routes import router as admin_router
+from bot.routes import router as bot_router
 import sqlite3
 import os
 
@@ -32,6 +33,8 @@ app.add_middleware(
 @app.on_event("startup")
 def startup():
     init_db()
+    from database import init_bot_status_table
+    init_bot_status_table()
 
     # Auto-create first admin if not exists
     # Change these credentials!
@@ -68,6 +71,7 @@ app.include_router(auth_router)
 app.include_router(broker_router)
 app.include_router(subscription_router)
 app.include_router(admin_router)
+app.include_router(bot_router)
 
 
 # ─── Health Check ─────────────────────────────────────────────────
