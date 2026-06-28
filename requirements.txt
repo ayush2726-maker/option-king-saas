@@ -9,5 +9,6 @@ razorpay==2.0.1
 python-dotenv==1.0.0
 setuptools
 smartapi-python
+logzero
 pandas
 pyotp
