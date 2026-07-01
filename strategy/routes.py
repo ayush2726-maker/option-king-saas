@@ -7,6 +7,8 @@ from telegram.routes import notify_user
 
 router = APIRouter(prefix="/strategy", tags=["Strategy"])
 
+ALLOWED_INSTRUMENTS = ["NIFTY", "BANKNIFTY", "SENSEX"]
+
 DEFAULT_SETTINGS = {
     "mode": "default",
     "base_score": 40,
@@ -24,6 +26,8 @@ DEFAULT_SETTINGS = {
     "expiry_gamma_mode": True,
     "trading_mode": "paper",
     "paper_capital": 100000,
+    "primary_instrument": "NIFTY",
+    "enabled_instruments": ["NIFTY", "BANKNIFTY", "SENSEX"],
     "allow_custom": True
 }
 
@@ -92,6 +96,32 @@ def normalize_settings(body: dict):
     base["expiry_gamma_mode"] = bool(body.get("expiry_gamma_mode", base["expiry_gamma_mode"]))
     base["trading_mode"] = "live" if str(body.get("trading_mode", base.get("trading_mode", "paper"))).lower() == "live" else "paper"
     base["paper_capital"] = clamp_num(body.get("paper_capital", base.get("paper_capital", 100000)), 1000, 10000000, base.get("paper_capital", 100000))
+
+    primary = str(body.get("primary_instrument", base.get("primary_instrument", "NIFTY"))).upper()
+    if primary not in ALLOWED_INSTRUMENTS:
+        primary = "NIFTY"
+
+    enabled_instruments_raw = body.get("enabled_instruments", base.get("enabled_instruments", ALLOWED_INSTRUMENTS))
+    if isinstance(enabled_instruments_raw, str):
+        enabled_instruments_raw = [x.strip().upper() for x in enabled_instruments_raw.split(",")]
+    if not isinstance(enabled_instruments_raw, list):
+        enabled_instruments_raw = ALLOWED_INSTRUMENTS
+
+    enabled = []
+    for x in enabled_instruments_raw:
+        x = str(x).upper()
+        if x in ALLOWED_INSTRUMENTS and x not in enabled:
+            enabled.append(x)
+
+    if not enabled:
+        enabled = ["NIFTY"]
+
+    if primary not in enabled:
+        primary = enabled[0]
+
+    base["primary_instrument"] = primary
+    base["enabled_instruments"] = enabled
+
     base["allow_custom"] = True
     return base
 

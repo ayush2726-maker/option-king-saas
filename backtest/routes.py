@@ -8,6 +8,8 @@ from telegram.routes import notify_user
 
 router = APIRouter(prefix="/backtest", tags=["Backtest"])
 
+ALLOWED_INSTRUMENTS = ["NIFTY", "BANKNIFTY", "SENSEX"]
+
 def get_user_settings(conn, user_id: int):
     row = conn.execute(
         "SELECT settings_json FROM strategy_settings WHERE user_id=?",
@@ -28,6 +30,8 @@ def run_backtest(body: dict, authorization: str = Header(None)):
     body = body or {}
 
     instrument = str(body.get("instrument", "NIFTY")).upper()
+    if instrument not in ALLOWED_INSTRUMENTS:
+        instrument = "NIFTY"
     test_date = str(body.get("date", datetime.utcnow().date().isoformat()))
     capital_input = body.get("capital", None)
 

@@ -87,6 +87,8 @@ def bot_start(authorization: str = Header(None)):
             f"📝 <b>Paper Bot Started</b>\n"
             f"Mode: PAPER\n"
             f"Paper Capital: ₹{settings.get('paper_capital', 100000)}\n"
+            f"Instruments: {', '.join(settings.get('enabled_instruments', ['NIFTY']))}\n"
+            f"Primary: {settings.get('primary_instrument', 'NIFTY')}\n"
             f"Real orders OFF."
         )
         return {
@@ -116,7 +118,7 @@ def bot_start(authorization: str = Header(None)):
     if isinstance(res, dict) and res.get("success"):
         notify_user(
             user["id"],
-            "▶️ <b>LIVE Bot Started</b>\nReal orders enabled. Risk carefully manage karein."
+            f"▶️ <b>LIVE Bot Started</b>\nInstruments: {', '.join(settings.get('enabled_instruments', ['NIFTY']))}\nPrimary: {settings.get('primary_instrument', 'NIFTY')}\nReal orders enabled. Risk carefully manage karein."
         )
     return res
 
