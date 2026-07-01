@@ -6,6 +6,9 @@ from broker.routes import router as broker_router
 from subscription.routes import router as subscription_router
 from admin.routes import router as admin_router
 from bot.routes import router as bot_router
+
+from strategy.routes import router as strategy_router
+from backtest.routes import router as backtest_router
 import sqlite3
 import os
 
@@ -72,6 +75,9 @@ app.include_router(broker_router)
 app.include_router(subscription_router)
 app.include_router(admin_router)
 app.include_router(bot_router)
+
+app.include_router(strategy_router)
+app.include_router(backtest_router)
 
 
 # ─── Health Check ─────────────────────────────────────────────────

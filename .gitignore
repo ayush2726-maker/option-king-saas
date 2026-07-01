@@ -9,3 +9,6 @@ venv/
 dist/
 build/
 .DS_Store
+connect_angel.py
+/tmp/broker.json
+server.log

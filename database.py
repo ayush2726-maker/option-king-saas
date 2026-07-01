@@ -100,6 +100,32 @@ def init_db():
         )
     """)
 
+
+    # Strategy settings table
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS strategy_settings (
+            user_id INTEGER PRIMARY KEY,
+            settings_json TEXT NOT NULL,
+            updated_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Backtest runs table
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS backtest_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            instrument TEXT,
+            test_date TEXT,
+            settings_json TEXT,
+            summary_json TEXT,
+            trades_json TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+
     conn.commit()
     conn.close()
     print("✅ Database initialized successfully")
