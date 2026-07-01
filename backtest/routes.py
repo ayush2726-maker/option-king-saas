@@ -29,10 +29,15 @@ def run_backtest(body: dict, authorization: str = Header(None)):
 
     instrument = str(body.get("instrument", "NIFTY")).upper()
     test_date = str(body.get("date", datetime.utcnow().date().isoformat()))
-    capital = float(body.get("capital", 10000) or 10000)
+    capital_input = body.get("capital", None)
 
     conn = get_db()
     settings = get_user_settings(conn, user["id"])
+
+    if capital_input in [None, "", 0, "0"]:
+        capital = float(settings.get("paper_capital", 100000) or 100000)
+    else:
+        capital = float(capital_input or 100000)
 
     threshold = int(float(body.get("entry_threshold", settings.get("entry_threshold", 82))))
     slp = float(body.get("sl_percent", settings.get("sl_percent", 12)))

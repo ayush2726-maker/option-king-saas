@@ -7,6 +7,7 @@ from subscription.routes import router as subscription_router
 from admin.routes import router as admin_router
 from bot.routes import router as bot_router
 from telegram.routes import router as telegram_router
+from paper.routes import router as paper_router
 
 from strategy.routes import router as strategy_router
 from backtest.routes import router as backtest_router
@@ -77,6 +78,7 @@ app.include_router(subscription_router)
 app.include_router(admin_router)
 app.include_router(bot_router)
 app.include_router(telegram_router)
+app.include_router(paper_router)
 
 app.include_router(strategy_router)
 app.include_router(backtest_router)
