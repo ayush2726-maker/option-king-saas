@@ -23,7 +23,7 @@ def bot_start(authorization: str = Header(None)):
     user = get_current_user(authorization)
     conn = get_db()
     broker = conn.execute(
-        "SELECT * FROM broker_credentials WHERE user_id=?",
+        "SELECT * FROM broker_credentials WHERE user_id=? AND is_active=1 ORDER BY last_connected DESC LIMIT 1",
         (user["id"],)
     ).fetchone()
     conn.close()
@@ -33,7 +33,7 @@ def bot_start(authorization: str = Header(None)):
         "api_key":     broker["api_key"],
         "client_id":   broker["client_id"],
         "password":    broker["api_secret"],
-        "totp_secret": broker["totp_key"],
+        "totp_secret": broker["totp_secret"],
     }
     return start_user_bot(user["id"], creds)
 
