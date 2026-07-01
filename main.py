@@ -117,6 +117,14 @@ def health():
 
 # ─── Run ──────────────────────────────────────────────────────────
 
+
+from fastapi.responses import FileResponse
+import os
+
+@app.get("/admin/panel")
+def admin_panel():
+    return FileResponse(os.path.join(os.path.dirname(__file__), "admin/panel.html"))
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8001))
