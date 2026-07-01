@@ -125,6 +125,14 @@ import os
 def admin_panel():
     return FileResponse(os.path.join(os.path.dirname(__file__), "admin/panel.html"))
 
+
+@app.get("/signup")
+def signup_page():
+    return FileResponse(os.path.join(os.path.dirname(__file__), "signup.html"))
+
+@app.get("/join")
+def join_page():
+    return FileResponse(os.path.join(os.path.dirname(__file__), "signup.html"))
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8001))
