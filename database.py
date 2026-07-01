@@ -126,6 +126,22 @@ def init_db():
         )
     """)
 
+
+    # Telegram settings table
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS telegram_settings (
+            user_id INTEGER PRIMARY KEY,
+            enabled INTEGER DEFAULT 0,
+            bot_token TEXT,
+            chat_id TEXT,
+            send_bot_alerts INTEGER DEFAULT 1,
+            send_trade_alerts INTEGER DEFAULT 1,
+            send_backtest_alerts INTEGER DEFAULT 1,
+            updated_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+
     conn.commit()
     conn.close()
     print("✅ Database initialized successfully")

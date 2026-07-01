@@ -4,6 +4,7 @@ from auth.routes import get_current_user
 from strategy.routes import DEFAULT_SETTINGS
 import json
 from datetime import datetime
+from telegram.routes import notify_user
 
 router = APIRouter(prefix="/backtest", tags=["Backtest"])
 
@@ -107,6 +108,16 @@ def run_backtest(body: dict, authorization: str = Header(None)):
     )
     conn.commit()
     conn.close()
+
+    notify_user(
+        user["id"],
+        f"🧪 <b>Backtest Complete</b>\n"
+        f"Instrument: {summary['instrument']}\n"
+        f"Date: {summary['date']}\n"
+        f"Trades: {summary['trades']}\n"
+        f"Win Rate: {summary['win_rate']}%\n"
+        f"Net P&L: ₹{summary['net_pnl']}"
+    )
 
     return {"success": True, "summary": summary, "trades": trades}
 
