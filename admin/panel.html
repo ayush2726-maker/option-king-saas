@@ -306,15 +306,17 @@ async function loadBotStatus() {
 async function loadStrategy() {
   const data = await api('GET', '/strategy/settings');
   if (data) {
+    const s = data.settings || data;
     document.getElementById('strategyInfo').innerHTML = `
       <table style="width:100%">
-        <tr><td style="color:#888;padding:6px 0">Mode</td><td>${data.trading_mode || '-'}</td></tr>
-        <tr><td style="color:#888;padding:6px 0">Paper Capital</td><td>₹${data.paper_capital || 0}</td></tr>
-        <tr><td style="color:#888;padding:6px 0">Instrument</td><td>${data.primary_instrument || '-'}</td></tr>
-        <tr><td style="color:#888;padding:6px 0">Entry Score</td><td>${data.entry_score || '-'}</td></tr>
-        <tr><td style="color:#888;padding:6px 0">SL %</td><td>${data.sl_percent || '-'}%</td></tr>
-        <tr><td style="color:#888;padding:6px 0">Target %</td><td>${data.target_percent || '-'}%</td></tr>
-        <tr><td style="color:#888;padding:6px 0">Max Trades/Day</td><td>${data.max_trades_per_day || '-'}</td></tr>
+        <tr><td style="color:#888;padding:6px 0">Mode</td><td>${s.mode || '-'}</td></tr>
+        <tr><td style="color:#888;padding:6px 0">Paper Capital</td><td>₹${s.paper_capital || 0}</td></tr>
+        <tr><td style="color:#888;padding:6px 0">Instrument</td><td>${s.primary_instrument || '-'}</td></tr>
+        <tr><td style="color:#888;padding:6px 0">Entry Score</td><td>${s.entry_threshold || '-'}</td></tr>
+        <tr><td style="color:#888;padding:6px 0">SL %</td><td>${s.sl_percent || '-'}%</td></tr>
+        <tr><td style="color:#888;padding:6px 0">Target %</td><td>${s.target_percent || '-'}%</td></tr>
+        <tr><td style="color:#888;padding:6px 0">Max Trades/Day</td><td>${s.max_trades_per_day || '-'}</td></tr>
+        <tr><td style="color:#888;padding:6px 0">Trading Mode</td><td>${s.trading_mode || '-'}</td></tr>
       </table>
     `;
   }
