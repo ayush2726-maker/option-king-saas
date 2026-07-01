@@ -22,6 +22,8 @@ DEFAULT_SETTINGS = {
     "target_percent": 24,
     "trailing_sl": True,
     "expiry_gamma_mode": True,
+    "trading_mode": "paper",
+    "paper_capital": 100000,
     "allow_custom": True
 }
 
@@ -88,6 +90,8 @@ def normalize_settings(body: dict):
     base["target_percent"] = clamp_num(body.get("target_percent", base["target_percent"]), 5, 100, base["target_percent"])
     base["trailing_sl"] = bool(body.get("trailing_sl", base["trailing_sl"]))
     base["expiry_gamma_mode"] = bool(body.get("expiry_gamma_mode", base["expiry_gamma_mode"]))
+    base["trading_mode"] = "live" if str(body.get("trading_mode", base.get("trading_mode", "paper"))).lower() == "live" else "paper"
+    base["paper_capital"] = clamp_num(body.get("paper_capital", base.get("paper_capital", 100000)), 1000, 10000000, base.get("paper_capital", 100000))
     base["allow_custom"] = True
     return base
 
