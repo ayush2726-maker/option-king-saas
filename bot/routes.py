@@ -49,6 +49,44 @@ LOT_SIZES = {
 }
 
 
+PAPER_BASE_LEVELS = {
+    "NIFTY": 25000,
+    "BANKNIFTY": 57000,
+    "SENSEX": 82000,
+}
+
+PAPER_STRIKE_STEP = {
+    "NIFTY": 50,
+    "BANKNIFTY": 100,
+    "SENSEX": 100,
+}
+
+
+def next_weekly_expiry_label():
+    # Paper/demo expiry label only. Real expiry will come from broker option chain later.
+    today = datetime.utcnow().date()
+    days_ahead = (3 - today.weekday()) % 7  # Thursday style demo expiry
+    if days_ahead == 0:
+        days_ahead = 7
+    expiry = today.fromordinal(today.toordinal() + days_ahead)
+    return expiry.strftime("%d%b").upper()
+
+
+def make_paper_option_symbol(primary: str, side: str):
+    base = PAPER_BASE_LEVELS.get(primary, 25000)
+    step = PAPER_STRIKE_STEP.get(primary, 50)
+
+    # small simulated ATM/OTM shift
+    shift = random.choice([-2, -1, 0, 1, 2]) * step
+    strike = base + shift
+
+    expiry = next_weekly_expiry_label()
+    display_symbol = f"{primary} {expiry} {strike} {side}"
+    broker_symbol = f"{primary} PAPER {expiry} {strike}{side}"
+
+    return display_symbol, broker_symbol, strike, expiry
+
+
 def ensure_tables(conn):
     conn.execute("""
         CREATE TABLE IF NOT EXISTS paper_trades (
@@ -285,7 +323,8 @@ def get_signal(authorization: str = Header(None)):
         score = min(100, base_score + adx_score + volume_score + mtf_score + regime_score)
 
         side = "CE" if random.random() > 0.5 else "PE"
-        symbol = f"{primary} PAPER {side}"
+        display_symbol, broker_symbol, strike, expiry = make_paper_option_symbol(primary, side)
+        symbol = display_symbol
         signal = "BUY_" + side if score >= entry_threshold else "PAPER_WAITING"
         status = "PAPER_RUNNING"
 
