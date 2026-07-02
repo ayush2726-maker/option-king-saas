@@ -645,3 +645,168 @@ def update_signal(body: dict, authorization: str = Header(None)):
         pass
 
     return {"success": True}
+
+
+@router.post("/hero-zero/start")
+def hero_zero_start(body: dict = None, authorization: str = Header(None)):
+    user = get_current_user(authorization)
+
+    conn = get_db()
+    ensure_tables(conn)
+
+    settings = get_strategy_settings(conn, user["id"])
+    primary = settings.get("primary_instrument", "NIFTY")
+    qty = LOT_SIZES.get(primary, 65)
+
+    # Agar already trade open hai to naya hero-zero trade mat banao
+    open_trade = conn.execute(
+        """SELECT * FROM paper_trades
+           WHERE user_id=? AND status='OPEN'
+           ORDER BY id DESC LIMIT 1""",
+        (user["id"],)
+    ).fetchone()
+
+    if open_trade:
+        conn.close()
+        return {
+            "success": True,
+            "message": "Already open trade hai. Pehle old trade close hone do.",
+            "active_trade": {
+                "id": open_trade["id"],
+                "symbol": open_trade["symbol"],
+                "side": open_trade["side"],
+                "qty": open_trade["qty"],
+                "entry_price": open_trade["entry_price"],
+                "status": open_trade["status"],
+                "reason": open_trade["reason"],
+                "created_at": open_trade["created_at"],
+            }
+        }
+
+    body = body or {}
+
+    side = body.get("side") or random.choice(["CE", "PE"])
+
+    # Hero Zero paper/demo premium: low premium high risk
+    entry_price = round(float(body.get("entry_price") or random.uniform(18, 55)), 2)
+
+    display_symbol, broker_symbol, strike, expiry = make_paper_option_symbol(primary, side)
+    symbol = display_symbol.replace(primary, f"{primary} HEROZERO")
+
+    sl_price = round(entry_price * 0.50, 2)      # 50% SL
+    target_price = round(entry_price * 2.00, 2)  # 100% target
+
+    now = datetime.utcnow().isoformat()
+
+    conn.execute(
+        """INSERT INTO paper_trades
+           (user_id, symbol, side, entry_price, qty, pnl, status, reason, created_at)
+           VALUES (?, ?, ?, ?, ?, 0, 'OPEN', ?, ?)""",
+        (
+            user["id"],
+            symbol,
+            side,
+            entry_price,
+            qty,
+            f"Hero Zero entry | SL {sl_price} | Target {target_price}",
+            now
+        )
+    )
+
+    add_trade_count(conn, user["id"], "HERO_ZERO_" + side)
+    save_bot_status(conn, user["id"], 1, "HERO_ZERO_" + side)
+
+    trade_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    conn.commit()
+    conn.close()
+
+    try:
+        msg = "\n".join([
+            "🚀 <b>Expiry Hero Zero Started</b>",
+            f"Symbol: {symbol}",
+            f"Side: {side}",
+            f"Qty: {qty}",
+            f"Entry: Rs {entry_price}",
+            f"SL: Rs {sl_price}",
+            f"Target: Rs {target_price}",
+            "Mode: PAPER / DEMO",
+        ])
+        notify_user(user["id"], msg)
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "message": "Expiry Hero Zero paper trade started",
+        "active_trade": {
+            "id": trade_id,
+            "symbol": symbol,
+            "side": side,
+            "qty": qty,
+            "entry_price": entry_price,
+            "sl_price": sl_price,
+            "target_price": target_price,
+            "exit_price": None,
+            "pnl": 0,
+            "status": "OPEN",
+            "reason": f"Hero Zero entry | SL {sl_price} | Target {target_price}",
+            "created_at": now
+        }
+    }
+
+
+@router.post("/hero-zero/force-close")
+def hero_zero_force_close(authorization: str = Header(None)):
+    user = get_current_user(authorization)
+
+    conn = get_db()
+    ensure_tables(conn)
+
+    open_trade = conn.execute(
+        """SELECT * FROM paper_trades
+           WHERE user_id=? AND status='OPEN'
+           ORDER BY id DESC LIMIT 1""",
+        (user["id"],)
+    ).fetchone()
+
+    if not open_trade:
+        conn.close()
+        return {"success": True, "message": "No open paper trade"}
+
+    entry = float(open_trade["entry_price"] or 0)
+    qty = int(open_trade["qty"] or 65)
+
+    exit_price = round(entry * random.uniform(0.50, 2.20), 2)
+    pnl = round((exit_price - entry) * qty, 2)
+
+    conn.execute(
+        """UPDATE paper_trades
+           SET exit_price=?, pnl=?, status='CLOSED', reason=?
+           WHERE id=?""",
+        (exit_price, pnl, "HERO ZERO FORCE EXIT", open_trade["id"])
+    )
+
+    add_pnl(conn, user["id"], pnl)
+    conn.commit()
+    conn.close()
+
+    try:
+        msg = "\n".join([
+            "📤 <b>Hero Zero Exit</b>",
+            f"Symbol: {open_trade['symbol']}",
+            f"Entry: Rs {entry}",
+            f"Exit: Rs {exit_price}",
+            f"Qty: {qty}",
+            f"P&L: Rs {pnl}",
+        ])
+        notify_user(user["id"], msg)
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "message": "Hero Zero trade closed",
+        "exit_price": exit_price,
+        "pnl": pnl
+    }
+
