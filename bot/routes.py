@@ -1,54 +1,55 @@
 from fastapi import APIRouter, Header
 from database import get_db
 from auth.routes import get_current_user
-from bot.angel_fetcher import start_user_bot, stop_user_bot, get_user_bot_state
 from bot.strategy import is_hero_window_active
 from telegram.routes import notify_user
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import random
 
+try:
+    from bot.angel_fetcher import start_user_bot, stop_user_bot
+except Exception:
+    def start_user_bot(user_id, creds):
+        return {"success": False, "message": "Live engine unavailable"}
+
+    def stop_user_bot(user_id):
+        return {"success": True, "message": "Stopped"}
+
+
 router = APIRouter(prefix="/bot", tags=["Bot"])
 
-def get_strategy_settings(conn, user_id: int):
-    default = {
-        "trading_mode": "paper",
-        "paper_capital": 100000,
-        "mode": "default"
-    }
-    try:
-        row = conn.execute(
-            "SELECT settings_json FROM strategy_settings WHERE user_id=?",
-            (user_id,)
-        ).fetchone()
-        if row:
-            saved = json.loads(row["settings_json"])
-            default.update(saved)
-    except Exception:
-        pass
-    return default
 
-def save_bot_status(conn, user_id: int, is_running: int, last_signal: str = "WAITING"):
-    now = datetime.utcnow().isoformat()
-    conn.execute(
-        """INSERT INTO bot_status
-           (user_id, is_running, last_signal, total_trades, total_pnl, updated_at)
-           VALUES (?, ?, ?, 0, 0, ?)
-           ON CONFLICT(user_id) DO UPDATE SET
-             is_running=excluded.is_running,
-             last_signal=excluded.last_signal,
-             updated_at=excluded.updated_at""",
-        (user_id, is_running, last_signal, now)
-    )
-    conn.commit()
+DEFAULT_SETTINGS = {
+    "mode": "default",
+    "base_score": 40,
+    "adx_score": 20,
+    "volume_score": 20,
+    "mtf_score": 10,
+    "regime_score": 10,
+    "entry_threshold": 82,
+    "adx_threshold": 25,
+    "volume_threshold": 1.2,
+    "max_trades_per_day": 5,
+    "sl_percent": 12,
+    "target_percent": 24,
+    "trailing_sl": True,
+    "expiry_gamma_mode": True,
+    "trading_mode": "paper",
+    "paper_capital": 100000,
+    "primary_instrument": "NIFTY",
+    "enabled_instruments": ["NIFTY", "BANKNIFTY", "SENSEX"],
+}
 
-@router.get("/signal")
-def get_signal(authorization: str = Header(None)):
-    user = get_current_user(authorization)
 
-    conn = get_db()
-    settings = get_strategy_settings(conn, user["id"])
+LOT_SIZES = {
+    "NIFTY": 65,
+    "BANKNIFTY": 30,
+    "SENSEX": 20,
+}
 
+
+def ensure_tables(conn):
     conn.execute("""
         CREATE TABLE IF NOT EXISTS paper_trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,7 +65,121 @@ def get_signal(authorization: str = Header(None)):
             created_at TEXT DEFAULT (datetime('now'))
         )
     """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS bot_status (
+            user_id INTEGER PRIMARY KEY,
+            is_running INTEGER DEFAULT 0,
+            last_signal TEXT DEFAULT 'WAITING',
+            total_trades INTEGER DEFAULT 0,
+            total_pnl REAL DEFAULT 0,
+            updated_at TEXT
+        )
+    """)
+
     conn.commit()
+
+
+def get_strategy_settings(conn, user_id: int):
+    settings = dict(DEFAULT_SETTINGS)
+
+    try:
+        row = conn.execute(
+            "SELECT settings_json FROM strategy_settings WHERE user_id=?",
+            (user_id,)
+        ).fetchone()
+
+        if row:
+            saved = json.loads(row["settings_json"])
+            settings.update(saved)
+    except Exception:
+        pass
+
+    settings.setdefault("trading_mode", "paper")
+    settings.setdefault("paper_capital", 100000)
+    settings.setdefault("primary_instrument", "NIFTY")
+    settings.setdefault("enabled_instruments", ["NIFTY", "BANKNIFTY", "SENSEX"])
+
+    return settings
+
+
+def save_bot_status(conn, user_id: int, is_running: int, last_signal: str):
+    now = datetime.utcnow().isoformat()
+
+    cur = conn.execute(
+        """UPDATE bot_status
+           SET is_running=?, last_signal=?, updated_at=?
+           WHERE user_id=?""",
+        (is_running, last_signal, now, user_id)
+    )
+
+    if cur.rowcount == 0:
+        conn.execute(
+            """INSERT INTO bot_status
+               (user_id, is_running, last_signal, total_trades, total_pnl, updated_at)
+               VALUES (?, ?, ?, 0, 0, ?)""",
+            (user_id, is_running, last_signal, now)
+        )
+
+    conn.commit()
+
+
+def add_trade_count(conn, user_id: int, signal: str):
+    now = datetime.utcnow().isoformat()
+
+    cur = conn.execute(
+        """UPDATE bot_status
+           SET is_running=1,
+               last_signal=?,
+               total_trades=COALESCE(total_trades, 0) + 1,
+               updated_at=?
+           WHERE user_id=?""",
+        (signal, now, user_id)
+    )
+
+    if cur.rowcount == 0:
+        conn.execute(
+            """INSERT INTO bot_status
+               (user_id, is_running, last_signal, total_trades, total_pnl, updated_at)
+               VALUES (?, 1, ?, 1, 0, ?)""",
+            (user_id, signal, now)
+        )
+
+    conn.commit()
+
+
+def add_pnl(conn, user_id: int, pnl: float):
+    now = datetime.utcnow().isoformat()
+
+    cur = conn.execute(
+        """UPDATE bot_status
+           SET is_running=1,
+               last_signal='PAPER_EXIT',
+               total_pnl=COALESCE(total_pnl, 0) + ?,
+               updated_at=?
+           WHERE user_id=?""",
+        (pnl, now, user_id)
+    )
+
+    if cur.rowcount == 0:
+        conn.execute(
+            """INSERT INTO bot_status
+               (user_id, is_running, last_signal, total_trades, total_pnl, updated_at)
+               VALUES (?, 1, 'PAPER_EXIT', 0, ?, ?)""",
+            (user_id, pnl, now)
+        )
+
+    conn.commit()
+
+
+@router.get("/signal")
+def get_signal(authorization: str = Header(None)):
+    user = get_current_user(authorization)
+
+    conn = get_db()
+    ensure_tables(conn)
+
+    settings = get_strategy_settings(conn, user["id"])
 
     row = conn.execute(
         "SELECT * FROM bot_status WHERE user_id=?",
@@ -76,7 +191,7 @@ def get_signal(authorization: str = Header(None)):
     trading_mode = settings.get("trading_mode", "paper")
     paper_capital = float(settings.get("paper_capital", 100000) or 100000)
     primary = settings.get("primary_instrument", "NIFTY")
-    enabled = settings.get("enabled_instruments", ["NIFTY"])
+    enabled = settings.get("enabled_instruments", ["NIFTY", "BANKNIFTY", "SENSEX"])
 
     entry_threshold = int(settings.get("entry_threshold", 82))
     adx_threshold = int(settings.get("adx_threshold", 25))
@@ -84,16 +199,10 @@ def get_signal(authorization: str = Header(None)):
     sl_percent = float(settings.get("sl_percent", 12))
     target_percent = float(settings.get("target_percent", 24))
 
-    lot_sizes = {
-        "NIFTY": 65,
-        "BANKNIFTY": 30,
-        "SENSEX": 20
-    }
-    qty = lot_sizes.get(primary, 1)
-
+    qty = LOT_SIZES.get(primary, 1)
     now = datetime.utcnow()
 
-    # 1) Existing OPEN paper trade ka exit check
+    # Existing open paper trade exit check
     open_trade = conn.execute(
         """SELECT * FROM paper_trades
            WHERE user_id=? AND status='OPEN'
@@ -102,10 +211,17 @@ def get_signal(authorization: str = Header(None)):
     ).fetchone()
 
     if trading_mode == "paper" and is_running and open_trade:
-        entry_price = float(open_trade["entry_price"] or 0)
-        old_qty = int(open_trade["qty"] or qty)
+        # Correct old wrong qty also
+        if int(open_trade["qty"] or 0) != qty:
+            conn.execute(
+                "UPDATE paper_trades SET qty=? WHERE id=?",
+                (qty, open_trade["id"])
+            )
+            conn.commit()
 
-        # dynamic paper exit price simulation
+        entry_price = float(open_trade["entry_price"] or 0)
+        old_qty = qty
+
         random.seed(f"exit-{user['id']}-{open_trade['id']}-{now.strftime('%H%M%S')}")
         move_pct = random.uniform(-0.18, 0.30)
         current_price = round(entry_price * (1 + move_pct), 2)
@@ -119,12 +235,13 @@ def get_signal(authorization: str = Header(None)):
             pass
 
         exit_reason = None
+
         if move_pct * 100 >= target_percent:
-            exit_reason = f"TARGET HIT {round(move_pct*100,2)}%"
+            exit_reason = f"TARGET HIT {round(move_pct * 100, 2)}%"
         elif move_pct * 100 <= -sl_percent:
-            exit_reason = f"SL HIT {round(move_pct*100,2)}%"
+            exit_reason = f"SL HIT {round(move_pct * 100, 2)}%"
         elif age_min >= 10:
-            exit_reason = f"TIME EXIT {round(move_pct*100,2)}%"
+            exit_reason = f"TIME EXIT {round(move_pct * 100, 2)}%"
 
         if exit_reason:
             conn.execute(
@@ -134,39 +251,24 @@ def get_signal(authorization: str = Header(None)):
                 (current_price, pnl, exit_reason, open_trade["id"])
             )
 
-            conn.execute(
-                """INSERT INTO bot_status
-                   (user_id, is_running, last_signal, total_trades, total_pnl, updated_at)
-                   VALUES (?, 1, 'PAPER_EXIT', 0, ?, ?)
-                   ON CONFLICT(user_id) DO UPDATE SET
-                     is_running=1,
-                     last_signal='PAPER_EXIT',
-                     total_pnl=bot_status.total_pnl + excluded.total_pnl,
-                     updated_at=excluded.updated_at""",
-                (user["id"], pnl, now.isoformat())
-            )
-
-            conn.commit()
+            add_pnl(conn, user["id"], pnl)
 
             try:
-                notify_user(
-                    user["id"],
-                    f"📤 <b>Paper Trade Exit</b>
-"
-                    f"Symbol: {open_trade['symbol']}
-"
-                    f"Exit: ₹{current_price}
-"
-                    f"P&L: ₹{pnl}
-"
-                    f"Reason: {exit_reason}"
-                )
+                msg = "\n".join([
+                    "📤 <b>Paper Trade Exit</b>",
+                    f"Symbol: {open_trade['symbol']}",
+                    f"Qty: {old_qty}",
+                    f"Exit: ₹{current_price}",
+                    f"P&L: ₹{pnl}",
+                    f"Reason: {exit_reason}",
+                ])
+                notify_user(user["id"], msg)
             except Exception:
                 pass
 
             open_trade = None
 
-    # 2) Dynamic paper signal
+    # Dynamic paper signal
     if trading_mode == "paper" and is_running:
         random.seed(f"{user['id']}-{primary}-{now.strftime('%H%M%S')}")
 
@@ -187,7 +289,6 @@ def get_signal(authorization: str = Header(None)):
         signal = "BUY_" + side if score >= entry_threshold else "PAPER_WAITING"
         status = "PAPER_RUNNING"
 
-        # Fresh open trade check
         open_trade = conn.execute(
             """SELECT id FROM paper_trades
                WHERE user_id=? AND status='OPEN'
@@ -213,35 +314,18 @@ def get_signal(authorization: str = Header(None)):
                 )
             )
 
-            conn.execute(
-                """INSERT INTO bot_status
-                   (user_id, is_running, last_signal, total_trades, total_pnl, updated_at)
-                   VALUES (?, 1, ?, 1, 0, ?)
-                   ON CONFLICT(user_id) DO UPDATE SET
-                     is_running=1,
-                     last_signal=excluded.last_signal,
-                     total_trades=bot_status.total_trades + 1,
-                     updated_at=excluded.updated_at""",
-                (user["id"], signal, now.isoformat())
-            )
-
-            conn.commit()
+            add_trade_count(conn, user["id"], signal)
 
             try:
-                notify_user(
-                    user["id"],
-                    f"📝 <b>Paper Trade Entry</b>
-"
-                    f"Symbol: {symbol}
-"
-                    f"Side: {side}
-"
-                    f"Qty: {qty}
-"
-                    f"Entry: ₹{entry_price}
-"
-                    f"Score: {score}/{entry_threshold}"
-                )
+                msg = "\n".join([
+                    "📝 <b>Paper Trade Entry</b>",
+                    f"Symbol: {symbol}",
+                    f"Side: {side}",
+                    f"Qty: {qty}",
+                    f"Entry: ₹{entry_price}",
+                    f"Score: {score}/{entry_threshold}",
+                ])
+                notify_user(user["id"], msg)
             except Exception:
                 pass
 
@@ -254,10 +338,15 @@ def get_signal(authorization: str = Header(None)):
         adx = 0
         volume_ratio = 0
         mtf = "WAITING"
-        base_score = adx_score = volume_score = mtf_score = regime_score = 0
+        base_score = 0
+        adx_score = 0
+        volume_score = 0
+        mtf_score = 0
+        regime_score = 0
 
     total_trades = 0
     total_pnl = 0
+
     try:
         total_trades = conn.execute(
             "SELECT COUNT(*) AS c FROM paper_trades WHERE user_id=?",
@@ -309,42 +398,53 @@ def get_signal(authorization: str = Header(None)):
     }
 
 
-
 @router.get("/hero-status")
 def get_hero_status(authorization: str = Header(None)):
     get_current_user(authorization)
     return is_hero_window_active()
 
+
 @router.post("/start")
 def bot_start(authorization: str = Header(None)):
     user = get_current_user(authorization)
+
     conn = get_db()
+    ensure_tables(conn)
+
     settings = get_strategy_settings(conn, user["id"])
     trading_mode = settings.get("trading_mode", "paper")
 
     if trading_mode != "live":
         save_bot_status(conn, user["id"], 1, "PAPER_MODE")
         conn.close()
-        notify_user(
-            user["id"],
-            f"📝 <b>Paper Bot Started</b>\n"
-            f"Mode: PAPER\n"
-            f"Paper Capital: ₹{settings.get('paper_capital', 100000)}\n"
-            f"Instruments: {', '.join(settings.get('enabled_instruments', ['NIFTY']))}\n"
-            f"Primary: {settings.get('primary_instrument', 'NIFTY')}\n"
-            f"Real orders OFF."
-        )
+
+        try:
+            msg = "\n".join([
+                "📝 <b>Paper Bot Started</b>",
+                "Mode: PAPER",
+                f"Paper Capital: ₹{settings.get('paper_capital', 100000)}",
+                f"Instruments: {', '.join(settings.get('enabled_instruments', ['NIFTY']))}",
+                f"Primary: {settings.get('primary_instrument', 'NIFTY')}",
+                "Real orders OFF.",
+            ])
+            notify_user(user["id"], msg)
+        except Exception:
+            pass
+
         return {
             "success": True,
             "message": "Paper mode bot started. Real orders OFF.",
             "mode": "paper",
-            "paper_capital": settings.get("paper_capital", 100000)
+            "paper_capital": settings.get("paper_capital", 100000),
+            "primary_instrument": settings.get("primary_instrument", "NIFTY"),
+            "enabled_instruments": settings.get("enabled_instruments", ["NIFTY"]),
         }
 
     broker = conn.execute(
         "SELECT * FROM broker_credentials WHERE user_id=? AND is_active=1 ORDER BY last_connected DESC LIMIT 1",
         (user["id"],)
     ).fetchone()
+
     conn.close()
 
     if not broker:
@@ -358,32 +458,55 @@ def bot_start(authorization: str = Header(None)):
     }
 
     res = start_user_bot(user["id"], creds)
+
     if isinstance(res, dict) and res.get("success"):
-        notify_user(
-            user["id"],
-            f"▶️ <b>LIVE Bot Started</b>\nInstruments: {', '.join(settings.get('enabled_instruments', ['NIFTY']))}\nPrimary: {settings.get('primary_instrument', 'NIFTY')}\nReal orders enabled. Risk carefully manage karein."
-        )
+        try:
+            notify_user(user["id"], "▶️ <b>LIVE Bot Started</b>\nReal orders enabled.")
+        except Exception:
+            pass
+
     return res
+
 
 @router.post("/stop")
 def bot_stop(authorization: str = Header(None)):
     user = get_current_user(authorization)
 
     conn = get_db()
-    try:
-        save_bot_status(conn, user["id"], 0, "STOPPED")
-    finally:
-        conn.close()
+    ensure_tables(conn)
+    save_bot_status(conn, user["id"], 0, "STOPPED")
+    conn.close()
 
-    res = stop_user_bot(user["id"])
-    notify_user(user["id"], "⏹️ <b>Bot Stopped</b>")
-    return {"success": True, "message": "Bot stopped", "engine_response": res}
+    try:
+        stop_user_bot(user["id"])
+    except Exception:
+        pass
+
+    try:
+        notify_user(user["id"], "⏹️ <b>Bot Stopped</b>")
+    except Exception:
+        pass
+
+    return {"success": True, "message": "Bot stopped"}
+
 
 @router.post("/update-signal")
 def update_signal(body: dict, authorization: str = Header(None)):
     user = get_current_user(authorization)
+
     signal = body.get("signal", "UPDATE") if isinstance(body, dict) else "UPDATE"
     score = body.get("score", "--") if isinstance(body, dict) else "--"
     symbol = body.get("symbol", "--") if isinstance(body, dict) else "--"
-    notify_user(user["id"], f"📢 <b>Signal Update</b>\nSignal: {signal}\nSymbol: {symbol}\nScore: {score}")
+
+    try:
+        msg = "\n".join([
+            "📢 <b>Signal Update</b>",
+            f"Signal: {signal}",
+            f"Symbol: {symbol}",
+            f"Score: {score}",
+        ])
+        notify_user(user["id"], msg)
+    except Exception:
+        pass
+
     return {"success": True}
