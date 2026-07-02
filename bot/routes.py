@@ -348,7 +348,12 @@ def get_signal(authorization: str = Header(None)):
         side = "CE" if random.random() > 0.5 else "PE"
         display_symbol, broker_symbol, strike, expiry = make_paper_option_symbol(primary, side)
         symbol = display_symbol
-        signal = "BUY_" + side if score >= entry_threshold else "PAPER_WAITING"
+
+        if open_trade:
+            signal = "HOLD_" + str(open_trade["side"])
+        else:
+            signal = "BUY_" + side if score >= entry_threshold else "PAPER_WAITING"
+
         status = "PAPER_RUNNING"
 
         open_trade = conn.execute(
