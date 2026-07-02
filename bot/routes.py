@@ -335,7 +335,7 @@ def get_signal(authorization: str = Header(None)):
             (user["id"],)
         ).fetchone()
 
-        if score >= entry_threshold and not open_trade:
+        if False and score >= entry_threshold and not open_trade:
             entry_price = round(random.uniform(90, 180), 2)
 
             conn.execute(
@@ -501,7 +501,7 @@ def get_signal(authorization: str = Header(None)):
         "total_trades": total_trades,
         "total_pnl": round(float(total_pnl or 0), 2),
         "updated_at": datetime.utcnow().isoformat(),
-        "message": "Paper dynamic signal with exit engine"
+        "message": "Paper score demo only. Real option chain feed not connected yet."
     }
 
 
