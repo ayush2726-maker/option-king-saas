@@ -346,6 +346,8 @@ def get_signal(authorization: str = Header(None)):
 
     total_trades = 0
     total_pnl = 0
+    active_trade = None
+    latest_trade = None
 
     try:
         total_trades = conn.execute(
@@ -357,6 +359,61 @@ def get_signal(authorization: str = Header(None)):
             "SELECT COALESCE(SUM(pnl),0) AS p FROM paper_trades WHERE user_id=?",
             (user["id"],)
         ).fetchone()["p"]
+
+        open_row = conn.execute(
+            """SELECT * FROM paper_trades
+               WHERE user_id=? AND status='OPEN'
+               ORDER BY id DESC LIMIT 1""",
+            (user["id"],)
+        ).fetchone()
+
+        latest_row = conn.execute(
+            """SELECT * FROM paper_trades
+               WHERE user_id=?
+               ORDER BY id DESC LIMIT 1""",
+            (user["id"],)
+        ).fetchone()
+
+        def make_trade_view(t):
+            if not t:
+                return None
+
+            entry = float(t["entry_price"] or 0)
+            exit_p = t["exit_price"]
+            qty_v = int(t["qty"] or qty)
+
+            sl_price = round(entry * (1 - sl_percent / 100), 2) if entry else None
+            target_price = round(entry * (1 + target_percent / 100), 2) if entry else None
+
+            current_price = None
+            unrealized_pnl = None
+
+            if str(t["status"]).upper() == "OPEN":
+                random.seed(f"view-{user['id']}-{t['id']}-{datetime.utcnow().strftime('%H%M%S')}")
+                move_pct_view = random.uniform(-0.08, 0.18)
+                current_price = round(entry * (1 + move_pct_view), 2)
+                unrealized_pnl = round((current_price - entry) * qty_v, 2)
+
+            return {
+                "id": t["id"],
+                "symbol": t["symbol"],
+                "side": t["side"],
+                "qty": qty_v,
+                "entry_price": entry,
+                "current_price": current_price,
+                "sl_price": sl_price,
+                "target_price": target_price,
+                "exit_price": float(exit_p) if exit_p is not None else None,
+                "pnl": float(t["pnl"] or 0),
+                "unrealized_pnl": unrealized_pnl,
+                "status": t["status"],
+                "reason": t["reason"],
+                "created_at": t["created_at"],
+            }
+
+        active_trade = make_trade_view(open_row)
+        latest_trade = make_trade_view(latest_row)
+
     except Exception:
         pass
 
@@ -391,6 +448,17 @@ def get_signal(authorization: str = Header(None)):
         "primary_instrument": primary,
         "enabled_instruments": enabled,
         "qty": qty,
+        "active_trade": active_trade,
+        "latest_trade": latest_trade,
+        "trade_symbol": active_trade.get("symbol") if active_trade else None,
+        "trade_side": active_trade.get("side") if active_trade else None,
+        "trade_qty": active_trade.get("qty") if active_trade else qty,
+        "entry_price": active_trade.get("entry_price") if active_trade else None,
+        "current_price": active_trade.get("current_price") if active_trade else None,
+        "sl_price": active_trade.get("sl_price") if active_trade else None,
+        "target_price": active_trade.get("target_price") if active_trade else None,
+        "exit_price": active_trade.get("exit_price") if active_trade else None,
+        "trade_pnl": active_trade.get("unrealized_pnl") if active_trade else None,
         "total_trades": total_trades,
         "total_pnl": round(float(total_pnl or 0), 2),
         "updated_at": datetime.utcnow().isoformat(),
