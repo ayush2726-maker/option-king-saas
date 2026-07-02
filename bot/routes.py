@@ -283,8 +283,21 @@ def get_signal(authorization: str = Header(None)):
         entry_price = float(open_trade["entry_price"] or 0)
         old_qty = qty
 
+        trade_text = (str(open_trade["symbol"] or "") + " " + str(open_trade["reason"] or "")).upper()
+        trade_sl_percent = sl_percent
+        trade_target_percent = target_percent
+
+        if "HEROZERO" in trade_text or "HERO ZERO" in trade_text:
+            trade_sl_percent = 50
+            trade_target_percent = 100
+
         random.seed(f"exit-{user['id']}-{open_trade['id']}-{now.strftime('%H%M%S')}")
-        move_pct = random.uniform(-0.18, 0.30)
+
+        if "HEROZERO" in trade_text or "HERO ZERO" in trade_text:
+            move_pct = random.uniform(-0.70, 1.30)
+        else:
+            move_pct = random.uniform(-0.18, 0.30)
+
         current_price = round(entry_price * (1 + move_pct), 2)
         pnl = round((current_price - entry_price) * old_qty, 2)
 
@@ -297,9 +310,9 @@ def get_signal(authorization: str = Header(None)):
 
         exit_reason = None
 
-        if move_pct * 100 >= target_percent:
+        if move_pct * 100 >= trade_target_percent:
             exit_reason = f"TARGET HIT {round(move_pct * 100, 2)}%"
-        elif move_pct * 100 <= -sl_percent:
+        elif move_pct * 100 <= -trade_sl_percent:
             exit_reason = f"SL HIT {round(move_pct * 100, 2)}%"
         elif age_min >= 10:
             exit_reason = f"TIME EXIT {round(move_pct * 100, 2)}%"
@@ -449,15 +462,28 @@ def get_signal(authorization: str = Header(None)):
             exit_p = t["exit_price"]
             qty_v = int(t["qty"] or qty)
 
-            sl_price = round(entry * (1 - sl_percent / 100), 2) if entry else None
-            target_price = round(entry * (1 + target_percent / 100), 2) if entry else None
+            trade_text = (str(t["symbol"] or "") + " " + str(t["reason"] or "")).upper()
+            local_sl_percent = sl_percent
+            local_target_percent = target_percent
+
+            if "HEROZERO" in trade_text or "HERO ZERO" in trade_text:
+                local_sl_percent = 50
+                local_target_percent = 100
+
+            sl_price = round(entry * (1 - local_sl_percent / 100), 2) if entry else None
+            target_price = round(entry * (1 + local_target_percent / 100), 2) if entry else None
 
             current_price = None
             unrealized_pnl = None
 
             if str(t["status"]).upper() == "OPEN":
                 random.seed(f"view-{user['id']}-{t['id']}-{datetime.utcnow().strftime('%H%M%S')}")
-                move_pct_view = random.uniform(-0.08, 0.18)
+
+                if "HEROZERO" in trade_text or "HERO ZERO" in trade_text:
+                    move_pct_view = random.uniform(-0.60, 1.10)
+                else:
+                    move_pct_view = random.uniform(-0.08, 0.18)
+
                 current_price = round(entry * (1 + move_pct_view), 2)
                 unrealized_pnl = round((current_price - entry) * qty_v, 2)
 
