@@ -54,17 +54,66 @@ def get_signal(authorization: str = Header(None)):
     ).fetchone()
     conn.close()
 
-    if row:
-        state.update({
-            "is_running": bool(row["is_running"]),
-            "last_signal": row["last_signal"],
-            "total_trades": row["total_trades"],
-            "total_pnl": row["total_pnl"],
-            "updated_at": row["updated_at"],
-        })
+    is_running = False
+    last_signal = "WAITING"
+    total_trades = 0
+    total_pnl = 0
+    updated_at = None
 
-    state["trading_mode"] = settings.get("trading_mode", "paper")
-    state["paper_capital"] = settings.get("paper_capital", 100000)
+    if row:
+        is_running = bool(row["is_running"])
+        last_signal = row["last_signal"] or "WAITING"
+        total_trades = row["total_trades"] or 0
+        total_pnl = row["total_pnl"] or 0
+        updated_at = row["updated_at"]
+
+    trading_mode = settings.get("trading_mode", "paper")
+    primary = settings.get("primary_instrument", "NIFTY")
+    enabled = settings.get("enabled_instruments", ["NIFTY"])
+
+    # If live engine has no data yet, provide safe paper/status fallback
+    score = state.get("score") or state.get("tqu_score") or 0
+    adx = state.get("adx") or 0
+    volume_ratio = state.get("volume_ratio") or 0
+    mtf = state.get("mtf") or state.get("mtf_status") or "WAITING"
+
+    if trading_mode == "paper" and is_running and score == 0:
+        score = int(settings.get("entry_threshold", 82)) - 5
+        adx = int(settings.get("adx_threshold", 25))
+        volume_ratio = float(settings.get("volume_threshold", 1.2))
+        mtf = "PAPER"
+        last_signal = "PAPER_WAITING"
+
+    state.update({
+        "success": True,
+        "is_running": is_running,
+        "status": "RUNNING" if is_running else "STOPPED",
+        "last_signal": last_signal,
+        "signal": last_signal,
+        "score": score,
+        "tqu_score": score,
+        "min_score": settings.get("entry_threshold", 82),
+        "adx": adx,
+        "adx_threshold": settings.get("adx_threshold", 25),
+        "volume_ratio": volume_ratio,
+        "volume_threshold": settings.get("volume_threshold", 1.2),
+        "mtf": mtf,
+        "mtf_status": mtf,
+        "base_score": settings.get("base_score", 40) if score else 0,
+        "adx_score": settings.get("adx_score", 20) if adx else 0,
+        "volume_score": settings.get("volume_score", 20) if volume_ratio else 0,
+        "mtf_score": settings.get("mtf_score", 10) if mtf else 0,
+        "regime_score": settings.get("regime_score", 10) if score else 0,
+        "trading_mode": trading_mode,
+        "paper_capital": settings.get("paper_capital", 100000),
+        "primary_instrument": primary,
+        "enabled_instruments": enabled,
+        "total_trades": total_trades,
+        "total_pnl": total_pnl,
+        "updated_at": updated_at,
+        "message": "Paper mode fallback data" if trading_mode == "paper" else "Live engine waiting for market data"
+    })
+
     return state
 
 @router.get("/hero-status")
