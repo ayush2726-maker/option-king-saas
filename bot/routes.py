@@ -4,8 +4,9 @@ from auth.routes import get_current_user
 from bot.angel_fetcher import start_user_bot, stop_user_bot, get_user_bot_state
 from bot.strategy import is_hero_window_active
 from telegram.routes import notify_user
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
+import random
 
 router = APIRouter(prefix="/bot", tags=["Bot"])
 
@@ -48,12 +49,28 @@ def get_signal(authorization: str = Header(None)):
     conn = get_db()
     settings = get_strategy_settings(conn, user["id"])
 
+    # ensure paper trade table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            symbol TEXT,
+            side TEXT,
+            entry_price REAL,
+            exit_price REAL,
+            qty INTEGER DEFAULT 0,
+            pnl REAL DEFAULT 0,
+            status TEXT DEFAULT 'OPEN',
+            reason TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    conn.commit()
+
     row = conn.execute(
         "SELECT * FROM bot_status WHERE user_id=?",
         (user["id"],)
     ).fetchone()
-
-    conn.close()
 
     is_running = False
     last_signal = "WAITING"
@@ -69,7 +86,7 @@ def get_signal(authorization: str = Header(None)):
         updated_at = row["updated_at"]
 
     trading_mode = settings.get("trading_mode", "paper")
-    paper_capital = settings.get("paper_capital", 100000)
+    paper_capital = float(settings.get("paper_capital", 100000) or 100000)
     primary = settings.get("primary_instrument", "NIFTY")
     enabled = settings.get("enabled_instruments", ["NIFTY"])
 
@@ -77,42 +94,114 @@ def get_signal(authorization: str = Header(None)):
     adx_threshold = int(settings.get("adx_threshold", 25))
     volume_threshold = float(settings.get("volume_threshold", 1.2))
 
-    # Paper mode fallback signal
-    if trading_mode == "paper":
-        if is_running:
-            score = max(1, entry_threshold - 5)
-            status = "PAPER_RUNNING"
-            signal = "PAPER_WAITING"
-            adx = adx_threshold
-            volume_ratio = volume_threshold
-            mtf = "PAPER"
-        else:
-            score = 0
-            status = "PAPER_STOPPED"
-            signal = "WAITING"
-            adx = 0
-            volume_ratio = 0
-            mtf = "WAITING"
+    now = datetime.utcnow()
+    minute_seed = int(now.strftime("%H%M"))
+    random.seed(f"{user['id']}-{primary}-{minute_seed}")
+
+    # Dynamic paper values for testing
+    if trading_mode == "paper" and is_running:
+        adx = round(random.uniform(18, 38), 1)
+        volume_ratio = round(random.uniform(0.8, 2.2), 2)
+        mtf_ok = random.choice([True, True, False])
+
+        base_score = 40 if random.random() > 0.25 else 0
+        adx_score = int(settings.get("adx_score", 20)) if adx >= adx_threshold else 0
+        volume_score = int(settings.get("volume_score", 20)) if volume_ratio >= volume_threshold else 0
+        mtf_score = int(settings.get("mtf_score", 10)) if mtf_ok else 0
+        regime_score = int(settings.get("regime_score", 10)) if random.random() > 0.35 else 0
+
+        score = base_score + adx_score + volume_score + mtf_score + regime_score
+        score = min(100, max(0, score))
+
+        side = "CE" if random.random() > 0.5 else "PE"
+        symbol = f"{primary} PAPER {side}"
+        signal = "BUY_" + side if score >= entry_threshold else "WAITING"
+        status = "PAPER_RUNNING"
+
+        # Create paper trade only if score passes and no very recent open trade
+        recent = conn.execute(
+            """SELECT id FROM paper_trades
+               WHERE user_id=? AND status='OPEN'
+               ORDER BY id DESC LIMIT 1""",
+            (user["id"],)
+        ).fetchone()
+
+        if score >= entry_threshold and not recent:
+            entry_price = round(random.uniform(90, 180), 2)
+            qty = 50 if primary == "NIFTY" else 15
+            conn.execute(
+                """INSERT INTO paper_trades
+                   (user_id, symbol, side, entry_price, qty, pnl, status, reason, created_at)
+                   VALUES (?, ?, ?, ?, ?, 0, 'OPEN', ?, ?)""",
+                (
+                    user["id"],
+                    symbol,
+                    side,
+                    entry_price,
+                    qty,
+                    f"Paper entry score {score}/{entry_threshold}",
+                    datetime.utcnow().isoformat()
+                )
+            )
+            conn.execute(
+                """INSERT INTO bot_status
+                   (user_id, is_running, last_signal, total_trades, total_pnl, updated_at)
+                   VALUES (?, 1, ?, 1, 0, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                     is_running=1,
+                     last_signal=excluded.last_signal,
+                     total_trades=bot_status.total_trades + 1,
+                     updated_at=excluded.updated_at""",
+                (user["id"], signal, datetime.utcnow().isoformat())
+            )
+            conn.commit()
+
+            try:
+                notify_user(
+                    user["id"],
+                    f"📝 <b>Paper Trade Entry</b>
+"
+                    f"Symbol: {symbol}
+"
+                    f"Side: {side}
+"
+                    f"Entry: ₹{entry_price}
+"
+                    f"Score: {score}/{entry_threshold}"
+                )
+            except Exception:
+                pass
+
+        mtf = "OK" if mtf_ok else "WEAK"
+
     else:
         score = 0
-        status = "LIVE_WAITING"
         signal = "WAITING"
+        status = "PAPER_STOPPED" if trading_mode == "paper" else "LIVE_WAITING"
         adx = 0
         volume_ratio = 0
         mtf = "WAITING"
+        base_score = adx_score = volume_score = mtf_score = regime_score = 0
+
+    # latest totals
+    try:
+        total_trades = conn.execute(
+            "SELECT COUNT(*) AS c FROM paper_trades WHERE user_id=?",
+            (user["id"],)
+        ).fetchone()["c"]
+    except Exception:
+        pass
+
+    conn.close()
 
     return {
         "success": True,
-
-        # old app compatibility
         "running": is_running,
+        "is_running": is_running,
         "status": status,
         "signal": signal,
-        "score": score,
-
-        # new app fields
-        "is_running": is_running,
         "last_signal": signal,
+        "score": score,
         "tqu_score": score,
         "min_score": entry_threshold,
 
@@ -123,22 +212,20 @@ def get_signal(authorization: str = Header(None)):
         "mtf": mtf,
         "mtf_status": mtf,
 
-        "base_score": settings.get("base_score", 40) if score else 0,
-        "adx_score": settings.get("adx_score", 20) if adx else 0,
-        "volume_score": settings.get("volume_score", 20) if volume_ratio else 0,
-        "mtf_score": settings.get("mtf_score", 10) if mtf else 0,
-        "regime_score": settings.get("regime_score", 10) if score else 0,
+        "base_score": base_score,
+        "adx_score": adx_score,
+        "volume_score": volume_score,
+        "mtf_score": mtf_score,
+        "regime_score": regime_score,
 
         "trading_mode": trading_mode,
         "paper_capital": paper_capital,
         "primary_instrument": primary,
         "enabled_instruments": enabled,
-
         "total_trades": total_trades,
         "total_pnl": total_pnl,
-        "updated_at": updated_at,
-
-        "message": "Paper mode data" if trading_mode == "paper" else "Live engine waiting for market data"
+        "updated_at": datetime.utcnow().isoformat(),
+        "message": "Paper dynamic signal" if trading_mode == "paper" else "Live engine waiting for market data"
     }
 
 
