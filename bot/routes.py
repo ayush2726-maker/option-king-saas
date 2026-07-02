@@ -335,7 +335,7 @@ def get_signal(authorization: str = Header(None)):
             (user["id"],)
         ).fetchone()
 
-        if False and score >= entry_threshold and not open_trade:
+        if score >= entry_threshold and not open_trade:
             entry_price = round(random.uniform(90, 180), 2)
 
             conn.execute(
