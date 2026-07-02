@@ -115,6 +115,14 @@ def ensure_tables(conn):
         )
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_bot_state (
+            user_id INTEGER PRIMARY KEY,
+            is_running INTEGER DEFAULT 0,
+            updated_at TEXT
+        )
+    """)
+
     conn.commit()
 
 
@@ -158,6 +166,11 @@ def save_bot_status(conn, user_id: int, is_running: int, last_signal: str):
                VALUES (?, ?, ?, 0, 0, ?)""",
             (user_id, is_running, last_signal, now)
         )
+
+    conn.execute(
+        "INSERT OR REPLACE INTO user_bot_state (user_id, is_running, updated_at) VALUES (?, ?, ?)",
+        (user_id, is_running, now)
+    )
 
     conn.commit()
 
@@ -225,6 +238,16 @@ def get_signal(authorization: str = Header(None)):
     ).fetchone()
 
     is_running = bool(row["is_running"]) if row else False
+
+    try:
+        state_row = conn.execute(
+            "SELECT is_running FROM user_bot_state WHERE user_id=?",
+            (user["id"],)
+        ).fetchone()
+        if state_row:
+            is_running = bool(state_row["is_running"])
+    except Exception:
+        pass
 
     trading_mode = settings.get("trading_mode", "paper")
     paper_capital = float(settings.get("paper_capital", 100000) or 100000)
