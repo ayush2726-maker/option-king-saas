@@ -317,7 +317,7 @@ def get_signal(authorization: str = Header(None)):
         elif age_min >= 10:
             exit_reason = f"TIME EXIT {round(move_pct * 100, 2)}%"
 
-        if exit_reason:
+        if False and exit_reason:
             conn.execute(
                 """UPDATE paper_trades
                    SET exit_price=?, pnl=?, status='CLOSED', reason=?
@@ -365,7 +365,7 @@ def get_signal(authorization: str = Header(None)):
         if open_trade:
             signal = "HOLD_" + str(open_trade["side"])
         else:
-            signal = "BUY_" + side if score >= entry_threshold else "PAPER_WAITING"
+            signal = "READY_" + side if score >= entry_threshold else "PAPER_WAITING"
 
         status = "PAPER_RUNNING"
 
@@ -376,7 +376,7 @@ def get_signal(authorization: str = Header(None)):
             (user["id"],)
         ).fetchone()
 
-        if score >= entry_threshold and not open_trade:
+        if False and score >= entry_threshold and not open_trade:
             entry_price = round(random.uniform(90, 180), 2)
 
             conn.execute(
@@ -555,7 +555,7 @@ def get_signal(authorization: str = Header(None)):
         "total_trades": total_trades,
         "total_pnl": round(float(total_pnl or 0), 2),
         "updated_at": datetime.utcnow().isoformat(),
-        "message": "Paper demo trade enabled. Real broker orders OFF."
+        "message": "Signal view-only. App refresh trade create/exit nahi karega. Button se trade start/close hoga."
     }
 
 
@@ -998,3 +998,32 @@ def hero_zero_force_close(authorization: str = Header(None)):
         "exit_price": exit_price,
         "pnl": pnl
     }
+
+
+@router.post("/paper/clear-history")
+def clear_paper_history(authorization: str = Header(None)):
+    user = get_current_user(authorization)
+
+    conn = get_db()
+    ensure_tables(conn)
+
+    conn.execute(
+        "DELETE FROM paper_trades WHERE user_id=?",
+        (user["id"],)
+    )
+
+    save_bot_status(conn, user["id"], 0, "PAPER_HISTORY_CLEARED")
+
+    conn.commit()
+    conn.close()
+
+    try:
+        notify_user(user["id"], "🧹 <b>Paper trade history cleared</b>")
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "message": "Paper trade history cleared. Telegram settings safe."
+    }
+
