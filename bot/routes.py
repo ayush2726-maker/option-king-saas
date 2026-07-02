@@ -71,9 +71,7 @@ def get_signal(authorization: str = Header(None)):
         (user["id"],)
     ).fetchone()
 
-    is_running = False
-    if row:
-        is_running = bool(row["is_running"])
+    is_running = bool(row["is_running"]) if row else False
 
     trading_mode = settings.get("trading_mode", "paper")
     paper_capital = float(settings.get("paper_capital", 100000) or 100000)
@@ -83,13 +81,94 @@ def get_signal(authorization: str = Header(None)):
     entry_threshold = int(settings.get("entry_threshold", 82))
     adx_threshold = int(settings.get("adx_threshold", 25))
     volume_threshold = float(settings.get("volume_threshold", 1.2))
+    sl_percent = float(settings.get("sl_percent", 12))
+    target_percent = float(settings.get("target_percent", 24))
+
+    lot_sizes = {
+        "NIFTY": 65,
+        "BANKNIFTY": 30,
+        "SENSEX": 20
+    }
+    qty = lot_sizes.get(primary, 1)
 
     now = datetime.utcnow()
 
+    # 1) Existing OPEN paper trade ka exit check
+    open_trade = conn.execute(
+        """SELECT * FROM paper_trades
+           WHERE user_id=? AND status='OPEN'
+           ORDER BY id DESC LIMIT 1""",
+        (user["id"],)
+    ).fetchone()
+
+    if trading_mode == "paper" and is_running and open_trade:
+        entry_price = float(open_trade["entry_price"] or 0)
+        old_qty = int(open_trade["qty"] or qty)
+
+        # dynamic paper exit price simulation
+        random.seed(f"exit-{user['id']}-{open_trade['id']}-{now.strftime('%H%M%S')}")
+        move_pct = random.uniform(-0.18, 0.30)
+        current_price = round(entry_price * (1 + move_pct), 2)
+        pnl = round((current_price - entry_price) * old_qty, 2)
+
+        age_min = 0
+        try:
+            created = datetime.fromisoformat(open_trade["created_at"])
+            age_min = (now - created).total_seconds() / 60
+        except Exception:
+            pass
+
+        exit_reason = None
+        if move_pct * 100 >= target_percent:
+            exit_reason = f"TARGET HIT {round(move_pct*100,2)}%"
+        elif move_pct * 100 <= -sl_percent:
+            exit_reason = f"SL HIT {round(move_pct*100,2)}%"
+        elif age_min >= 10:
+            exit_reason = f"TIME EXIT {round(move_pct*100,2)}%"
+
+        if exit_reason:
+            conn.execute(
+                """UPDATE paper_trades
+                   SET exit_price=?, pnl=?, status='CLOSED', reason=?
+                   WHERE id=?""",
+                (current_price, pnl, exit_reason, open_trade["id"])
+            )
+
+            conn.execute(
+                """INSERT INTO bot_status
+                   (user_id, is_running, last_signal, total_trades, total_pnl, updated_at)
+                   VALUES (?, 1, 'PAPER_EXIT', 0, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                     is_running=1,
+                     last_signal='PAPER_EXIT',
+                     total_pnl=bot_status.total_pnl + excluded.total_pnl,
+                     updated_at=excluded.updated_at""",
+                (user["id"], pnl, now.isoformat())
+            )
+
+            conn.commit()
+
+            try:
+                notify_user(
+                    user["id"],
+                    f"📤 <b>Paper Trade Exit</b>
+"
+                    f"Symbol: {open_trade['symbol']}
+"
+                    f"Exit: ₹{current_price}
+"
+                    f"P&L: ₹{pnl}
+"
+                    f"Reason: {exit_reason}"
+                )
+            except Exception:
+                pass
+
+            open_trade = None
+
+    # 2) Dynamic paper signal
     if trading_mode == "paper" and is_running:
-        # हर request पर बदलने वाला paper scanner
-        seed = f"{user['id']}-{primary}-{now.strftime('%H%M%S')}"
-        random.seed(seed)
+        random.seed(f"{user['id']}-{primary}-{now.strftime('%H%M%S')}")
 
         adx = round(random.uniform(18, 42), 1)
         volume_ratio = round(random.uniform(0.75, 2.40), 2)
@@ -108,7 +187,7 @@ def get_signal(authorization: str = Header(None)):
         signal = "BUY_" + side if score >= entry_threshold else "PAPER_WAITING"
         status = "PAPER_RUNNING"
 
-        # अगर score pass हो और open trade nahi hai, तो paper trade create karo
+        # Fresh open trade check
         open_trade = conn.execute(
             """SELECT id FROM paper_trades
                WHERE user_id=? AND status='OPEN'
@@ -118,7 +197,6 @@ def get_signal(authorization: str = Header(None)):
 
         if score >= entry_threshold and not open_trade:
             entry_price = round(random.uniform(90, 180), 2)
-            qty = 50 if primary == "NIFTY" else 15
 
             conn.execute(
                 """INSERT INTO paper_trades
@@ -131,7 +209,7 @@ def get_signal(authorization: str = Header(None)):
                     entry_price,
                     qty,
                     f"Paper entry score {score}/{entry_threshold}",
-                    datetime.utcnow().isoformat()
+                    now.isoformat()
                 )
             )
 
@@ -144,7 +222,7 @@ def get_signal(authorization: str = Header(None)):
                      last_signal=excluded.last_signal,
                      total_trades=bot_status.total_trades + 1,
                      updated_at=excluded.updated_at""",
-                (user["id"], signal, datetime.utcnow().isoformat())
+                (user["id"], signal, now.isoformat())
             )
 
             conn.commit()
@@ -152,10 +230,16 @@ def get_signal(authorization: str = Header(None)):
             try:
                 notify_user(
                     user["id"],
-                    f"📝 <b>Paper Trade Entry</b>\n"
-                    f"Symbol: {symbol}\n"
-                    f"Side: {side}\n"
-                    f"Entry: ₹{entry_price}\n"
+                    f"📝 <b>Paper Trade Entry</b>
+"
+                    f"Symbol: {symbol}
+"
+                    f"Side: {side}
+"
+                    f"Qty: {qty}
+"
+                    f"Entry: ₹{entry_price}
+"
                     f"Score: {score}/{entry_threshold}"
                 )
             except Exception:
@@ -173,11 +257,17 @@ def get_signal(authorization: str = Header(None)):
         base_score = adx_score = volume_score = mtf_score = regime_score = 0
 
     total_trades = 0
+    total_pnl = 0
     try:
         total_trades = conn.execute(
             "SELECT COUNT(*) AS c FROM paper_trades WHERE user_id=?",
             (user["id"],)
         ).fetchone()["c"]
+
+        total_pnl = conn.execute(
+            "SELECT COALESCE(SUM(pnl),0) AS p FROM paper_trades WHERE user_id=?",
+            (user["id"],)
+        ).fetchone()["p"]
     except Exception:
         pass
 
@@ -211,9 +301,11 @@ def get_signal(authorization: str = Header(None)):
         "paper_capital": paper_capital,
         "primary_instrument": primary,
         "enabled_instruments": enabled,
+        "qty": qty,
         "total_trades": total_trades,
+        "total_pnl": round(float(total_pnl or 0), 2),
         "updated_at": datetime.utcnow().isoformat(),
-        "message": "Paper dynamic signal"
+        "message": "Paper dynamic signal with exit engine"
     }
 
 
