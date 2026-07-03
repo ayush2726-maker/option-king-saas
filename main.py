@@ -11,6 +11,7 @@ from user_panel.routes import router as user_panel_router
 from paper.routes import router as paper_router
 
 from strategy.routes import router as strategy_router
+from bot.market_routes import router as market_router
 from backtest.routes import router as backtest_router
 import sqlite3
 import os
@@ -83,6 +84,7 @@ app.include_router(user_panel_router)
 app.include_router(paper_router)
 
 app.include_router(strategy_router)
+app.include_router(market_router)
 app.include_router(backtest_router)
 
 
