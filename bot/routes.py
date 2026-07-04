@@ -138,6 +138,12 @@ def ensure_tables(conn):
         )
     """)
 
+    for col, coltype in [("sl_price","REAL"), ("target_price","REAL"), ("token","TEXT"), ("exch_seg","TEXT"), ("expiry","TEXT"), ("strike","REAL")]:
+        try:
+            conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {coltype}")
+        except Exception:
+            pass
+
     conn.commit()
 
 
