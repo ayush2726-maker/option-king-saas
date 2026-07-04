@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Header
 from database import get_db
 from auth.routes import get_current_user
+from auth.utils import decrypt_credential
 from bot.strategy import is_hero_window_active
 from telegram.routes import notify_user
 from datetime import datetime
@@ -8,7 +9,7 @@ import json
 import random
 
 try:
-    from bot.angel_fetcher import start_user_bot, stop_user_bot
+    from bot.angel_fetcher import start_user_bot, stop_user_bot, get_user_bot_state
 except Exception:
     def start_user_bot(user_id, creds):
         return {"success": False, "message": "Live engine unavailable"}
@@ -342,75 +343,54 @@ def get_signal(authorization: str = Header(None)):
 
             open_trade = None
 
-    # Dynamic paper signal
-    if trading_mode == "paper" and is_running:
-        random.seed(f"{user['id']}-{primary}-{now.strftime('%H%M%S')}")
+    # Dynamic signal - REAL ENGINE (TQU strategy.py) when broker connected
+    if is_running:
+        engine_state = get_user_bot_state(user["id"])
+        engine_ready = engine_state.get("strategy") == "TQU_ENHANCED"
 
-        adx = round(random.uniform(18, 42), 1)
-        volume_ratio = round(random.uniform(0.75, 2.40), 2)
-        mtf_ok = random.choice([True, True, True, False])
+        if engine_ready:
+            score = int(engine_state.get("score", 0))
+            adx = float(engine_state.get("adx", 0))
+            volume_ratio = float(engine_state.get("volume_ratio", 0))
+            mtf_ok = bool(engine_state.get("mtf_confirmed", False))
+            base_score = int(engine_state.get("base_score", 0))
+            adx_score = int(engine_state.get("adx_bonus", 0))
+            volume_score = int(engine_state.get("volume_bonus", 0))
+            mtf_score = int(engine_state.get("mtf_bonus", 0))
+            regime_score = int(engine_state.get("regime_score", 0))
+            side = engine_state.get("signal", "WAIT")
+            if side not in ("CE", "PE"):
+                side = "CE"
+            display_symbol, broker_symbol, strike, expiry = make_paper_option_symbol(primary, side)
+            symbol = display_symbol
 
-        base_score = random.choice([30, 35, 40])
-        adx_score = int(settings.get("adx_score", 20)) if adx >= adx_threshold else 0
-        volume_score = int(settings.get("volume_score", 20)) if volume_ratio >= volume_threshold else 0
-        mtf_score = int(settings.get("mtf_score", 10)) if mtf_ok else 0
-        regime_score = int(settings.get("regime_score", 10)) if random.random() > 0.25 else 0
+            if open_trade:
+                signal = "HOLD_" + str(open_trade["side"])
+            else:
+                signal = "READY_" + side if score >= entry_threshold else "WAITING"
 
-        score = min(100, base_score + adx_score + volume_score + mtf_score + regime_score)
+            status = "PAPER_RUNNING" if trading_mode == "paper" else "LIVE_RUNNING"
+            mtf = "OK" if mtf_ok else "WEAK"
 
-        side = "CE" if random.random() > 0.5 else "PE"
-        display_symbol, broker_symbol, strike, expiry = make_paper_option_symbol(primary, side)
-        symbol = display_symbol
-
-        if open_trade:
-            signal = "HOLD_" + str(open_trade["side"])
+            open_trade = conn.execute(
+                """SELECT id FROM paper_trades
+                   WHERE user_id=? AND status='OPEN'
+                   ORDER BY id DESC LIMIT 1""",
+                (user["id"],)
+            ).fetchone()
         else:
-            signal = "READY_" + side if score >= entry_threshold else "PAPER_WAITING"
-
-        status = "PAPER_RUNNING"
-
-        open_trade = conn.execute(
-            """SELECT id FROM paper_trades
-               WHERE user_id=? AND status='OPEN'
-               ORDER BY id DESC LIMIT 1""",
-            (user["id"],)
-        ).fetchone()
-
-        if False and score >= entry_threshold and not open_trade:
-            entry_price = round(random.uniform(90, 180), 2)
-
-            conn.execute(
-                """INSERT INTO paper_trades
-                   (user_id, symbol, side, entry_price, qty, pnl, status, reason, created_at)
-                   VALUES (?, ?, ?, ?, ?, 0, 'OPEN', ?, ?)""",
-                (
-                    user["id"],
-                    symbol,
-                    side,
-                    entry_price,
-                    qty,
-                    f"Paper entry score {score}/{entry_threshold}",
-                    now.isoformat()
-                )
-            )
-
-            add_trade_count(conn, user["id"], signal)
-
-            try:
-                msg = "\n".join([
-                    "📝 <b>Paper Trade Entry</b>",
-                    f"Symbol: {symbol}",
-                    f"Side: {side}",
-                    f"Qty: {qty}",
-                    f"Entry: ₹{entry_price}",
-                    f"Score: {score}/{entry_threshold}",
-                ])
-                notify_user(user["id"], msg)
-            except Exception:
-                pass
-
-        mtf = "OK" if mtf_ok else "WEAK"
-
+            score = 0
+            signal = "NO_DATA"
+            status = "CONNECT_BROKER_FOR_REAL_SIGNAL"
+            adx = 0
+            volume_ratio = 0
+            mtf = "WAITING"
+            base_score = 0
+            adx_score = 0
+            volume_score = 0
+            mtf_score = 0
+            regime_score = 0
+            symbol = None
     else:
         score = 0
         signal = "WAITING"
@@ -423,6 +403,7 @@ def get_signal(authorization: str = Header(None)):
         volume_score = 0
         mtf_score = 0
         regime_score = 0
+        symbol = None
 
     total_trades = 0
     total_pnl = 0
@@ -577,7 +558,26 @@ def bot_start(authorization: str = Header(None)):
 
     if trading_mode != "live":
         save_bot_status(conn, user["id"], 1, "PAPER_MODE")
+
+        broker = conn.execute(
+            "SELECT * FROM broker_credentials WHERE user_id=? AND is_active=1 ORDER BY last_connected DESC LIMIT 1",
+            (user["id"],)
+        ).fetchone()
         conn.close()
+
+        engine_note = "Broker connect karein real TQU signal ke liye."
+        if broker:
+            try:
+                creds = {
+                    "api_key": decrypt_credential(broker["api_key"]),
+                    "client_id": broker["client_id"],
+                    "password": decrypt_credential(broker["api_secret"]),
+                    "totp_secret": decrypt_credential(broker["totp_secret"]) if broker["totp_secret"] else None,
+                }
+                start_user_bot(user["id"], creds)
+                engine_note = "Real TQU signal engine started (paper mode - real orders OFF)."
+            except Exception:
+                pass
 
         try:
             msg = "\n".join([
@@ -594,7 +594,7 @@ def bot_start(authorization: str = Header(None)):
 
         return {
             "success": True,
-            "message": "Paper mode bot started. Real orders OFF.",
+            "message": f"Paper mode bot started. Real orders OFF. {engine_note}",
             "mode": "paper",
             "paper_capital": settings.get("paper_capital", 100000),
             "primary_instrument": settings.get("primary_instrument", "NIFTY"),
@@ -612,14 +612,13 @@ def bot_start(authorization: str = Header(None)):
         return {"success": False, "message": "Live mode ke liye pehle broker credentials save karo"}
 
     creds = {
-        "api_key": broker["api_key"],
+        "api_key": decrypt_credential(broker["api_key"]),
         "client_id": broker["client_id"],
-        "password": broker["api_secret"],
-        "totp_secret": broker["totp_secret"],
+        "password": decrypt_credential(broker["api_secret"]),
+        "totp_secret": decrypt_credential(broker["totp_secret"]) if broker["totp_secret"] else None,
     }
 
     res = start_user_bot(user["id"], creds)
-
     if isinstance(res, dict) and res.get("success"):
         try:
             notify_user(user["id"], "▶️ <b>LIVE Bot Started</b>\nReal orders enabled.")
@@ -627,7 +626,6 @@ def bot_start(authorization: str = Header(None)):
             pass
 
     return res
-
 
 @router.post("/stop")
 def bot_stop(authorization: str = Header(None)):
