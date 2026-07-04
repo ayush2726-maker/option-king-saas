@@ -124,8 +124,67 @@ def ensure_tables(conn):
         )
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS signal_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            price REAL,
+            score INTEGER,
+            signal TEXT,
+            adx REAL,
+            volume_ratio REAL,
+            engine_updated_at TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
     conn.commit()
 
+
+def log_signal_snapshot(conn, user_id: int, engine_state: dict):
+    """
+    Logs a new signal_history row only when the engine has produced a
+    genuinely new candle update (dedup via engine_updated_at), so charts
+    get real time-series data without flooding the table on every poll.
+    """
+    try:
+        engine_updated_at = engine_state.get("updated_at")
+        if not engine_updated_at:
+            return
+
+        last = conn.execute(
+            "SELECT engine_updated_at FROM signal_history WHERE user_id=? ORDER BY id DESC LIMIT 1",
+            (user_id,)
+        ).fetchone()
+
+        if last and last["engine_updated_at"] == engine_updated_at:
+            return
+
+        conn.execute(
+            """INSERT INTO signal_history
+               (user_id, price, score, signal, adx, volume_ratio, engine_updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                user_id,
+                float(engine_state.get("price", 0) or 0),
+                int(engine_state.get("score", 0) or 0),
+                str(engine_state.get("signal", "")),
+                float(engine_state.get("adx", 0) or 0),
+                float(engine_state.get("volume_ratio", 0) or 0),
+                engine_updated_at,
+            )
+        )
+
+        conn.execute(
+            """DELETE FROM signal_history WHERE user_id=? AND id NOT IN (
+                   SELECT id FROM signal_history WHERE user_id=? ORDER BY id DESC LIMIT 200
+               )""",
+            (user_id, user_id)
+        )
+
+        conn.commit()
+    except Exception:
+        pass
 
 def get_strategy_settings(conn, user_id: int):
     settings = dict(DEFAULT_SETTINGS)
@@ -350,6 +409,7 @@ def get_signal(authorization: str = Header(None)):
 
         if engine_ready:
             score = int(engine_state.get("score", 0))
+            log_signal_snapshot(conn, user["id"], engine_state)
             adx = float(engine_state.get("adx", 0))
             volume_ratio = float(engine_state.get("volume_ratio", 0))
             mtf_ok = bool(engine_state.get("mtf_confirmed", False))
@@ -1025,3 +1085,43 @@ def clear_paper_history(authorization: str = Header(None)):
         "message": "Paper trade history cleared. Telegram settings safe."
     }
 
+
+
+@router.get("/signal-history")
+def get_signal_history(authorization: str = Header(None), limit: int = 100):
+    """
+    Returns recent real signal snapshots (price, score, adx, volume_ratio)
+    for charting. Only populated when the real TQU engine has run
+    (i.e. broker connected and bot started).
+    """
+    user = get_current_user(authorization)
+    conn = get_db()
+    ensure_tables(conn)
+
+    rows = conn.execute(
+        """SELECT price, score, signal, adx, volume_ratio, created_at
+           FROM signal_history
+           WHERE user_id=?
+           ORDER BY id DESC LIMIT ?""",
+        (user["id"], limit)
+    ).fetchall()
+    conn.close()
+
+    points = [
+        {
+            "price": r["price"],
+            "score": r["score"],
+            "signal": r["signal"],
+            "adx": r["adx"],
+            "volume_ratio": r["volume_ratio"],
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    ]
+    points.reverse()  # oldest first, best for charts
+
+    return {
+        "success": True,
+        "count": len(points),
+        "points": points,
+    }
