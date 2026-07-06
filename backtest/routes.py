@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Header
 from database import get_db
 from auth.routes import get_current_user
+from auth.utils import decrypt_credential
 from datetime import datetime
-import random
 import json
 
 try:
@@ -11,8 +11,17 @@ except Exception:
     def notify_user(user_id, msg):
         return None
 
+try:
+    from bot.angel_fetcher import angel_login, calculate_indicators, INDEX_TOKENS, INDEX_EXCHANGE
+    from bot.strategy import get_full_signal
+    ENGINE_AVAILABLE = True
+except Exception:
+    ENGINE_AVAILABLE = False
+
 
 router = APIRouter(prefix="/backtest", tags=["Backtest"])
+
+LOT_SIZES = {"NIFTY": 65, "BANKNIFTY": 30, "SENSEX": 20}
 
 
 def ensure_backtest_table(conn):
@@ -52,6 +61,160 @@ def ensure_backtest_table(conn):
     conn.commit()
 
 
+def is_weekend(date_str):
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        return d.weekday() >= 5
+    except Exception:
+        return False
+
+
+def run_realistic_day_backtest(obj, instrument, date_str, capital, entry_threshold, sl_percent, target_percent):
+    token = INDEX_TOKENS.get(instrument, "26000")
+    exchange = INDEX_EXCHANGE.get(instrument, "NSE")
+    qty = LOT_SIZES.get(instrument, 65)
+
+    day = datetime.strptime(date_str, "%Y-%m-%d")
+    from_dt = day.replace(hour=9, minute=15, second=0, microsecond=0)
+    to_dt = day.replace(hour=15, minute=30, second=0, microsecond=0)
+
+    params = {
+        "exchange": exchange,
+        "symboltoken": token,
+        "interval": "FIVE_MINUTE",
+        "fromdate": from_dt.strftime("%Y-%m-%d %H:%M"),
+        "todate": to_dt.strftime("%Y-%m-%d %H:%M"),
+    }
+
+    try:
+        data = obj.getCandleData(params)
+    except Exception as e:
+        return {"success": False, "message": f"Historical data fetch failed: {str(e)[:150]}"}
+
+    rows = data.get("data", []) if isinstance(data, dict) else []
+    if not rows:
+        return {"success": False, "message": "No data found for this date (market holiday or no historical data)."}
+
+    import pandas as pd
+    df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume"])
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna().reset_index(drop=True)
+
+    if len(df) < 30:
+        return {"success": False, "message": "Insufficient candle data for this date."}
+
+    trades = []
+    open_trade = None
+    trade_no = 0
+
+    for i in range(28, len(df)):
+        window = df.iloc[:i + 1].copy()
+        result = calculate_indicators(window)
+        if result is None:
+            continue
+        wdf, trend = result
+        last = wdf.iloc[-1]
+        c1 = wdf.iloc[-3] if len(wdf) >= 3 else wdf.iloc[-1]
+        c2 = wdf.iloc[-2] if len(wdf) >= 2 else wdf.iloc[-1]
+
+        price = float(last["close"])
+
+        if open_trade:
+            side = open_trade["side"]
+            entry = open_trade["entry_price"]
+            underlying_move_pct = (price - open_trade["entry_spot"]) / open_trade["entry_spot"] * 100
+            if side == "PE":
+                underlying_move_pct = -underlying_move_pct
+            est_premium_move_pct = underlying_move_pct * 8
+            current_premium = max(0.5, entry * (1 + est_premium_move_pct / 100))
+
+            hit_target = current_premium >= entry * (1 + target_percent / 100)
+            hit_sl = current_premium <= entry * (1 - sl_percent / 100)
+            is_last_candle = (i == len(df) - 1)
+
+            if hit_target or hit_sl or is_last_candle:
+                exit_price = round(current_premium, 2)
+                pnl = round((exit_price - entry) * qty, 2)
+                reason = "TARGET" if hit_target else ("SL" if hit_sl else "DAY_END_EXIT")
+                trades.append({
+                    "trade_no": trade_no,
+                    "symbol": f"{instrument} {side}",
+                    "side": side,
+                    "qty": qty,
+                    "entry_price": entry,
+                    "exit_price": exit_price,
+                    "pnl": pnl,
+                    "reason": reason,
+                    "score": open_trade["score"],
+                    "entry_time": open_trade["entry_time"],
+                    "exit_time": str(last["time"]),
+                })
+                open_trade = None
+            continue
+
+        market_data = {
+            "price": price,
+            "vwap": float(last["VWAP"]),
+            "ema9": float(last["EMA9"]),
+            "ema21": float(last["EMA21"]),
+            "adx": float(last["ADX"]),
+            "volume_ratio": float(last["VOL_RATIO"]),
+            "supertrend_dir": str(last["ST_DIR"]),
+            "trend": trend,
+            "mtf_confirmed": trend != "SIDEWAYS",
+            "c1_bullish": float(c1["close"]) > float(c1["open"]),
+            "c2_bullish": float(c2["close"]) > float(c2["open"]),
+            "gap_day": False,
+            "orb_high": 0,
+            "orb_low": 0,
+            "atr": float(last["ATR"]),
+        }
+
+        signal_data = get_full_signal(market_data)
+
+        if signal_data["trade_allowed"] and signal_data["signal"] in ("CE", "PE") and signal_data["score"] >= entry_threshold:
+            trade_no += 1
+            atr = market_data["atr"]
+            est_entry_premium = round(max(20, atr * 6), 2)
+            open_trade = {
+                "side": signal_data["signal"],
+                "entry_price": est_entry_premium,
+                "entry_spot": price,
+                "score": signal_data["score"],
+                "entry_time": str(last["time"]),
+            }
+
+    total_pnl = round(sum(t["pnl"] for t in trades), 2)
+    wins = sum(1 for t in trades if t["pnl"] >= 0)
+    losses = len(trades) - wins
+    win_rate = round((wins / len(trades)) * 100, 2) if trades else 0
+
+    return {
+        "success": True,
+        "instrument": instrument,
+        "date": date_str,
+        "capital": capital,
+        "ending_capital": round(capital + total_pnl, 2),
+        "total_trades": len(trades),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "total_pnl": total_pnl,
+        "trades": trades,
+        "note": "Signal timing/score based on REAL historical index candles. Option premium is an ATR-based estimate since real historical option premiums aren't available from the broker's live scrip master.",
+        "summary": {
+            "trades": len(trades),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": win_rate,
+            "capital": capital,
+            "net_pnl": total_pnl,
+            "note": "Real signal timing (historical candles). Premium P&L is an estimate.",
+        }
+    }
+
+
 @router.post("/run")
 def run_backtest(body: dict, authorization: str = Header(None)):
     try:
@@ -61,7 +224,6 @@ def run_backtest(body: dict, authorization: str = Header(None)):
         ensure_backtest_table(conn)
 
         body = body or {}
-
         instrument = body.get("instrument") or body.get("primary_instrument") or "NIFTY"
         run_date = body.get("date") or body.get("run_date") or datetime.utcnow().date().isoformat()
         capital = float(body.get("capital") or body.get("paper_capital") or 100000)
@@ -69,104 +231,63 @@ def run_backtest(body: dict, authorization: str = Header(None)):
         sl_percent = float(body.get("sl_percent") or 12)
         target_percent = float(body.get("target_percent") or 24)
 
-        lot_sizes = {
-            "NIFTY": 65,
-            "BANKNIFTY": 30,
-            "SENSEX": 20
-        }
+        if is_weekend(run_date):
+            conn.close()
+            return {"success": False, "message": "Market holiday / weekend. No backtest for this date."}
 
-        qty = lot_sizes.get(instrument, 65)
+        if not ENGINE_AVAILABLE:
+            conn.close()
+            return {"success": False, "message": "Backtest engine unavailable on server."}
 
-        random.seed(f"{user['id']}-{instrument}-{run_date}-{datetime.utcnow().strftime('%H%M%S')}")
+        broker = conn.execute(
+            "SELECT * FROM broker_credentials WHERE user_id=? AND is_active=1 ORDER BY last_connected DESC LIMIT 1",
+            (user["id"],)
+        ).fetchone()
 
-        trades = []
-        pnl_total = 0.0
-        wins = 0
-        losses = 0
+        if not broker:
+            conn.close()
+            return {"success": False, "message": "Broker connect karein backtest ke liye (real historical candles chahiye)."}
 
-        for i in range(1, 7):
-            side = random.choice(["CE", "PE"])
-            entry = round(random.uniform(90, 180), 2)
-            result_type = random.choice(["TARGET", "SL", "TIME_EXIT", "TARGET", "SL"])
+        try:
+            creds = {
+                "api_key": decrypt_credential(broker["api_key"]),
+                "client_id": broker["client_id"],
+                "password": decrypt_credential(broker["api_secret"]),
+                "totp_secret": decrypt_credential(broker["totp_secret"]) if broker["totp_secret"] else None,
+            }
+            obj = angel_login(creds)
+        except Exception as e:
+            conn.close()
+            return {"success": False, "message": f"Broker login failed: {str(e)[:150]}"}
 
-            if result_type == "TARGET":
-                exit_price = round(entry * (1 + target_percent / 100), 2)
-            elif result_type == "SL":
-                exit_price = round(entry * (1 - sl_percent / 100), 2)
-            else:
-                exit_price = round(entry * random.uniform(0.94, 1.10), 2)
+        result = run_realistic_day_backtest(obj, instrument, run_date, capital, entry_score, sl_percent, target_percent)
 
-            pnl = round((exit_price - entry) * qty, 2)
-            pnl_total += pnl
-
-            if pnl >= 0:
-                wins += 1
-            else:
-                losses += 1
-
-            trades.append({
-                "trade_no": i,
-                "symbol": f"{instrument} BACKTEST {side}",
-                "side": side,
-                "qty": qty,
-                "entry_price": entry,
-                "exit_price": exit_price,
-                "pnl": pnl,
-                "reason": result_type,
-                "score": random.randint(max(1, entry_score - 5), 100)
-            })
-
-        win_rate = round((wins / len(trades)) * 100, 2) if trades else 0
-        ending_capital = round(capital + pnl_total, 2)
-
-        result = {
-            "success": True,
-            "instrument": instrument,
-            "date": run_date,
-            "capital": capital,
-            "ending_capital": ending_capital,
-            "entry_score": entry_score,
-            "sl_percent": sl_percent,
-            "target_percent": target_percent,
-            "qty": qty,
-            "total_trades": len(trades),
-            "wins": wins,
-            "losses": losses,
-            "win_rate": win_rate,
-            "total_pnl": round(pnl_total, 2),
-            "trades": trades,
-            "summary": f"{instrument} backtest complete: {len(trades)} trades, P&L Rs {round(pnl_total, 2)}, Win rate {win_rate}%"
-        }
+        if not result.get("success"):
+            conn.close()
+            return result
 
         conn.execute(
             """INSERT INTO backtest_runs
                (user_id, instrument, run_date, capital, entry_score, sl_percent, target_percent, result_json, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                user["id"],
-                instrument,
-                run_date,
-                capital,
-                entry_score,
-                sl_percent,
-                target_percent,
-                json.dumps(result),
+                user["id"], instrument, run_date, capital, entry_score,
+                sl_percent, target_percent, json.dumps(result),
                 datetime.utcnow().isoformat()
             )
         )
-
         conn.commit()
         conn.close()
 
         try:
             msg = "\n".join([
-                "📊 <b>Backtest Complete</b>",
+                "📊 <b>Backtest Complete (Real Signal)</b>",
                 f"Instrument: {instrument}",
                 f"Date: {run_date}",
-                f"Trades: {len(trades)}",
-                f"Wins/Losses: {wins}/{losses}",
-                f"Win Rate: {win_rate}%",
-                f"P&L: Rs {round(pnl_total, 2)}",
+                f"Trades: {result['total_trades']}",
+                f"Wins/Losses: {result['wins']}/{result['losses']}",
+                f"Win Rate: {result['win_rate']}%",
+                f"P&L: Rs {result['total_pnl']} (estimated premium)",
             ])
             notify_user(user["id"], msg)
         except Exception:
@@ -223,7 +344,7 @@ def backtest_history(authorization: str = Header(None)):
                 "losses": result.get("losses", 0),
                 "win_rate": result.get("win_rate", 0),
                 "total_pnl": result.get("total_pnl", 0),
-                "summary": result.get("summary", ""),
+                "summary": result.get("summary", {}),
                 "created_at": d.get("created_at"),
                 "result": result
             })
