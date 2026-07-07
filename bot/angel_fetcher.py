@@ -372,3 +372,46 @@ def get_user_bot_state(user_id: int) -> dict:
         "signal": "WAITING",
         "score": 0,
     })
+
+
+# ── Lightweight LTP-only session (separate from full bot loop) ────
+SENSEX_TOKEN = "99919000"
+INDEX_TRADING_SYMBOLS = {"NIFTY": NIFTY_SYMBOL, "BANKNIFTY": BANK_SYMBOL, "SENSEX": "SENSEX"}
+
+_ltp_sessions = {}   # user_id -> SmartConnect obj
+_ltp_lock = threading.Lock()
+
+
+def _get_ltp_session(user_id, creds):
+    with _ltp_lock:
+        obj = _ltp_sessions.get(user_id)
+    if obj is not None:
+        return obj
+    obj = angel_login(creds)
+    with _ltp_lock:
+        _ltp_sessions[user_id] = obj
+    return obj
+
+
+def get_index_quotes(user_id, creds):
+    """Returns {"NIFTY": {"ltp":.., "status":"connected"}, ...}"""
+    results = {}
+    try:
+        obj = _get_ltp_session(user_id, creds)
+    except Exception as e:
+        return {sym: {"ltp": None, "status": "not_connected", "error": str(e)} for sym in INDEX_TOKENS}
+
+    for sym, token in INDEX_TOKENS.items():
+        exch = INDEX_EXCHANGE[sym]
+        tsym = INDEX_TRADING_SYMBOLS[sym]
+        try:
+            quote = obj.ltpData(exch, tsym, token)
+            if quote.get("status"):
+                results[sym] = {"ltp": float(quote["data"]["ltp"]), "status": "connected"}
+            else:
+                results[sym] = {"ltp": None, "status": "not_connected", "error": quote.get("message")}
+        except Exception as e:
+            with _ltp_lock:
+                _ltp_sessions.pop(user_id, None)
+            results[sym] = {"ltp": None, "status": "not_connected", "error": str(e)}
+    return results

@@ -60,9 +60,9 @@ class AngelOneBroker(BaseBroker):
         except Exception as e:
             return {"success":False,"message":str(e)}
 
-    def get_ltp(self, symbol, exchange="NFO"):
+    def get_ltp(self, symbol, token, exchange="NFO"):
         try:
-            data = self.smart_api.ltpData(exchange, symbol, "")
+            data = self.smart_api.ltpData(exchange, symbol, token)
             return {"success":True,"ltp":data["data"]["ltp"],"symbol":symbol}
         except Exception as e:
             return {"success":False,"message":str(e)}
