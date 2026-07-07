@@ -649,8 +649,8 @@ def bot_start(authorization: str = Header(None)):
                 }
                 start_user_bot(user["id"], creds)
                 engine_note = "Real TQU signal engine started (paper mode - real orders OFF)."
-            except Exception:
-                pass
+            except Exception as e:
+                engine_note = f"DEBUG_ERROR: {str(e)[:200]}"
 
         try:
             msg = "\n".join([
