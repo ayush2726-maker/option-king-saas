@@ -607,6 +607,12 @@ def get_signal(authorization: str = Header(None)):
     }
 
 
+@router.get("/debug-state")
+def debug_bot_state(authorization: str = Header(None)):
+    user = get_current_user(authorization)
+    from bot.angel_fetcher import get_user_bot_state
+    return get_user_bot_state(user["id"])
+
 @router.get("/hero-status")
 def get_hero_status(authorization: str = Header(None)):
     get_current_user(authorization)
