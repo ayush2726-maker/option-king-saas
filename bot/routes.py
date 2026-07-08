@@ -607,12 +607,6 @@ def get_signal(authorization: str = Header(None)):
     }
 
 
-@router.get("/debug-state")
-def debug_bot_state(authorization: str = Header(None)):
-    user = get_current_user(authorization)
-    from bot.angel_fetcher import get_user_bot_state
-    return get_user_bot_state(user["id"])
-
 @router.get("/hero-status")
 def get_hero_status(authorization: str = Header(None)):
     get_current_user(authorization)
@@ -650,7 +644,7 @@ def bot_start(authorization: str = Header(None)):
                 start_user_bot(user["id"], creds)
                 engine_note = "Real TQU signal engine started (paper mode - real orders OFF)."
             except Exception as e:
-                engine_note = f"DEBUG_ERROR: {str(e)[:200]}"
+                print(f"[bot/start] broker engine error: {e}")
 
         try:
             msg = "\n".join([
