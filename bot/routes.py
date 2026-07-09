@@ -647,8 +647,13 @@ def bot_start(authorization: str = Header(None)):
                     "password": decrypt_credential(broker["api_secret"]),
                     "totp_secret": decrypt_credential(broker["totp_secret"]) if broker["totp_secret"] else None,
                 }
-                start_user_bot(user["id"], creds)
-                engine_note = "Real TQU signal engine started (paper mode - real orders OFF)."
+                bname = broker["broker_name"]
+                if bname == "angelone":
+                    start_user_bot(user["id"], creds)
+                else:
+                    from bot.angel_fetcher import start_user_bot_multi
+                    start_user_bot_multi(user["id"], bname, creds)
+                engine_note = f"Real TQU signal engine started via {bname} (paper mode - real orders OFF)."
             except Exception as e:
                 print(f"[bot/start] broker engine error: {e}")
 
@@ -691,7 +696,11 @@ def bot_start(authorization: str = Header(None)):
         "totp_secret": decrypt_credential(broker["totp_secret"]) if broker["totp_secret"] else None,
     }
 
-    res = start_user_bot(user["id"], creds)
+    if broker["broker_name"] == "angelone":
+        res = start_user_bot(user["id"], creds)
+    else:
+        from bot.angel_fetcher import start_user_bot_multi
+        res = start_user_bot_multi(user["id"], broker["broker_name"], creds)
     if isinstance(res, dict) and res.get("success"):
         try:
             notify_user(user["id"], "▶️ <b>LIVE Bot Started</b>\nReal orders enabled.")

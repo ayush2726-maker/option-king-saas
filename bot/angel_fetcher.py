@@ -415,3 +415,141 @@ def get_index_quotes(user_id, creds):
                 _ltp_sessions.pop(user_id, None)
             results[sym] = {"ltp": None, "status": "not_connected", "error": str(e)}
     return results
+
+
+# ── Multi-broker index config (for signal-engine candle fetching) ──
+from bot.brokers.factory import create_broker
+
+ZERODHA_INDEX_TOKENS = {"NIFTY": 256265, "BANKNIFTY": 260105, "SENSEX": 265}
+ZERODHA_INDEX_EXCHANGE = {"NIFTY": "NSE", "BANKNIFTY": "NSE", "SENSEX": "BSE"}
+UPSTOX_INDEX_KEYS = {"NIFTY": "NSE_INDEX|Nifty 50", "BANKNIFTY": "NSE_INDEX|Nifty Bank", "SENSEX": "BSE_INDEX|SENSEX"}
+
+
+def get_candles_multi(broker_name, broker_obj, underlying):
+    """Fetch and normalize candles (columns: time,open,high,low,close,volume) for non-Angel brokers."""
+    import pandas as pd
+    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    from_dt = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+
+    if broker_name == "zerodha":
+        token = ZERODHA_INDEX_TOKENS[underlying]
+        res = broker_obj.get_candles(
+            symbol=token, interval="minute",
+            from_date=from_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            to_date=now_ist.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        if not res.get("success"):
+            raise RuntimeError(res.get("message", "Zerodha candle fetch failed"))
+        rows = res.get("candles", [])
+        if not rows:
+            return None
+        df = pd.DataFrame(rows)
+        df = df.rename(columns={"date": "time"})[["time", "open", "high", "low", "close", "volume"]]
+
+    elif broker_name == "upstox":
+        key = UPSTOX_INDEX_KEYS[underlying]
+        res = broker_obj.get_candles(
+            symbol=key, interval="1m",
+            from_date=now_ist.strftime("%Y-%m-%d"),
+            to_date=from_dt.strftime("%Y-%m-%d"),
+        )
+        if not res.get("success"):
+            raise RuntimeError(res.get("message", "Upstox candle fetch failed"))
+        rows = res.get("candles", [])
+        if not rows:
+            return None
+        df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume", "oi"])
+        df = df[["time", "open", "high", "low", "close", "volume"]]
+        df = df.iloc[::-1].reset_index(drop=True)  # Upstox returns newest-first
+    else:
+        raise ValueError(f"get_candles_multi: unsupported broker {broker_name}")
+
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna()
+    return df if not df.empty else None
+
+
+def run_user_bot_multi(user_id: int, broker_name: str, creds: dict, state: dict):
+    """Generalized bot loop for Zerodha/Upstox (signal generation only, no real-premium paper trade)."""
+    obj = None
+    while state.get("running"):
+        try:
+            if obj is None:
+                obj = create_broker(broker_name, creds["client_id"], creds["api_key"], creds["password"], creds.get("totp_secret"))
+                login_result = obj.login()
+                if not login_result.get("success"):
+                    raise RuntimeError(login_result.get("message", "Login failed"))
+                state["status"] = "LOGGED_IN"
+
+            settings = _read_settings(user_id)
+            underlying = settings.get("primary_instrument", "NIFTY")
+            if underlying not in INDEX_TOKENS:
+                underlying = "NIFTY"
+
+            df = get_candles_multi(broker_name, obj, underlying)
+            if df is None or len(df) < 28:
+                state["status"] = "WAITING_CANDLES"
+                time.sleep(30)
+                continue
+
+            result = calculate_indicators(df)
+            if result is None:
+                time.sleep(30)
+                continue
+
+            df, trend = result
+            last = df.iloc[-2]
+            c1 = df.iloc[-3]
+            c2 = df.iloc[-2]
+
+            market_data = {
+                "price": float(last["close"]),
+                "vwap": float(last["VWAP"]),
+                "ema9": float(last["EMA9"]),
+                "ema21": float(last["EMA21"]),
+                "adx": float(last["ADX"]),
+                "volume_ratio": float(last["VOL_RATIO"]),
+                "supertrend_dir": str(last["ST_DIR"]),
+                "trend": trend,
+                "mtf_confirmed": trend != "SIDEWAYS",
+                "c1_bullish": float(c1["close"]) > float(c1["open"]),
+                "c2_bullish": float(c2["close"]) > float(c2["open"]),
+                "gap_day": False,
+                "orb_high": 0,
+                "orb_low": 0,
+                "atr": float(last["ATR"]),
+            }
+
+            signal_data = get_full_signal(market_data)
+            hero = is_hero_window_active()
+
+            state.update({
+                **signal_data,
+                "hero": hero,
+                "price": market_data["price"],
+                "underlying": underlying,
+                "status": "RUNNING",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+        except Exception as e:
+            obj = None
+            state["status"] = f"ERROR: {str(e)[:100]}"
+            time.sleep(60)
+
+        time.sleep(60)
+
+
+def start_user_bot_multi(user_id: int, broker_name: str, creds: dict) -> dict:
+    with _lock:
+        if user_id in _user_bots and _user_bots[user_id].get("running"):
+            return {"success": False, "message": "Bot already running"}
+        state = {
+            "running": True, "status": "STARTING", "signal": "WAITING",
+            "score": 0, "user_id": user_id, "broker": broker_name,
+        }
+        _user_bots[user_id] = state
+        t = threading.Thread(target=run_user_bot_multi, args=(user_id, broker_name, creds, state), daemon=True)
+        t.start()
+        return {"success": True, "message": f"Bot started ({broker_name})"}
