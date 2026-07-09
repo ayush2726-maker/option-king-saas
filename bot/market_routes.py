@@ -92,7 +92,8 @@ def market_status(authorization: str = Header(None)):
             "ltp": q.get("ltp"),
             "change": None,
             "change_percent": None,
-            "status": status
+            "status": status,
+            "error": q.get("error")
         })
 
     message = "Live feed connected" if feed_connected else "Live feed not connected"
