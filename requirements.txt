@@ -18,5 +18,3 @@ pyotp==2.9.0
 smartapi-python==1.3.4
 websocket-client==1.8.0
 kiteconnect==5.0.1
-kiteconnect==5.0.1
-kiteconnect==5.0.1
