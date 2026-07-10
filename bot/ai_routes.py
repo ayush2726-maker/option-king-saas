@@ -1,7 +1,7 @@
 from datetime import datetime, timezone, timedelta
 import hmac
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Body, Header, HTTPException
 
@@ -87,7 +87,7 @@ def _user_snapshot(user_id: int) -> Dict[str, Any]:
     }
 
 
-def _require_personal_ai_key(x_ai_key: str | None) -> None:
+def _require_personal_ai_key(x_ai_key: Optional[str]) -> None:
     expected = os.getenv("OKAI_AI_API_KEY", "").strip()
     if not expected:
         raise HTTPException(status_code=503, detail="OKAI_AI_API_KEY is not configured on Railway")
@@ -110,7 +110,7 @@ def ai_health():
 @router.post("/ai/predict")
 def shared_ai_predict(
     snapshot: Dict[str, Any] = Body(...),
-    x_ai_key: str | None = Header(None, alias="X-AI-Key"),
+    x_ai_key: Optional[str] = Header(None, alias="X-AI-Key"),
 ):
     """Prediction endpoint used by the personal bot.
 
