@@ -12,6 +12,7 @@ from paper.routes import router as paper_router
 
 from strategy.routes import router as strategy_router
 from bot.market_routes import router as market_router
+from bot.ai_routes import router as ai_router
 from backtest.routes import router as backtest_router
 import sqlite3
 import os
@@ -79,6 +80,7 @@ app.include_router(broker_router)
 app.include_router(subscription_router)
 app.include_router(admin_router)
 app.include_router(bot_router)
+app.include_router(ai_router)
 app.include_router(telegram_router)
 app.include_router(user_panel_router)
 app.include_router(paper_router)
@@ -131,6 +133,7 @@ def admin_panel():
 @app.get("/signup")
 def signup_page():
     return FileResponse(os.path.join(os.path.dirname(__file__), "signup.html"))
+
 
 @app.get("/join")
 def join_page():
