@@ -448,7 +448,11 @@ def get_signal(authorization: str = Header(None)):
         else:
             score = 0
             signal = "NO_DATA"
-            status = "CONNECT_BROKER_FOR_REAL_SIGNAL"
+            _broker_check = conn.execute(
+                "SELECT id FROM broker_credentials WHERE user_id=? AND is_active=1 ORDER BY last_connected DESC LIMIT 1",
+                (user["id"],)
+            ).fetchone()
+            status = "ENGINE_WARMING_UP" if _broker_check else "CONNECT_BROKER_FOR_REAL_SIGNAL"
             adx = 0
             volume_ratio = 0
             mtf = "WAITING"
