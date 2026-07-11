@@ -47,17 +47,24 @@ class UpstoxBroker(BaseBroker):
 
     def get_ltp(self, symbol, exchange="NFO"):
         try:
-            inst = f"NSE_FO|{symbol}"
+            inst = symbol if "|" in symbol else f"NSE_FO|{symbol}"
             r = requests.get(f"{self.BASE_URL}/market-quote/ltp", params={"instrument_key":inst}, headers=self._h(), timeout=10)
-            ltp = r.json()["data"][inst]["last_price"]
-            return {"success":True,"ltp":ltp,"symbol":symbol}
+            data = r.json().get("data", {})
+            key_variant = inst.replace("|", ":")
+            entry = data.get(inst) or data.get(key_variant)
+            if not entry:
+                entry = next(iter(data.values()), None)
+            if not entry:
+                return {"success":False,"message":f"No LTP data: {r.text[:200]}"}
+            return {"success":True,"ltp":entry["last_price"],"symbol":symbol}
         except Exception as e:
             return {"success":False,"message":str(e)}
 
     def get_candles(self, symbol, interval, from_date, to_date, exchange="NFO"):
         try:
             m = {"1m":"1minute","5m":"5minute","15m":"15minute","1h":"60minute","1d":"1day"}
-            r = requests.get(f"{self.BASE_URL}/historical-candle/NSE_FO|{symbol}/{m.get(interval,'5minute')}/{to_date}/{from_date}", headers=self._h(), timeout=15)
+            inst = symbol if "|" in symbol else f"NSE_FO|{symbol}"
+            r = requests.get(f"{self.BASE_URL}/historical-candle/{inst}/{m.get(interval,'5minute')}/{to_date}/{from_date}", headers=self._h(), timeout=15)
             return {"success":True,"candles":r.json().get("data",{}).get("candles",[])}
         except Exception as e:
             return {"success":False,"message":str(e)}
