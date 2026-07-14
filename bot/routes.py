@@ -647,6 +647,39 @@ def debug_candles(authorization: str = Header(None)):
     except Exception as e:
         return {"stage": "exception", "error": str(e)}
 
+@router.get("/debug-candles2")
+def debug_candles2(authorization: str = Header(None)):
+    user = get_current_user(authorization)
+    conn = get_db()
+    cred = conn.execute(
+        "SELECT * FROM broker_credentials WHERE user_id=? AND is_active=1 ORDER BY last_connected DESC LIMIT 1",
+        (user["id"],)
+    ).fetchone()
+    conn.close()
+    if not cred:
+        return {"error": "no broker"}
+    from bot.brokers.factory import create_broker
+    from bot.angel_fetcher import get_candles_multi
+    creds = {
+        "client_id": cred["client_id"],
+        "api_key": decrypt_credential(cred["api_key"]),
+        "password": decrypt_credential(cred["api_secret"]),
+        "totp_secret": decrypt_credential(cred["totp_secret"]) if cred["totp_secret"] else None,
+    }
+    bname = cred["broker_name"]
+    try:
+        obj = create_broker(bname, creds["client_id"], creds["api_key"], creds["password"], creds.get("totp_secret"))
+        login_result = obj.login()
+        if not login_result.get("success"):
+            return {"stage": "login", "result": login_result}
+        df = get_candles_multi(bname, obj, "NIFTY")
+        if df is None:
+            return {"stage": "df", "result": "df is None"}
+        return {"stage": "df", "len": len(df), "head": df.head(3).to_dict(orient="records"), "tail": df.tail(3).to_dict(orient="records")}
+    except Exception as e:
+        import traceback
+        return {"stage": "exception", "error": str(e), "trace": traceback.format_exc()[-1500:]}
+
 @router.get("/hero-status")
 def get_hero_status(authorization: str = Header(None)):
     get_current_user(authorization)
