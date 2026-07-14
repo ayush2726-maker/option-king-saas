@@ -617,6 +617,36 @@ def debug_bot_state(authorization: str = Header(None)):
     from bot.angel_fetcher import get_user_bot_state
     return get_user_bot_state(user["id"])
 
+@router.get("/debug-candles")
+def debug_candles(authorization: str = Header(None)):
+    user = get_current_user(authorization)
+    conn = get_db()
+    cred = conn.execute(
+        "SELECT * FROM broker_credentials WHERE user_id=? AND is_active=1 ORDER BY last_connected DESC LIMIT 1",
+        (user["id"],)
+    ).fetchone()
+    conn.close()
+    if not cred:
+        return {"error": "no broker"}
+    from bot.brokers.factory import create_broker
+    from bot.angel_fetcher import get_candles_multi
+    creds = {
+        "client_id": cred["client_id"],
+        "api_key": decrypt_credential(cred["api_key"]),
+        "password": decrypt_credential(cred["api_secret"]),
+        "totp_secret": decrypt_credential(cred["totp_secret"]) if cred["totp_secret"] else None,
+    }
+    bname = cred["broker_name"]
+    try:
+        obj = create_broker(bname, creds["client_id"], creds["api_key"], creds["password"], creds.get("totp_secret"))
+        login_result = obj.login()
+        if not login_result.get("success"):
+            return {"stage": "login", "result": login_result}
+        raw = obj.get_candles(symbol="NSE_INDEX|Nifty 50", interval="1m", from_date="2026-07-13", to_date="2026-07-13")
+        return {"stage": "candles", "raw": raw}
+    except Exception as e:
+        return {"stage": "exception", "error": str(e)}
+
 @router.get("/hero-status")
 def get_hero_status(authorization: str = Header(None)):
     get_current_user(authorization)
