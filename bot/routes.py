@@ -680,6 +680,40 @@ def debug_candles2(authorization: str = Header(None)):
         import traceback
         return {"stage": "exception", "error": str(e), "trace": traceback.format_exc()[-1500:]}
 
+@router.get("/debug-candles3")
+def debug_candles3(authorization: str = Header(None)):
+    user = get_current_user(authorization)
+    conn = get_db()
+    cred = conn.execute(
+        "SELECT * FROM broker_credentials WHERE user_id=? AND is_active=1 ORDER BY last_connected DESC LIMIT 1",
+        (user["id"],)
+    ).fetchone()
+    conn.close()
+    if not cred:
+        return {"error": "no broker"}
+    from bot.brokers.factory import create_broker
+    creds = {
+        "client_id": cred["client_id"],
+        "api_key": decrypt_credential(cred["api_key"]),
+        "password": decrypt_credential(cred["api_secret"]),
+        "totp_secret": decrypt_credential(cred["totp_secret"]) if cred["totp_secret"] else None,
+    }
+    bname = cred["broker_name"]
+    from datetime import datetime, timezone, timedelta
+    obj = create_broker(bname, creds["client_id"], creds["api_key"], creds["password"], creds.get("totp_secret"))
+    login_result = obj.login()
+    if not login_result.get("success"):
+        return {"stage": "login", "result": login_result}
+    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    from_dt = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    key = "NSE_INDEX|Nifty 50"
+    res = obj.get_candles(
+        symbol=key, interval="1m",
+        from_date=now_ist.strftime("%Y-%m-%d"),
+        to_date=from_dt.strftime("%Y-%m-%d"),
+    )
+    return {"res_success": res.get("success"), "res_message": res.get("message"), "num_candles": len(res.get("candles", [])), "from_date": now_ist.strftime("%Y-%m-%d"), "to_date": from_dt.strftime("%Y-%m-%d")}
+
 @router.get("/hero-status")
 def get_hero_status(authorization: str = Header(None)):
     get_current_user(authorization)
