@@ -342,6 +342,40 @@ def run_backtest(body: dict, authorization: str = Header(None)):
         }
 
 
+@router.get("/debug-fetch")
+def debug_fetch(authorization: str = Header(None), instrument: str = "NIFTY", date: str = "2026-07-13"):
+    user = get_current_user(authorization)
+    conn = get_db()
+    broker = conn.execute(
+        "SELECT * FROM broker_credentials WHERE user_id=? AND is_active=1 ORDER BY last_connected DESC LIMIT 1",
+        (user["id"],)
+    ).fetchone()
+    conn.close()
+    if not broker:
+        return {"error": "no broker"}
+    broker_name = broker["broker_name"]
+    creds = {
+        "api_key": decrypt_credential(broker["api_key"]),
+        "client_id": broker["client_id"],
+        "password": decrypt_credential(broker["api_secret"]),
+        "totp_secret": decrypt_credential(broker["totp_secret"]) if broker["totp_secret"] else None,
+    }
+    try:
+        if broker_name == "angelone":
+            obj = angel_login(creds)
+        else:
+            obj = create_broker(broker_name, creds["client_id"], creds["api_key"], creds["password"], creds.get("totp_secret"))
+            lr = obj.login()
+            if not lr.get("success"):
+                return {"stage": "login", "result": lr}
+        df = fetch_backtest_candles(broker_name, obj, instrument, date)
+        if df is None:
+            return {"stage": "fetch", "result": "df is None", "broker": broker_name}
+        return {"stage": "fetch", "len": len(df), "broker": broker_name}
+    except Exception as e:
+        import traceback
+        return {"stage": "exception", "error": str(e), "trace": traceback.format_exc()[-1200:]}
+
 @router.get("/history")
 def backtest_history(authorization: str = Header(None)):
     try:
