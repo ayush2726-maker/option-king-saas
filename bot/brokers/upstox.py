@@ -62,10 +62,16 @@ class UpstoxBroker(BaseBroker):
 
     def get_candles(self, symbol, interval, from_date, to_date, exchange="NFO"):
         try:
+            from datetime import datetime
             m = {"1m":"1minute","5m":"5minute","15m":"15minute","1h":"60minute","1d":"1day"}
             inst = symbol if "|" in symbol else f"NSE_FO|{symbol}"
-            r = requests.get(f"{self.BASE_URL}/historical-candle/{inst}/{m.get(interval,'5minute')}/{to_date}/{from_date}", headers=self._h(), timeout=15)
-            return {"success":True,"candles":r.json().get("data",{}).get("candles",[])}
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if to_date == today_str or from_date == today_str:
+                r = requests.get(f"{self.BASE_URL}/historical-candle/intraday/{inst}/{m.get(interval,'5minute')}", headers=self._h(), timeout=15)
+            else:
+                r = requests.get(f"{self.BASE_URL}/historical-candle/{inst}/{m.get(interval,'5minute')}/{to_date}/{from_date}", headers=self._h(), timeout=15)
+            data = r.json()
+            return {"success":True,"candles":data.get("data",{}).get("candles",[]),"raw_status":data.get("status")}
         except Exception as e:
             return {"success":False,"message":str(e)}
 
