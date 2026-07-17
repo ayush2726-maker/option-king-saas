@@ -12,8 +12,12 @@ except Exception:
         return None
 
 try:
-    from bot.angel_fetcher import angel_login, calculate_indicators, INDEX_TOKENS, INDEX_EXCHANGE
+    from bot.angel_fetcher import (
+        angel_login, calculate_indicators, INDEX_TOKENS, INDEX_EXCHANGE,
+        ZERODHA_INDEX_TOKENS, ZERODHA_INDEX_EXCHANGE, UPSTOX_INDEX_KEYS,
+    )
     from bot.strategy import get_full_signal
+    from bot.brokers.factory import create_broker
     ENGINE_AVAILABLE = True
 except Exception:
     ENGINE_AVAILABLE = False
@@ -69,37 +73,63 @@ def is_weekend(date_str):
         return False
 
 
-def run_realistic_day_backtest(obj, instrument, date_str, capital, entry_threshold, sl_percent, target_percent):
-    token = INDEX_TOKENS.get(instrument, "26000")
-    exchange = INDEX_EXCHANGE.get(instrument, "NSE")
-    qty = LOT_SIZES.get(instrument, 65)
-
+def fetch_backtest_candles(broker_name, obj, instrument, date_str):
+    """Fetch a day's 5-min candles for any supported broker, normalized to time/open/high/low/close/volume."""
+    import pandas as pd
     day = datetime.strptime(date_str, "%Y-%m-%d")
     from_dt = day.replace(hour=9, minute=15, second=0, microsecond=0)
     to_dt = day.replace(hour=15, minute=30, second=0, microsecond=0)
 
-    params = {
-        "exchange": exchange,
-        "symboltoken": token,
-        "interval": "FIVE_MINUTE",
-        "fromdate": from_dt.strftime("%Y-%m-%d %H:%M"),
-        "todate": to_dt.strftime("%Y-%m-%d %H:%M"),
-    }
+    if broker_name == "angelone":
+        token = INDEX_TOKENS.get(instrument, "26000")
+        exchange = INDEX_EXCHANGE.get(instrument, "NSE")
+        params = {
+            "exchange": exchange, "symboltoken": token, "interval": "FIVE_MINUTE",
+            "fromdate": from_dt.strftime("%Y-%m-%d %H:%M"), "todate": to_dt.strftime("%Y-%m-%d %H:%M"),
+        }
+        data = obj.getCandleData(params)
+        rows = data.get("data", []) if isinstance(data, dict) else []
+        df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume"])
+
+    elif broker_name == "zerodha":
+        token = ZERODHA_INDEX_TOKENS.get(instrument)
+        res = obj.get_candles(
+            symbol=token, interval="5minute",
+            from_date=from_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            to_date=to_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        rows = res.get("candles", []) if res.get("success") else []
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df = df.rename(columns={"date": "time"})[["time", "open", "high", "low", "close", "volume"]]
+
+    elif broker_name == "upstox":
+        key = UPSTOX_INDEX_KEYS.get(instrument)
+        res = obj.get_candles(symbol=key, interval="5m", from_date=date_str, to_date=date_str)
+        rows = res.get("candles", []) if res.get("success") else []
+        df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume", "oi"]) if rows else pd.DataFrame()
+        if not df.empty:
+            df = df[["time", "open", "high", "low", "close", "volume"]].iloc[::-1].reset_index(drop=True)
+    else:
+        df = pd.DataFrame()
+
+    if df.empty:
+        return None
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna().reset_index(drop=True)
+
+
+def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, entry_threshold, sl_percent, target_percent):
+    qty = LOT_SIZES.get(instrument, 65)
 
     try:
-        data = obj.getCandleData(params)
+        df = fetch_backtest_candles(broker_name, obj, instrument, date_str)
     except Exception as e:
         return {"success": False, "message": f"Historical data fetch failed: {str(e)[:150]}"}
 
-    rows = data.get("data", []) if isinstance(data, dict) else []
-    if not rows:
+    if df is None or df.empty:
         return {"success": False, "message": "No data found for this date (market holiday or no historical data)."}
-
-    import pandas as pd
-    df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume"])
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna().reset_index(drop=True)
 
     if len(df) < 30:
         return {"success": False, "message": "Insufficient candle data for this date."}
@@ -248,6 +278,7 @@ def run_backtest(body: dict, authorization: str = Header(None)):
             conn.close()
             return {"success": False, "message": "Broker connect karein backtest ke liye (real historical candles chahiye)."}
 
+        broker_name = broker["broker_name"]
         try:
             creds = {
                 "api_key": decrypt_credential(broker["api_key"]),
@@ -255,12 +286,19 @@ def run_backtest(body: dict, authorization: str = Header(None)):
                 "password": decrypt_credential(broker["api_secret"]),
                 "totp_secret": decrypt_credential(broker["totp_secret"]) if broker["totp_secret"] else None,
             }
-            obj = angel_login(creds)
+            if broker_name == "angelone":
+                obj = angel_login(creds)
+            else:
+                obj = create_broker(broker_name, creds["client_id"], creds["api_key"], creds["password"], creds.get("totp_secret"))
+                login_result = obj.login()
+                if not login_result.get("success"):
+                    conn.close()
+                    return {"success": False, "message": f"Broker login failed: {login_result.get('message','')[:150]}"}
         except Exception as e:
             conn.close()
             return {"success": False, "message": f"Broker login failed: {str(e)[:150]}"}
 
-        result = run_realistic_day_backtest(obj, instrument, run_date, capital, entry_score, sl_percent, target_percent)
+        result = run_realistic_day_backtest(broker_name, obj, instrument, run_date, capital, entry_score, sl_percent, target_percent)
 
         if not result.get("success"):
             conn.close()
