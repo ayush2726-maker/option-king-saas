@@ -368,9 +368,12 @@ def debug_fetch(authorization: str = Header(None), instrument: str = "NIFTY", da
             lr = obj.login()
             if not lr.get("success"):
                 return {"stage": "login", "result": lr}
+        from bot.angel_fetcher import UPSTOX_INDEX_KEYS
+        key = UPSTOX_INDEX_KEYS.get(instrument)
+        raw_res = obj.get_candles(symbol=key, interval="5m", from_date=date, to_date=date) if broker_name == "upstox" else None
         df = fetch_backtest_candles(broker_name, obj, instrument, date)
         if df is None:
-            return {"stage": "fetch", "result": "df is None", "broker": broker_name}
+            return {"stage": "fetch", "result": "df is None", "broker": broker_name, "raw_res": raw_res}
         return {"stage": "fetch", "len": len(df), "broker": broker_name}
     except Exception as e:
         import traceback
