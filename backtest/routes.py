@@ -137,6 +137,7 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
     trades = []
     open_trade = None
     trade_no = 0
+    _score_log = []
 
     for i in range(28, len(df)):
         window = df.iloc[:i + 1].copy()
@@ -202,6 +203,7 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
         }
 
         signal_data = get_full_signal(market_data)
+        _score_log.append(signal_data.get("score", 0))
 
         if signal_data["trade_allowed"] and signal_data["signal"] in ("CE", "PE") and signal_data["score"] >= entry_threshold:
             trade_no += 1
@@ -232,6 +234,10 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
         "win_rate": win_rate,
         "total_pnl": total_pnl,
         "trades": trades,
+        "debug_max_score": max(_score_log) if _score_log else None,
+        "debug_avg_score": round(sum(_score_log)/len(_score_log), 1) if _score_log else None,
+        "debug_score_count": len(_score_log),
+        "debug_scores_over_60": sum(1 for s in _score_log if s >= 60),
         "note": "Signal timing/score based on REAL historical index candles. Option premium is an ATR-based estimate since real historical option premiums aren't available from the broker's live scrip master.",
         "summary": {
             "trades": len(trades),
