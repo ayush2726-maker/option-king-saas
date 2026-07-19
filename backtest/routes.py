@@ -13,7 +13,8 @@ except Exception:
 
 try:
     from bot.angel_fetcher import (
-        angel_login, calculate_indicators, INDEX_TOKENS, INDEX_EXCHANGE,
+        angel_login, calculate_indicators, calculate_orb_levels,
+        INDEX_TOKENS, INDEX_EXCHANGE,
         ZERODHA_INDEX_TOKENS, ZERODHA_INDEX_EXCHANGE, UPSTOX_INDEX_KEYS,
     )
     from bot.strategy import get_full_signal
@@ -139,6 +140,7 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
     trade_no = 0
     consecutive_losses = 0
     _score_log = []
+    _score_detail_log = []
 
     for i in range(28, len(df)):
         window = df.iloc[:i + 1].copy()
@@ -190,6 +192,8 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                 open_trade = None
             continue
 
+        orb_high, orb_low = calculate_orb_levels(wdf)
+
         market_data = {
             "price": price,
             "vwap": float(last["VWAP"]),
@@ -203,8 +207,8 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             "c1_bullish": float(c1["close"]) > float(c1["open"]),
             "c2_bullish": float(c2["close"]) > float(c2["open"]),
             "gap_day": False,
-            "orb_high": 0,
-            "orb_low": 0,
+            "orb_high": orb_high,
+            "orb_low": orb_low,
             "atr": float(last["ATR"]),
         }
 
@@ -213,6 +217,38 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             consecutive_losses=consecutive_losses,
         )
         _score_log.append(signal_data.get("score", 0))
+        _score_detail_log.append({
+            "time": str(last["time"]),
+            "candidate_signal": signal_data.get("candidate_signal"),
+            "final_signal": signal_data.get("signal"),
+            "score": signal_data.get("score", 0),
+            "base_score": signal_data.get("base_score", 0),
+            "ce_raw_score": signal_data.get("ce_raw_score", 0),
+            "pe_raw_score": signal_data.get("pe_raw_score", 0),
+            "adx": round(signal_data.get("adx", 0), 2),
+            "adx_bonus": signal_data.get("adx_bonus", 0),
+            "volume_ratio": round(
+                signal_data.get("volume_ratio", 0),
+                2,
+            ),
+            "volume_bonus": signal_data.get("volume_bonus", 0),
+            "mtf_bonus": signal_data.get("mtf_bonus", 0),
+            "orb_high": round(orb_high, 2),
+            "orb_low": round(orb_low, 2),
+            "ema_stretch_points": signal_data.get(
+                "ema_stretch_points",
+                0,
+            ),
+            "vwap_stretch_points": signal_data.get(
+                "vwap_stretch_points",
+                0,
+            ),
+            "chase_blocked": signal_data.get(
+                "chase_blocked",
+                False,
+            ),
+            "warnings": signal_data.get("warnings", []),
+        })
 
         if signal_data["trade_allowed"] and signal_data["signal"] in ("CE", "PE") and signal_data["score"] >= entry_threshold:
             trade_no += 1
@@ -231,6 +267,12 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
     losses = len(trades) - wins
     win_rate = round((wins / len(trades)) * 100, 2) if trades else 0
 
+    top_candidates = sorted(
+        _score_detail_log,
+        key=lambda row: row["score"],
+        reverse=True,
+    )[:10]
+
     return {
         "success": True,
         "instrument": instrument,
@@ -246,7 +288,45 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
         "debug_max_score": max(_score_log) if _score_log else None,
         "debug_avg_score": round(sum(_score_log)/len(_score_log), 1) if _score_log else None,
         "debug_score_count": len(_score_log),
-        "debug_scores_over_60": sum(1 for s in _score_log if s >= 60),
+        "debug_scores_over_60": sum(
+            1 for s in _score_log if s >= 60
+        ),
+        "debug_scores_over_70": sum(
+            1 for s in _score_log if s >= 70
+        ),
+        "debug_scores_over_80": sum(
+            1 for s in _score_log if s >= 80
+        ),
+        "debug_max_base_score": max(
+            (row["base_score"] for row in _score_detail_log),
+            default=None,
+        ),
+        "debug_max_adx": max(
+            (row["adx"] for row in _score_detail_log),
+            default=None,
+        ),
+        "debug_max_adx_bonus": max(
+            (row["adx_bonus"] for row in _score_detail_log),
+            default=None,
+        ),
+        "debug_max_volume_ratio": max(
+            (row["volume_ratio"] for row in _score_detail_log),
+            default=None,
+        ),
+        "debug_max_volume_bonus": max(
+            (row["volume_bonus"] for row in _score_detail_log),
+            default=None,
+        ),
+        "debug_max_mtf_bonus": max(
+            (row["mtf_bonus"] for row in _score_detail_log),
+            default=None,
+        ),
+        "debug_chase_block_count": sum(
+            1
+            for row in _score_detail_log
+            if row["chase_blocked"]
+        ),
+        "debug_top_candidates": top_candidates,
         "note": "Signal timing/score based on REAL historical index candles. Option premium is an ATR-based estimate since real historical option premiums aren't available from the broker's live scrip master.",
         "summary": {
             "trades": len(trades),

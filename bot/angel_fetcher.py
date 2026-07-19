@@ -49,6 +49,74 @@ def _read_settings(user_id):
     return defaults
 
 
+def calculate_orb_levels(
+    df,
+    start_minute: int = 9 * 60 + 15,
+    end_minute: int = 9 * 60 + 30,
+):
+    """
+    Calculate completed 09:15-09:30 IST opening-range high and low.
+
+    Returns (0.0, 0.0) until the ORB window is complete or when
+    candle timestamps cannot be parsed.
+    """
+    try:
+        import pandas as pd
+
+        if df is None or df.empty or "time" not in df.columns:
+            return 0.0, 0.0
+
+        times = pd.to_datetime(df["time"], errors="coerce")
+
+        try:
+            if times.dt.tz is not None:
+                local_times = times.dt.tz_convert("Asia/Kolkata")
+            else:
+                local_times = times
+        except (AttributeError, TypeError, ValueError):
+            # Handles mixed timezone-aware timestamp formats.
+            times = pd.to_datetime(
+                df["time"],
+                errors="coerce",
+                utc=True,
+            )
+            local_times = times.dt.tz_convert("Asia/Kolkata")
+
+        valid = local_times.notna()
+        if not valid.any():
+            return 0.0, 0.0
+
+        minutes = (
+            local_times.dt.hour * 60
+            + local_times.dt.minute
+        )
+
+        # Do not use a partially formed ORB.
+        if int(minutes[valid].max()) < end_minute:
+            return 0.0, 0.0
+
+        orb_mask = (
+            valid
+            & minutes.ge(start_minute)
+            & minutes.le(end_minute)
+        )
+        orb_df = df.loc[orb_mask]
+
+        if orb_df.empty:
+            return 0.0, 0.0
+
+        orb_high = float(orb_df["high"].max())
+        orb_low = float(orb_df["low"].min())
+
+        if orb_high <= 0 or orb_low <= 0:
+            return 0.0, 0.0
+
+        return orb_high, orb_low
+
+    except Exception:
+        return 0.0, 0.0
+
+
 def _get_consecutive_losses_today(user_id):
     """
     Return today's current consecutive losing-trade streak for this user.
@@ -337,6 +405,7 @@ def run_user_bot(user_id: int, creds: dict, state: dict):
             last = df.iloc[-2]
             c1   = df.iloc[-3]
             c2   = df.iloc[-2]
+            orb_high, orb_low = calculate_orb_levels(df)
 
             market_data = {
                 "price":         float(last["close"]),
@@ -351,8 +420,8 @@ def run_user_bot(user_id: int, creds: dict, state: dict):
                 "c1_bullish":    float(c1["close"]) > float(c1["open"]),
                 "c2_bullish":    float(c2["close"]) > float(c2["open"]),
                 "gap_day":       False,
-                "orb_high":      float(df[df["time"] <= df["time"].iloc[0] + "09:30"]["high"].max()) if len(df) > 5 else 0,
-                "orb_low":       0,
+                "orb_high":      orb_high,
+                "orb_low":       orb_low,
                 "atr":           float(last["ATR"]),
             }
 
@@ -558,6 +627,7 @@ def run_user_bot_multi(user_id: int, broker_name: str, creds: dict, state: dict)
             last = df.iloc[-2]
             c1 = df.iloc[-3]
             c2 = df.iloc[-2]
+            orb_high, orb_low = calculate_orb_levels(df)
 
             market_data = {
                 "price": float(last["close"]),
@@ -572,8 +642,8 @@ def run_user_bot_multi(user_id: int, broker_name: str, creds: dict, state: dict)
                 "c1_bullish": float(c1["close"]) > float(c1["open"]),
                 "c2_bullish": float(c2["close"]) > float(c2["open"]),
                 "gap_day": False,
-                "orb_high": 0,
-                "orb_low": 0,
+                "orb_high": orb_high,
+                "orb_low": orb_low,
                 "atr": float(last["ATR"]),
             }
 

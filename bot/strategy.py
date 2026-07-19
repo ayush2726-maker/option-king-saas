@@ -343,6 +343,9 @@ def get_full_signal(market_data: dict, consecutive_losses: int = 0) -> dict:
 
     return {
         "signal": signal,
+        "candidate_signal": base["signal"],
+        "ce_raw_score": base["ce_score"],
+        "pe_raw_score": base["pe_score"],
         "score": tqu["score"],
         "base_score": tqu["base_score"],
         "adx": adx,
