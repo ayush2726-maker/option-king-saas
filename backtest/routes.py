@@ -1034,7 +1034,14 @@ def _okai_run_auto_index_backtest(
     combined_trades = []
     combined_candidates = []
 
-    for instrument in _OKAI_AUTO_INSTRUMENTS:
+    for instrument_index, instrument in enumerate(
+        _OKAI_AUTO_INSTRUMENTS
+    ):
+        if instrument_index > 0:
+            # Avoid broker historical-candle burst limits.
+            import time as _okai_time
+            _okai_time.sleep(0.45)
+
         result = (
             _OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST(
                 broker_name,
@@ -1294,3 +1301,554 @@ def run_realistic_day_backtest(
         raw_result,
         capital,
     )
+
+
+# ============================================================
+# OKAI AUTO MONTHLY BACKTEST V1
+# Runs every weekday in a YYYY-MM month, compounds equity
+# day-to-day, skips holidays/no-data dates, and returns a
+# compact day-wise report for the mobile app.
+# ============================================================
+def _okai_month_weekdays(month_text):
+    import calendar
+
+    year_text, month_number_text = str(
+        month_text
+    ).split("-", 1)
+    year = int(year_text)
+    month_number = int(month_number_text)
+
+    if year < 2000 or year > 2100:
+        raise ValueError("Invalid year")
+    if month_number < 1 or month_number > 12:
+        raise ValueError("Invalid month")
+
+    last_day = calendar.monthrange(
+        year,
+        month_number,
+    )[1]
+
+    dates = []
+    for day_number in range(1, last_day + 1):
+        day = datetime(
+            year,
+            month_number,
+            day_number,
+        )
+        if day.weekday() < 5:
+            dates.append(
+                day.strftime("%Y-%m-%d")
+            )
+
+    return dates
+
+
+def _okai_month_drawdown(equity_curve):
+    if not equity_curve:
+        return {
+            "max_drawdown": 0.0,
+            "max_drawdown_percent": 0.0,
+        }
+
+    peak = float(equity_curve[0])
+    max_drawdown = 0.0
+    max_drawdown_percent = 0.0
+
+    for value in equity_curve:
+        equity = float(value)
+        if equity > peak:
+            peak = equity
+
+        drawdown = max(0.0, peak - equity)
+        drawdown_percent = (
+            drawdown / peak * 100.0
+            if peak > 0
+            else 0.0
+        )
+
+        max_drawdown = max(
+            max_drawdown,
+            drawdown,
+        )
+        max_drawdown_percent = max(
+            max_drawdown_percent,
+            drawdown_percent,
+        )
+
+    return {
+        "max_drawdown": round(
+            max_drawdown,
+            2,
+        ),
+        "max_drawdown_percent": round(
+            max_drawdown_percent,
+            2,
+        ),
+    }
+
+
+@router.post("/monthly")
+def run_monthly_backtest(
+    body: dict,
+    authorization: str = Header(None),
+):
+    import time as _okai_time
+
+    try:
+        user = get_current_user(authorization)
+        body = body or {}
+
+        month_text = str(
+            body.get("month")
+            or body.get("year_month")
+            or datetime.utcnow().strftime("%Y-%m")
+        ).strip()
+
+        instrument = str(
+            body.get("instrument")
+            or "AUTO"
+        ).upper()
+
+        if instrument not in (
+            "AUTO",
+            "NIFTY",
+            "BANKNIFTY",
+            "SENSEX",
+        ):
+            instrument = "AUTO"
+
+        starting_capital = float(
+            body.get("capital")
+            or body.get("paper_capital")
+            or 100000
+        )
+        entry_score = 82
+        sl_percent = 0.0
+        target_percent = 0.0
+
+        month_dates = _okai_month_weekdays(
+            month_text
+        )
+
+        conn = get_db()
+        ensure_backtest_table(conn)
+
+        broker = conn.execute(
+            """SELECT *
+               FROM broker_credentials
+               WHERE user_id=?
+                 AND is_active=1
+               ORDER BY last_connected DESC
+               LIMIT 1""",
+            (user["id"],),
+        ).fetchone()
+
+        if not broker:
+            conn.close()
+            return {
+                "success": False,
+                "message": (
+                    "Broker connect karein monthly "
+                    "backtest ke liye."
+                ),
+            }
+
+        broker_name = broker["broker_name"]
+
+        try:
+            creds = {
+                "api_key": decrypt_credential(
+                    broker["api_key"]
+                ),
+                "client_id": broker["client_id"],
+                "password": decrypt_credential(
+                    broker["api_secret"]
+                ),
+                "totp_secret": (
+                    decrypt_credential(
+                        broker["totp_secret"]
+                    )
+                    if broker["totp_secret"]
+                    else None
+                ),
+            }
+
+            if broker_name == "angelone":
+                obj = angel_login(creds)
+            else:
+                obj = create_broker(
+                    broker_name,
+                    creds["client_id"],
+                    creds["api_key"],
+                    creds["password"],
+                    creds.get("totp_secret"),
+                )
+                login_result = obj.login()
+
+                if not login_result.get(
+                    "success"
+                ):
+                    conn.close()
+                    return {
+                        "success": False,
+                        "message": (
+                            "Broker login failed: "
+                            + str(
+                                login_result.get(
+                                    "message",
+                                    "",
+                                )
+                            )[:150]
+                        ),
+                    }
+
+        except Exception as exc:
+            conn.close()
+            return {
+                "success": False,
+                "message": (
+                    "Broker login failed: "
+                    + str(exc)[:150]
+                ),
+            }
+
+        current_capital = starting_capital
+        day_results = []
+        all_trades = []
+        equity_curve = [starting_capital]
+
+        total_trades = 0
+        total_wins = 0
+        total_losses = 0
+        winning_days = 0
+        losing_days = 0
+        flat_days = 0
+        tested_days = 0
+        skipped_days = 0
+
+        for index, date_text in enumerate(
+            month_dates
+        ):
+            if index > 0:
+                # One AUTO day may make three historical
+                # candle requests, so keep a safe gap.
+                _okai_time.sleep(0.75)
+
+            raw_day = run_realistic_day_backtest(
+                broker_name,
+                obj,
+                instrument,
+                date_text,
+                current_capital,
+                entry_score,
+                sl_percent,
+                target_percent,
+            )
+
+            json_stats = {"non_finite": 0}
+            day = _json_safe(
+                raw_day,
+                json_stats,
+            )
+
+            if (
+                not isinstance(day, dict)
+                or not day.get("success")
+            ):
+                skipped_days += 1
+                day_results.append({
+                    "date": date_text,
+                    "status": "SKIPPED",
+                    "message": (
+                        day.get("message")
+                        if isinstance(day, dict)
+                        else "Invalid result"
+                    ),
+                    "capital_start": round(
+                        current_capital,
+                        2,
+                    ),
+                    "capital_end": round(
+                        current_capital,
+                        2,
+                    ),
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "pnl": 0.0,
+                })
+                continue
+
+            tested_days += 1
+
+            day_pnl = float(
+                day.get("total_pnl") or 0
+            )
+            day_trades = int(
+                day.get("total_trades") or 0
+            )
+            day_wins = int(
+                day.get("wins") or 0
+            )
+            day_losses = int(
+                day.get("losses") or 0
+            )
+            ending_capital = float(
+                day.get("ending_capital")
+                or current_capital + day_pnl
+            )
+
+            if day_pnl > 0:
+                winning_days += 1
+                day_status = "PROFIT"
+            elif day_pnl < 0:
+                losing_days += 1
+                day_status = "LOSS"
+            else:
+                flat_days += 1
+                day_status = "FLAT"
+
+            per_instrument = (
+                day.get("per_instrument")
+                if isinstance(
+                    day.get("per_instrument"),
+                    dict,
+                )
+                else {}
+            )
+
+            day_results.append({
+                "date": date_text,
+                "status": day_status,
+                "capital_start": round(
+                    current_capital,
+                    2,
+                ),
+                "capital_end": round(
+                    ending_capital,
+                    2,
+                ),
+                "trades": day_trades,
+                "wins": day_wins,
+                "losses": day_losses,
+                "win_rate": float(
+                    day.get("win_rate") or 0
+                ),
+                "pnl": round(day_pnl, 2),
+                "max_score": day.get(
+                    "debug_max_score"
+                ),
+                "per_instrument": (
+                    per_instrument
+                ),
+            })
+
+            for trade in day.get(
+                "trades",
+                [],
+            ):
+                trade_row = dict(trade)
+                trade_row["date"] = date_text
+                all_trades.append(trade_row)
+
+            current_capital = ending_capital
+            equity_curve.append(
+                current_capital
+            )
+
+            total_trades += day_trades
+            total_wins += day_wins
+            total_losses += day_losses
+
+        net_pnl = round(
+            current_capital
+            - starting_capital,
+            2,
+        )
+        win_rate = (
+            round(
+                total_wins
+                / total_trades
+                * 100,
+                2,
+            )
+            if total_trades
+            else 0
+        )
+        drawdown = _okai_month_drawdown(
+            equity_curve
+        )
+
+        result = {
+            "success": True,
+            "period": "MONTHLY",
+            "month": month_text,
+            "instrument": instrument,
+            "capital": round(
+                starting_capital,
+                2,
+            ),
+            "ending_capital": round(
+                current_capital,
+                2,
+            ),
+            "total_pnl": net_pnl,
+            "total_trades": total_trades,
+            "wins": total_wins,
+            "losses": total_losses,
+            "win_rate": win_rate,
+            "trading_weekdays": len(
+                month_dates
+            ),
+            "tested_days": tested_days,
+            "skipped_days": skipped_days,
+            "winning_days": winning_days,
+            "losing_days": losing_days,
+            "flat_days": flat_days,
+            "days": day_results,
+            "trades": all_trades,
+            "equity_curve": [
+                round(value, 2)
+                for value in equity_curve
+            ],
+            "max_drawdown": drawdown[
+                "max_drawdown"
+            ],
+            "max_drawdown_percent": drawdown[
+                "max_drawdown_percent"
+            ],
+            "position_sizing": {
+                "mode": (
+                    "CAPITAL_90_PERCENT"
+                ),
+                "capital_use_percent": 90,
+                "equity_compounding": True,
+                "whole_lots_only": True,
+            },
+            "auto_scan": {
+                "enabled": (
+                    instrument == "AUTO"
+                ),
+                "instruments": (
+                    list(
+                        _OKAI_AUTO_INSTRUMENTS
+                    )
+                    if instrument == "AUTO"
+                    else [instrument]
+                ),
+                "one_open_trade_at_a_time": True,
+            },
+            "summary": {
+                "period": "MONTHLY",
+                "month": month_text,
+                "instrument": instrument,
+                "trades": total_trades,
+                "wins": total_wins,
+                "losses": total_losses,
+                "win_rate": win_rate,
+                "capital": round(
+                    starting_capital,
+                    2,
+                ),
+                "ending_capital": round(
+                    current_capital,
+                    2,
+                ),
+                "net_pnl": net_pnl,
+                "tested_days": tested_days,
+                "skipped_days": skipped_days,
+                "winning_days": winning_days,
+                "losing_days": losing_days,
+                "flat_days": flat_days,
+                "max_drawdown": drawdown[
+                    "max_drawdown"
+                ],
+                "max_drawdown_percent": (
+                    drawdown[
+                        "max_drawdown_percent"
+                    ]
+                ),
+                "capital_use_percent": 90,
+                "note": (
+                    "Monthly AUTO backtest uses "
+                    "90% current equity and "
+                    "ATR-estimated option premiums."
+                ),
+            },
+        }
+
+        safe_result = _json_safe(result)
+        json.dumps(
+            safe_result,
+            allow_nan=False,
+        )
+
+        conn.execute(
+            """INSERT INTO backtest_runs
+               (
+                 user_id,
+                 instrument,
+                 run_date,
+                 capital,
+                 entry_score,
+                 sl_percent,
+                 target_percent,
+                 result_json,
+                 created_at
+               )
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                user["id"],
+                instrument + "_MONTHLY",
+                month_text,
+                starting_capital,
+                entry_score,
+                sl_percent,
+                target_percent,
+                json.dumps(
+                    safe_result,
+                    allow_nan=False,
+                ),
+                datetime.utcnow().isoformat(),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        try:
+            notify_user(
+                user["id"],
+                "\n".join([
+                    "📅 <b>Monthly Backtest Complete</b>",
+                    f"Month: {month_text}",
+                    f"Instrument: {instrument}",
+                    f"Tested Days: {tested_days}",
+                    f"Trades: {total_trades}",
+                    (
+                        f"Wins/Losses: "
+                        f"{total_wins}/{total_losses}"
+                    ),
+                    f"Net P&L: Rs {net_pnl}",
+                    (
+                        f"Ending Capital: "
+                        f"Rs {round(current_capital, 2)}"
+                    ),
+                ]),
+            )
+        except Exception:
+            pass
+
+        return safe_result
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_type": (
+                exc.__class__.__name__
+            ),
+            "message": (
+                "Monthly backtest failed, "
+                "but error is visible."
+            ),
+        }
