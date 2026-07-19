@@ -2,7 +2,7 @@ from fastapi import APIRouter, Header
 from database import get_db
 from auth.routes import get_current_user
 from auth.utils import decrypt_credential
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import json
 import math
 
@@ -28,6 +28,22 @@ except Exception:
 router = APIRouter(prefix="/backtest", tags=["Backtest"])
 
 LOT_SIZES = {"NIFTY": 65, "BANKNIFTY": 30, "SENSEX": 20}
+
+
+def _candle_minutes_ist(value):
+    """Return candle time as IST minutes from midnight."""
+    try:
+        text = str(value).strip().replace("Z", "+00:00")
+        candle_dt = datetime.fromisoformat(text)
+
+        if candle_dt.tzinfo is not None:
+            ist = timezone(timedelta(hours=5, minutes=30))
+            candle_dt = candle_dt.astimezone(ist)
+
+        return candle_dt.hour * 60 + candle_dt.minute
+
+    except Exception:
+        return -1
 
 
 def _json_safe(value, stats=None):
@@ -201,6 +217,11 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
 
         price = float(last["close"])
 
+        candle_minutes = _candle_minutes_ist(last["time"])
+        force_eod_exit = (
+            candle_minutes >= 15 * 60 + 25
+        )
+
         if open_trade:
             side = open_trade["side"]
             entry = open_trade["entry_price"]
@@ -214,10 +235,23 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             hit_sl = current_premium <= entry * (1 - sl_percent / 100)
             is_last_candle = (i == len(df) - 1)
 
-            if hit_target or hit_sl or is_last_candle:
+            if (
+                hit_target
+                or hit_sl
+                or force_eod_exit
+                or is_last_candle
+            ):
                 exit_price = round(current_premium, 2)
                 pnl = round((exit_price - entry) * qty, 2)
-                reason = "TARGET" if hit_target else ("SL" if hit_sl else "DAY_END_EXIT")
+
+                if hit_target:
+                    reason = "TARGET"
+                elif hit_sl:
+                    reason = "SL"
+                elif force_eod_exit:
+                    reason = "EOD_EXIT_1525"
+                else:
+                    reason = "DAY_END_EXIT"
                 trades.append({
                     "trade_no": trade_no,
                     "symbol": f"{instrument} {side}",
@@ -237,6 +271,10 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                     consecutive_losses = 0
 
                 open_trade = None
+            continue
+
+        # Do not open another trade after the force-exit time.
+        if force_eod_exit:
             continue
 
         orb_high, orb_low = calculate_orb_levels(wdf)

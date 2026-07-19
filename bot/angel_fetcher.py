@@ -200,19 +200,44 @@ def _manage_paper_trade(user_id, underlying, price, side, score, trade_allowed, 
             sl = open_trade["sl_price"]
             target = open_trade["target_price"]
 
-            hit_sl = (trade_side == "CE" and sl and current_ltp <= sl) or \
-                     (trade_side == "PE" and sl and current_ltp >= sl)
-            hit_target = (trade_side == "CE" and target and current_ltp >= target) or \
-                         (trade_side == "PE" and target and current_ltp <= target)
+            # Both CE and PE are bought options.
+            # For either option type:
+            # premium below SL = loss, premium above target = profit.
+            hit_sl = bool(
+                sl
+                and current_ltp <= float(sl)
+            )
+            hit_target = bool(
+                target
+                and current_ltp >= float(target)
+            )
 
-            if hit_sl or hit_target:
+            now_ist = (
+                datetime.now(timezone.utc)
+                + timedelta(hours=5, minutes=30)
+            )
+            force_eod_exit = (
+                now_ist.hour * 60 + now_ist.minute
+                >= 15 * 60 + 25
+            )
+
+            if hit_sl or hit_target or force_eod_exit:
                 qty = open_trade["qty"] or 1
                 entry_price = open_trade["entry_price"] or 0
-                if trade_side == "CE":
-                    pnl = round((current_ltp - entry_price) * qty, 2)
+
+                # Bought CE and bought PE both profit when their
+                # respective option premium rises.
+                pnl = round(
+                    (current_ltp - entry_price) * qty,
+                    2,
+                )
+
+                if hit_target:
+                    reason = "TARGET HIT (real premium)"
+                elif hit_sl:
+                    reason = "SL HIT (real premium)"
                 else:
-                    pnl = round((entry_price - current_ltp) * qty, 2)
-                reason = "TARGET HIT (real premium)" if hit_target else "SL HIT (real premium)"
+                    reason = "EOD EXIT 15:25 IST"
 
                 conn.execute(
                     "UPDATE paper_trades SET exit_price=?, pnl=?, status='CLOSED', reason=? WHERE id=?",
@@ -224,6 +249,17 @@ def _manage_paper_trade(user_id, underlying, price, side, score, trade_allowed, 
         if not trade_allowed or side not in ("CE", "PE"):
             return
         if settings.get("trading_mode", "paper") != "paper":
+            return
+
+        # Never open a fresh paper trade at or after force-exit time.
+        now_ist = (
+            datetime.now(timezone.utc)
+            + timedelta(hours=5, minutes=30)
+        )
+        if (
+            now_ist.hour * 60 + now_ist.minute
+            >= 15 * 60 + 25
+        ):
             return
 
         resolved = resolve_option(underlying, price, side)
@@ -243,12 +279,16 @@ def _manage_paper_trade(user_id, underlying, price, side, score, trade_allowed, 
         sl_percent = float(settings.get("sl_percent", 12))
         target_percent = float(settings.get("target_percent", 24))
 
-        if side == "CE":
-            sl_price = round(entry_price * (1 - sl_percent / 100), 2)
-            target_price = round(entry_price * (1 + target_percent / 100), 2)
-        else:
-            sl_price = round(entry_price * (1 + sl_percent / 100), 2)
-            target_price = round(entry_price * (1 - target_percent / 100), 2)
+        # Both CE and PE are bought options, so option-premium
+        # SL stays below entry and target stays above entry.
+        sl_price = round(
+            entry_price * (1 - sl_percent / 100),
+            2,
+        )
+        target_price = round(
+            entry_price * (1 + target_percent / 100),
+            2,
+        )
 
         conn.execute(
             """INSERT INTO paper_trades
