@@ -5,6 +5,8 @@ from auth.utils import decrypt_credential
 from datetime import datetime, timezone, timedelta
 import json
 import math
+import threading
+import uuid
 
 try:
     from telegram.routes import notify_user
@@ -1567,8 +1569,7 @@ def _okai_month_drawdown(equity_curve):
     }
 
 
-@router.post("/monthly")
-def run_monthly_backtest(
+def _okai_run_monthly_backtest_sync(
     body: dict,
     authorization: str = Header(None),
 ):
@@ -1610,8 +1611,36 @@ def run_monthly_backtest(
             or "NORMAL"
         ).upper()
 
-        month_dates = _okai_month_weekdays(
+        all_month_dates = _okai_month_weekdays(
             month_text
+        )
+
+        ist_today = (
+            datetime.now(timezone.utc)
+            + timedelta(hours=5, minutes=30)
+        ).date()
+
+        # Use only completed historical dates.
+        month_dates = [
+            date_text
+            for date_text in all_month_dates
+            if datetime.strptime(
+                date_text,
+                "%Y-%m-%d",
+            ).date() < ist_today
+        ]
+
+        if not month_dates:
+            return {
+                "success": False,
+                "message": (
+                    "Is month me abhi koi completed "
+                    "trading date available nahi hai."
+                ),
+            }
+
+        monthly_job_id = body.get(
+            "_monthly_job_id"
         )
 
         conn = get_db()
@@ -1715,6 +1744,14 @@ def run_monthly_backtest(
         for index, date_text in enumerate(
             month_dates
         ):
+            _okai_update_monthly_job(
+                monthly_job_id,
+                completed_days=index,
+                total_days=len(month_dates),
+                current_date=date_text,
+                phase="RUNNING",
+            )
+
             if index > 0:
                 # One AUTO day may make three historical
                 # candle requests, so keep a safe gap.
@@ -1863,6 +1900,14 @@ def run_monthly_backtest(
             )
             total_hero_zero_pnl += float(
                 day.get("hero_zero_pnl") or 0
+            )
+
+            _okai_update_monthly_job(
+                monthly_job_id,
+                completed_days=index + 1,
+                total_days=len(month_dates),
+                current_date=date_text,
+                phase="RUNNING",
             )
 
         net_pnl = round(
@@ -3383,3 +3428,316 @@ def _okai_run_backtest_mode(
         instrument,
         date_str,
     )
+
+
+
+# ============================================================
+# OKAI MONTHLY ASYNC JOB V1
+# The app starts a job and polls until the result is complete.
+# ============================================================
+_OKAI_MONTHLY_JOBS = {}
+_OKAI_MONTHLY_JOBS_LOCK = threading.Lock()
+_OKAI_MONTHLY_MAX_JOBS = 40
+
+
+def _okai_update_monthly_job(
+    job_id,
+    **updates,
+):
+    if not job_id:
+        return
+
+    with _OKAI_MONTHLY_JOBS_LOCK:
+        job = _OKAI_MONTHLY_JOBS.get(
+            job_id
+        )
+        if not job:
+            return
+
+        job.update(updates)
+        job["updated_at"] = (
+            datetime.now(timezone.utc)
+            .isoformat()
+        )
+
+
+def _okai_trim_monthly_jobs():
+    with _OKAI_MONTHLY_JOBS_LOCK:
+        if (
+            len(_OKAI_MONTHLY_JOBS)
+            <= _OKAI_MONTHLY_MAX_JOBS
+        ):
+            return
+
+        ordered = sorted(
+            _OKAI_MONTHLY_JOBS.items(),
+            key=lambda item: item[1].get(
+                "created_at",
+                "",
+            ),
+        )
+
+        remove_count = (
+            len(_OKAI_MONTHLY_JOBS)
+            - _OKAI_MONTHLY_MAX_JOBS
+        )
+
+        for job_id, _ in ordered[
+            :remove_count
+        ]:
+            _OKAI_MONTHLY_JOBS.pop(
+                job_id,
+                None,
+            )
+
+
+def _okai_monthly_worker(
+    job_id,
+    body,
+    authorization,
+):
+    _okai_update_monthly_job(
+        job_id,
+        status="RUNNING",
+        phase="LOGIN_AND_DATA",
+    )
+
+    worker_body = dict(body or {})
+    worker_body[
+        "_monthly_job_id"
+    ] = job_id
+
+    try:
+        result = (
+            _okai_run_monthly_backtest_sync(
+                worker_body,
+                authorization,
+            )
+        )
+
+        if (
+            isinstance(result, dict)
+            and result.get("success")
+        ):
+            _okai_update_monthly_job(
+                job_id,
+                status="COMPLETED",
+                phase="COMPLETED",
+                result=result,
+                completed_days=(
+                    result.get(
+                        "tested_days",
+                        0,
+                    )
+                    + result.get(
+                        "skipped_days",
+                        0,
+                    )
+                ),
+            )
+        else:
+            _okai_update_monthly_job(
+                job_id,
+                status="FAILED",
+                phase="FAILED",
+                error=(
+                    result.get("message")
+                    if isinstance(
+                        result,
+                        dict,
+                    )
+                    else "Monthly backtest failed"
+                ),
+                result=result,
+            )
+
+    except Exception as exc:
+        _okai_update_monthly_job(
+            job_id,
+            status="FAILED",
+            phase="FAILED",
+            error=str(exc)[:300],
+            result={
+                "success": False,
+                "message": (
+                    "Monthly background job failed."
+                ),
+                "error": str(exc),
+                "error_type": (
+                    exc.__class__.__name__
+                ),
+            },
+        )
+
+
+@router.post("/monthly")
+def start_monthly_backtest(
+    body: dict,
+    authorization: str = Header(None),
+):
+    try:
+        user = get_current_user(
+            authorization
+        )
+        body = body or {}
+
+        with _OKAI_MONTHLY_JOBS_LOCK:
+            for existing_id, existing in (
+                _OKAI_MONTHLY_JOBS.items()
+            ):
+                if (
+                    existing.get("user_id")
+                    == user["id"]
+                    and existing.get("status")
+                    in ("QUEUED", "RUNNING")
+                ):
+                    return {
+                        "success": True,
+                        "async": True,
+                        "job_id": existing_id,
+                        "status": existing.get(
+                            "status"
+                        ),
+                        "message": (
+                            "Monthly backtest already "
+                            "running."
+                        ),
+                    }
+
+        job_id = uuid.uuid4().hex
+        created_at = (
+            datetime.now(timezone.utc)
+            .isoformat()
+        )
+
+        month_text = str(
+            body.get("month")
+            or body.get("year_month")
+            or ""
+        )
+        instrument = str(
+            body.get("instrument")
+            or "AUTO"
+        ).upper()
+        strategy_mode = str(
+            body.get("strategy_mode")
+            or "NORMAL"
+        ).upper()
+
+        with _OKAI_MONTHLY_JOBS_LOCK:
+            _OKAI_MONTHLY_JOBS[
+                job_id
+            ] = {
+                "job_id": job_id,
+                "user_id": user["id"],
+                "status": "QUEUED",
+                "phase": "QUEUED",
+                "month": month_text,
+                "instrument": instrument,
+                "strategy_mode": strategy_mode,
+                "completed_days": 0,
+                "total_days": 0,
+                "current_date": None,
+                "created_at": created_at,
+                "updated_at": created_at,
+                "result": None,
+                "error": None,
+            }
+
+        thread = threading.Thread(
+            target=_okai_monthly_worker,
+            args=(
+                job_id,
+                dict(body),
+                authorization,
+            ),
+            daemon=True,
+            name=(
+                "okai-monthly-"
+                + job_id[:8]
+            ),
+        )
+        thread.start()
+
+        _okai_trim_monthly_jobs()
+
+        return {
+            "success": True,
+            "async": True,
+            "job_id": job_id,
+            "status": "QUEUED",
+            "month": month_text,
+            "instrument": instrument,
+            "strategy_mode": strategy_mode,
+            "message": (
+                "Monthly backtest background me "
+                "start ho gaya."
+            ),
+        }
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "message": (
+                "Monthly job start failed."
+            ),
+            "error": str(exc),
+            "error_type": (
+                exc.__class__.__name__
+            ),
+        }
+
+
+@router.get("/monthly/status/{job_id}")
+def monthly_backtest_status(
+    job_id: str,
+    authorization: str = Header(None),
+):
+    try:
+        user = get_current_user(
+            authorization
+        )
+
+        with _OKAI_MONTHLY_JOBS_LOCK:
+            job = _OKAI_MONTHLY_JOBS.get(
+                job_id
+            )
+
+            if not job:
+                return {
+                    "success": False,
+                    "status": "NOT_FOUND",
+                    "message": (
+                        "Monthly job nahi mila "
+                        "ya server restart ho gaya."
+                    ),
+                }
+
+            if job.get("user_id") != user["id"]:
+                return {
+                    "success": False,
+                    "status": "FORBIDDEN",
+                    "message": "Access denied.",
+                }
+
+            response = {
+                key: value
+                for key, value in job.items()
+                if key != "user_id"
+            }
+
+        response["success"] = (
+            response.get("status")
+            != "FAILED"
+        )
+        return _json_safe(response)
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "status": "FAILED",
+            "message": (
+                "Monthly status check failed."
+            ),
+            "error": str(exc),
+        }
