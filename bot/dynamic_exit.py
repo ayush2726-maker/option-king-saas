@@ -92,3 +92,63 @@ def update_option_profit_lock(
         "stage": stage,
         "initial_risk": round(risk, 2),
     }
+
+
+def detect_structural_reversal(
+    position_side,
+    price,
+    vwap,
+    ema9,
+    ema21,
+    supertrend_dir,
+):
+    # Caller must require two consecutive closed candles.
+    side = str(position_side or "").upper()
+    close = float(price or 0)
+    vwap_value = float(vwap or close)
+    ema9_value = float(ema9 or close)
+    ema21_value = float(ema21 or ema9_value)
+    st = str(supertrend_dir or "NEUTRAL").upper()
+
+    if side == "CE":
+        vwap_broken = close < vwap_value
+        ema9_broken = close < ema9_value
+        opposite_confirmed = (
+            st == "DOWN"
+            or ema9_value < ema21_value
+        )
+    elif side == "PE":
+        vwap_broken = close > vwap_value
+        ema9_broken = close > ema9_value
+        opposite_confirmed = (
+            st == "UP"
+            or ema9_value > ema21_value
+        )
+    else:
+        return {
+            "detected": False,
+            "side": side,
+            "vwap_broken": False,
+            "ema9_broken": False,
+            "opposite_confirmed": False,
+        }
+
+    detected = (
+        vwap_broken
+        and ema9_broken
+        and opposite_confirmed
+    )
+
+    return {
+        "detected": bool(detected),
+        "side": side,
+        "vwap_broken": bool(vwap_broken),
+        "ema9_broken": bool(ema9_broken),
+        "opposite_confirmed": bool(opposite_confirmed),
+        "price": round(close, 2),
+        "vwap": round(vwap_value, 2),
+        "ema9": round(ema9_value, 2),
+        "ema21": round(ema21_value, 2),
+        "supertrend_dir": st,
+    }
+

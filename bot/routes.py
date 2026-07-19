@@ -148,6 +148,8 @@ def ensure_tables(conn):
         ("trail_stage","TEXT"),
         ("trail_updates","INTEGER DEFAULT 0"),
         ("last_ltp","REAL"), ("broker_name","TEXT"),
+        ("reversal_count","INTEGER DEFAULT 0"),
+        ("reversal_last_candle","TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {coltype}")
@@ -561,6 +563,8 @@ def get_signal(authorization: str = Header(None)):
                 "current_price": current_price,
                 "sl_price": sl_price,
                 "target_price": target_price,
+                "reversal_count": int(t["reversal_count"] or 0),
+                "reversal_last_candle": t["reversal_last_candle"],
                 "exit_price": float(exit_p) if exit_p is not None else None,
                 "pnl": float(t["pnl"] or 0),
                 "unrealized_pnl": unrealized_pnl,

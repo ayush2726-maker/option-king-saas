@@ -34,8 +34,8 @@ def _read_settings(user_id):
     defaults = {
         "trading_mode": "paper",
         "primary_instrument": "NIFTY",
-        "sl_percent": 12,
-        "target_percent": 24,
+        "sl_percent": 0,
+        "target_percent": 0,
         "entry_threshold": 82,
     }
     try:
@@ -581,6 +581,8 @@ def run_user_bot(user_id: int, creds: dict, state: dict):
                     settings,
                     obj,
                     spot_atr=market_data["atr"],
+                    market_data=market_data,
+                    candle_id=str(last["time"]),
                 )
             except Exception:
                 pass
@@ -810,6 +812,8 @@ def run_user_bot_multi(user_id: int, broker_name: str, creds: dict, state: dict)
                     signal_data.get("trade_allowed"),
                     settings, obj,
                     spot_atr=market_data["atr"],
+                    market_data=market_data,
+                    candle_id=str(last["time"]),
                 )
             except Exception:
                 pass
@@ -851,6 +855,7 @@ def start_user_bot_multi(user_id: int, broker_name: str, creds: dict) -> dict:
 from bot.dynamic_exit import (
     calculate_option_atr_levels as _dynamic_atr_levels,
     update_option_profit_lock as _dynamic_profit_lock,
+    detect_structural_reversal as _dynamic_structural_reversal,
 )
 from bot.option_chain import get_atm_strike as _dynamic_atm_strike
 
@@ -864,7 +869,64 @@ def _dv(row, key, default=None):
     return default
 
 
-def _dynamic_manage_open(conn, trade, ltp):
+def _dynamic_reversal_state(
+    trade,
+    market_data,
+    candle_id,
+):
+    old_count = int(_dv(trade, "reversal_count", 0))
+    old_candle = str(
+        _dv(trade, "reversal_last_candle", "")
+        or ""
+    )
+
+    if not market_data or candle_id is None:
+        return {
+            "count": old_count,
+            "last_candle": old_candle,
+            "exit": old_count >= 2,
+            "details": {"detected": False},
+        }
+
+    details = _dynamic_structural_reversal(
+        position_side=trade["side"],
+        price=market_data.get("price"),
+        vwap=market_data.get("vwap"),
+        ema9=market_data.get("ema9"),
+        ema21=market_data.get("ema21"),
+        supertrend_dir=market_data.get(
+            "supertrend_dir"
+        ),
+    )
+
+    current_candle = str(candle_id)
+
+    if current_candle != old_candle:
+        count = (
+            old_count + 1
+            if details["detected"]
+            else 0
+        )
+        last_candle = current_candle
+    else:
+        count = old_count
+        last_candle = old_candle
+
+    return {
+        "count": count,
+        "last_candle": last_candle,
+        "exit": count >= 2,
+        "details": details,
+    }
+
+
+def _dynamic_manage_open(
+    conn,
+    trade,
+    ltp,
+    market_data=None,
+    candle_id=None,
+):
     entry = float(trade["entry_price"] or 0)
     qty = int(trade["qty"] or 1)
     old_sl = float(_dv(trade, "sl_price", max(0.05, entry-0.05)))
@@ -876,22 +938,33 @@ def _dynamic_manage_open(conn, trade, ltp):
     if trail["updated"]:
         updates += 1
 
+    reversal = _dynamic_reversal_state(
+        trade,
+        market_data,
+        candle_id,
+    )
+    reversal_exit = reversal["exit"]
+
     conn.execute(
         """UPDATE paper_trades
            SET sl_price=?, target_price=NULL, initial_risk=?,
                peak_price=?, trail_stage=?, trail_updates=?,
-               last_ltp=?
+               last_ltp=?, reversal_count=?,
+               reversal_last_candle=?
            WHERE id=?""",
         (
             trail["sl_price"], risk, trail["peak_price"],
-            trail["stage"], updates, ltp, trade["id"],
+            trail["stage"], updates, ltp,
+            reversal["count"],
+            reversal["last_candle"],
+            trade["id"],
         ),
     )
 
     now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
     eod = now_ist.hour * 60 + now_ist.minute >= 15 * 60 + 25
     hit = ltp <= trail["sl_price"]
-    if not hit and not eod:
+    if not hit and not reversal_exit and not eod:
         conn.commit()
         return
 
@@ -904,6 +977,11 @@ def _dynamic_manage_open(conn, trade, ltp):
         )
     elif hit:
         reason = "PURE ATR SL HIT"
+    elif reversal_exit:
+        reason = (
+            "TWO CANDLE STRUCTURAL REVERSAL EXIT"
+            f" | count={reversal['count']}"
+        )
     else:
         reason = "EOD EXIT 15:25 IST"
 
@@ -963,6 +1041,7 @@ def _dynamic_insert_trade(
 def _manage_paper_trade(
     user_id, underlying, price, side, score,
     trade_allowed, settings, obj, spot_atr=0.0,
+    market_data=None, candle_id=None,
 ):
     if settings.get("trading_mode", "paper") != "paper":
         return
@@ -983,7 +1062,13 @@ def _manage_paper_trade(
                 ltp = float(q["data"]["ltp"])
             except Exception:
                 return
-            _dynamic_manage_open(conn, trade, ltp)
+            _dynamic_manage_open(
+                conn,
+                trade,
+                ltp,
+                market_data=market_data,
+                candle_id=candle_id,
+            )
             return
 
         if not trade_allowed or side not in ("CE","PE") or spot_atr <= 0:
@@ -1017,6 +1102,7 @@ def _manage_paper_trade(
 def _manage_paper_trade_multi(
     user_id, broker_name, underlying, price, side,
     score, trade_allowed, settings, obj, spot_atr=0.0,
+    market_data=None, candle_id=None,
 ):
     if settings.get("trading_mode", "paper") != "paper":
         return
@@ -1040,7 +1126,13 @@ def _manage_paper_trade_multi(
                 )
             if not q.get("success"):
                 return
-            _dynamic_manage_open(conn, trade, float(q["ltp"]))
+            _dynamic_manage_open(
+                conn,
+                trade,
+                float(q["ltp"]),
+                market_data=market_data,
+                candle_id=candle_id,
+            )
             return
 
         if not trade_allowed or side not in ("CE","PE") or spot_atr <= 0:

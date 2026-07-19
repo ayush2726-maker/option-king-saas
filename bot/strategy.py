@@ -270,21 +270,16 @@ VWAP_STRETCH_BLOCK_POINTS = 35.0
 
 
 def required_score_for_losses(consecutive_losses: int) -> int:
-    """Escalating entry gate after losses: 82 -> 85 -> 87 (caps at 87)."""
-    if consecutive_losses <= 0:
-        return WEIGHTED_MIN_ENTRY_SCORE
-    elif consecutive_losses == 1:
-        return 85
-    else:
-        return 87
+    """Entry score remains protected at 82 after any number of losses."""
+    return WEIGHTED_MIN_ENTRY_SCORE
 
 
 def get_full_signal(market_data: dict, consecutive_losses: int = 0) -> dict:
     """
     Complete signal pipeline combining all strategies.
     Called by bot/routes.py
-    consecutive_losses: number of consecutive losing trades today (for this user),
-    used to escalate the required entry score (anti-revenge-trade rule).
+    consecutive_losses is retained only for diagnostics.
+    It does not increase the protected entry score above 82.
     """
     price        = float(market_data.get("price", 0))
     vwap         = float(market_data.get("vwap", price))
@@ -361,12 +356,10 @@ def get_full_signal(market_data: dict, consecutive_losses: int = 0) -> dict:
             f"{vwap_stretch_points:.1f}pt>{VWAP_STRETCH_BLOCK_POINTS}pt"
         )
 
-    # Step 4: Loss-based score escalation
-    required_score = required_score_for_losses(consecutive_losses)
+    # Step 4: Protected fixed score gate.
+    # Consecutive losses never raise this to 85 or 87.
+    required_score = WEIGHTED_MIN_ENTRY_SCORE
     score_ok = tqu["score"] >= required_score
-    if not score_ok and consecutive_losses > 0:
-        warnings.append(f"LOSS_ESCALATION_GATE:need {required_score}, have {tqu['score']} (after {consecutive_losses} loss(es))")
-
     trade_allowed = score_ok and not chase_blocked
 
     # Step 5: Final decision

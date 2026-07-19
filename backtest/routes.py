@@ -22,6 +22,7 @@ try:
     from bot.dynamic_exit import (
         calculate_option_atr_levels,
         update_option_profit_lock,
+        detect_structural_reversal,
     )
     from bot.brokers.factory import create_broker
     ENGINE_AVAILABLE = True
@@ -209,11 +210,6 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
     _score_log = []
     _score_detail_log = []
 
-    reward_multiple = max(
-        1.0,
-        target_percent / max(sl_percent, 1.0),
-    )
-
     try:
         is_expiry_day = (
             datetime.fromisoformat(date_str).weekday()
@@ -265,7 +261,31 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             hit_sl = premium_low <= active_sl
             is_last = i == len(df)-1
 
-            if hit_sl or force_eod_exit or is_last:
+            reversal = detect_structural_reversal(
+                position_side=side,
+                price=spot_close,
+                vwap=float(last["VWAP"]),
+                ema9=float(last["EMA9"]),
+                ema21=float(last["EMA21"]),
+                supertrend_dir=str(last["ST_DIR"]),
+            )
+
+            if reversal["detected"]:
+                open_trade["reversal_count"] += 1
+            else:
+                open_trade["reversal_count"] = 0
+
+            open_trade["reversal_details"] = reversal
+            structural_exit = (
+                open_trade["reversal_count"] >= 2
+            )
+
+            if (
+                hit_sl
+                or structural_exit
+                or force_eod_exit
+                or is_last
+            ):
                 if hit_sl:
                     exit_price = round(active_sl,2)
                     reason = (
@@ -273,6 +293,9 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                         if active_sl >= entry
                         else "PURE_ATR_SL"
                     )
+                elif structural_exit:
+                    exit_price = round(current_premium, 2)
+                    reason = "TWO_CANDLE_REVERSAL_EXIT"
                 else:
                     exit_price = round(current_premium,2)
                     reason = "EOD_EXIT_1525" if force_eod_exit else "DAY_END_EXIT"
@@ -301,6 +324,12 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                     "peak_r": open_trade["peak_r"],
                     "trail_stage": open_trade["trail_stage"],
                     "trail_updates": open_trade["trail_updates"],
+                    "reversal_count": open_trade[
+                        "reversal_count"
+                    ],
+                    "reversal_details": open_trade[
+                        "reversal_details"
+                    ],
                     "estimated_premium_high": round(premium_high,2),
                     "estimated_premium_low": round(premium_low,2),
                     "premium_response_factor": response,
@@ -419,8 +448,6 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                 option_entry_price=est_entry_premium,
                 spot_atr=atr,
                 is_expiry_day=is_expiry_day,
-                sl_floor_percent=sl_percent,
-                reward_multiple=reward_multiple,
             )
 
             open_trade = {
@@ -440,6 +467,10 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                 "peak_r": 0.0,
                 "trail_stage": "INITIAL_ATR",
                 "trail_updates": 0,
+                "reversal_count": 0,
+                "reversal_details": {
+                    "detected": False,
+                },
             }
 
     total_pnl = round(sum(t["pnl"] for t in trades), 2)
@@ -537,6 +568,19 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                 "after_1.8R": "PEAK_MINUS_0.8R",
             },
             "trail_activation": "NEXT_CANDLE",
+            "structural_reversal_exit": {
+                "confirmation_candles": 2,
+                "CE": (
+                    "close<VWAP and close<EMA9 and "
+                    "(ST DOWN or EMA9<EMA21)"
+                ),
+                "PE": (
+                    "close>VWAP and close>EMA9 and "
+                    "(ST UP or EMA9>EMA21)"
+                ),
+            },
+            "entry_score_after_losses": 82,
+            "loss_score_escalation_enabled": False,
             "expiry_day": "TUESDAY",
             "ignored_request_fields": ["sl_percent","target_percent"],
         },
