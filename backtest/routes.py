@@ -174,6 +174,16 @@ _OKAI_NORMAL_ENTRY_CUTOFF_MINUTES = 15 * 60
 # Combined expiry days reserve 14:30-15:00 for Hero Zero.
 _OKAI_COMBINED_HERO_RESERVE_MINUTES = 14 * 60 + 25
 
+# Entry score remains fixed at 82. This additional quality gate
+# requires at least four of five directional core confirmations.
+_OKAI_NORMAL_MIN_CORE_CONFIRMATIONS = 4
+
+# Smart reservation keeps a genuinely strong Normal position.
+_OKAI_SMART_RESERVE_MIN_CURRENT_R = 0.50
+
+# Severe adverse movement still exits after two reversal candles.
+_OKAI_ADAPTIVE_REVERSAL_SEVERE_LOSS_R = -0.60
+
 
 def _candle_minutes_ist(value):
     """Return candle time as IST minutes from midnight."""
@@ -392,6 +402,7 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
     consecutive_losses = 0
     _score_log = []
     _score_detail_log = []
+    _core_quality_block_count = 0
 
     # OKAI INSTRUMENT EXPIRY ATR V2
     # Expiry ATR applies only to the selected instrument's expiry.
@@ -435,7 +446,7 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             "normal_force_exit_minutes",
             None,
         )
-        force_combined_reserve_exit = (
+        reserve_window_due = (
             normal_force_exit is not None
             and candle_minutes >= normal_force_exit
         )
@@ -465,6 +476,69 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             active_sl = open_trade["sl_price"]
             hit_sl = premium_low <= active_sl
             is_last = i == len(df)-1
+
+            risk_points = max(
+                0.05,
+                float(
+                    open_trade.get(
+                        "risk_points",
+                        0.05,
+                    )
+                    or 0.05
+                ),
+            )
+            current_r = (
+                current_premium - entry
+            ) / risk_points
+
+            if (
+                reserve_window_due
+                and open_trade.get(
+                    "hero_reservation_decision"
+                )
+                is None
+            ):
+                strong_normal = (
+                    current_premium > entry
+                    and (
+                        current_r
+                        >= _OKAI_SMART_RESERVE_MIN_CURRENT_R
+                        or active_sl >= entry
+                        or float(
+                            open_trade.get(
+                                "peak_r",
+                                0,
+                            )
+                            or 0
+                        )
+                        >= 1.20
+                    )
+                )
+
+                open_trade[
+                    "hero_reservation_decision"
+                ] = (
+                    "KEEP_NORMAL_STRONG"
+                    if strong_normal
+                    else "RELEASE_FOR_HERO"
+                )
+                open_trade[
+                    "smart_reservation_current_r"
+                ] = round(
+                    current_r,
+                    2,
+                )
+                open_trade[
+                    "smart_reservation_strong"
+                ] = bool(strong_normal)
+
+            force_combined_reserve_exit = (
+                reserve_window_due
+                and open_trade.get(
+                    "hero_reservation_decision"
+                )
+                == "RELEASE_FOR_HERO"
+            )
 
             orb_high_open, orb_low_open = (
                 calculate_orb_levels(wdf)
@@ -530,9 +604,51 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             else:
                 open_trade["reversal_count"] = 0
 
+            strong_reversal = (
+                bool(
+                    reversal.get(
+                        "trend_flip_confirmed"
+                    )
+                )
+                and bool(
+                    reversal.get(
+                        "valid_opposite_signal"
+                    )
+                )
+            )
+            severe_loss = (
+                current_r
+                <= _OKAI_ADAPTIVE_REVERSAL_SEVERE_LOSS_R
+            )
+            protecting_profit = (
+                current_r >= 0
+                or active_sl >= entry
+            )
+
+            reversal_required_candles = (
+                2
+                if (
+                    strong_reversal
+                    or severe_loss
+                    or protecting_profit
+                )
+                else 3
+            )
+
             open_trade["reversal_details"] = reversal
+            open_trade[
+                "reversal_required_candles"
+            ] = reversal_required_candles
+            open_trade[
+                "strong_reversal"
+            ] = bool(strong_reversal)
+            open_trade[
+                "current_r"
+            ] = round(current_r, 2)
+
             structural_exit = (
-                open_trade["reversal_count"] >= 2
+                open_trade["reversal_count"]
+                >= reversal_required_candles
             )
 
             if (
@@ -555,14 +671,17 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                         2,
                     )
                     reason = (
-                        "COMBINED_HERO_RESERVE_EXIT_1425"
+                        "SMART_HERO_RELEASE_EXIT_1425"
                     )
                 elif structural_exit:
                     exit_price = round(
                         current_premium,
                         2,
                     )
-                    reason = "TWO_CANDLE_REVERSAL_EXIT"
+                    reason = (
+                        "ADAPTIVE_REVERSAL_EXIT_"
+                        f"{open_trade.get('reversal_required_candles', 2)}C"
+                    )
                 else:
                     exit_price = round(
                         current_premium,
@@ -604,6 +723,50 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                     "reversal_details": open_trade[
                         "reversal_details"
                     ],
+                    "reversal_required_candles": (
+                        open_trade.get(
+                            "reversal_required_candles",
+                            2,
+                        )
+                    ),
+                    "strong_reversal": bool(
+                        open_trade.get(
+                            "strong_reversal",
+                            False,
+                        )
+                    ),
+                    "current_r_at_exit": round(
+                        current_r,
+                        2,
+                    ),
+                    "entry_base_score": (
+                        open_trade.get(
+                            "entry_base_score",
+                            0,
+                        )
+                    ),
+                    "entry_core_confirmations": (
+                        open_trade.get(
+                            "entry_core_confirmations",
+                            0,
+                        )
+                    ),
+                    "hero_reservation_decision": (
+                        open_trade.get(
+                            "hero_reservation_decision"
+                        )
+                    ),
+                    "smart_reservation_current_r": (
+                        open_trade.get(
+                            "smart_reservation_current_r"
+                        )
+                    ),
+                    "smart_reservation_strong": bool(
+                        open_trade.get(
+                            "smart_reservation_strong",
+                            False,
+                        )
+                    ),
                     "estimated_premium_high": round(premium_high,2),
                     "estimated_premium_low": round(premium_low,2),
                     "premium_response_factor": response,
@@ -664,6 +827,38 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             market_data,
             consecutive_losses=consecutive_losses,
         )
+        selected_core_confirmations = (
+            int(
+                signal_data.get(
+                    "ce_raw_score",
+                    0,
+                )
+                or 0
+            )
+            if signal_data.get("signal") == "CE"
+            else int(
+                signal_data.get(
+                    "pe_raw_score",
+                    0,
+                )
+                or 0
+            )
+            if signal_data.get("signal") == "PE"
+            else 0
+        )
+        core_quality_ok = (
+            selected_core_confirmations
+            >= _OKAI_NORMAL_MIN_CORE_CONFIRMATIONS
+        )
+
+        if (
+            signal_data.get("trade_allowed")
+            and signal_data.get("signal")
+            in ("CE", "PE")
+            and not core_quality_ok
+        ):
+            _core_quality_block_count += 1
+
         _score_log.append(signal_data.get("score", 0))
         _score_detail_log.append({
             "time": str(last["time"]),
@@ -711,10 +906,19 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                 "chase_blocked",
                 False,
             ),
+            "core_confirmations": (
+                selected_core_confirmations
+            ),
+            "core_quality_ok": core_quality_ok,
             "warnings": signal_data.get("warnings", []),
         })
 
-        if signal_data["trade_allowed"] and signal_data["signal"] in ("CE", "PE") and signal_data["score"] >= entry_threshold:
+        if (
+            signal_data["trade_allowed"]
+            and signal_data["signal"] in ("CE", "PE")
+            and signal_data["score"] >= entry_threshold
+            and core_quality_ok
+        ):
             trade_no += 1
             atr = market_data["atr"]
             est_entry_premium = round(
@@ -734,6 +938,15 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                 "entry_price": est_entry_premium,
                 "entry_spot": price,
                 "score": signal_data["score"],
+                "entry_base_score": (
+                    signal_data.get(
+                        "base_score",
+                        0,
+                    )
+                ),
+                "entry_core_confirmations": (
+                    selected_core_confirmations
+                ),
                 "entry_time": str(last["time"]),
                 "initial_sl_price": atr_levels["sl_price"],
                 "sl_price": atr_levels["sl_price"],
@@ -750,6 +963,12 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                 "reversal_details": {
                     "detected": False,
                 },
+                "reversal_required_candles": 2,
+                "strong_reversal": False,
+                "current_r": 0.0,
+                "hero_reservation_decision": None,
+                "smart_reservation_current_r": None,
+                "smart_reservation_strong": False,
             }
 
     total_pnl = round(sum(t["pnl"] for t in trades), 2)
@@ -832,6 +1051,17 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             if row["vwap_fallback_used"]
         ),
         "debug_top_candidates": top_candidates,
+        "debug_core_quality_block_count": (
+            _core_quality_block_count
+        ),
+        "entry_quality_gate": {
+            "entry_score": 82,
+            "minimum_core_confirmations": (
+                _OKAI_NORMAL_MIN_CORE_CONFIRMATIONS
+            ),
+            "core_total": 5,
+            "mode": "SCORE82_PLUS_CORE_4_OF_5",
+        },
         "exit_model": {
             "type": "DYNAMIC_ATR_PROFIT_LOCK",
             "fixed_percentage_sl": False,
@@ -848,14 +1078,22 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             },
             "trail_activation": "NEXT_CANDLE",
             "structural_reversal_exit": {
-                "confirmation_candles": 2,
+                "mode": "ADAPTIVE_2_OR_3_CANDLE",
+                "two_candle_when": [
+                    "trade_in_profit_or_breakeven",
+                    "current_R_at_or_below_minus_0.60",
+                    "trend_flip_and_valid_opposite_82_signal",
+                ],
+                "three_candle_when": (
+                    "mild_loss_and_only_partial_reversal_confirmation"
+                ),
                 "CE": (
-                    "close<VWAP and close<EMA9 and "
-                    "(ST DOWN or EMA9<EMA21)"
+                    "close<VWAP and close<EMA9 with "
+                    "opposite trend or opposite 82+ signal"
                 ),
                 "PE": (
-                    "close>VWAP and close>EMA9 and "
-                    "(ST UP or EMA9>EMA21)"
+                    "close>VWAP and close>EMA9 with "
+                    "opposite trend or opposite 82+ signal"
                 ),
             },
             "entry_score_after_losses": 82,
@@ -3436,7 +3674,17 @@ def _okai_combine_normal_and_hero(
             ),
             "overlapping_trade_skipped": True,
             "normal_entry_cutoff": "14:25",
-            "normal_force_exit": "14:25",
+            "normal_force_exit": (
+                "SMART_AT_OR_AFTER_14:25"
+            ),
+            "smart_reservation": {
+                "keep_normal_when": (
+                    "profitable_and_0.5R_or_profit_locked"
+                ),
+                "release_for_hero_when": (
+                    "weak_flat_or_losing"
+                ),
+            },
             "hero_reserved_window": "14:30-15:00",
         },
         "summary": {
