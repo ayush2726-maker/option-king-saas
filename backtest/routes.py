@@ -370,7 +370,10 @@ def debug_fetch(authorization: str = Header(None), instrument: str = "NIFTY", da
                 return {"stage": "login", "result": lr}
         from bot.angel_fetcher import UPSTOX_INDEX_KEYS
         key = UPSTOX_INDEX_KEYS.get(instrument)
-        raw_res = obj.get_candles(symbol=key, interval="5m", from_date=date, to_date=date) if broker_name == "upstox" else None
+        import requests as _rq
+        _url = f"https://api.upstox.com/v2/historical-candle/{key}/5minute/{date}/{date}"
+        _r = _rq.get(_url, headers=obj._h(), timeout=15)
+        raw_res = {"url": _url, "status_code": _r.status_code, "body": _r.text[:800]} if broker_name == "upstox" else None
         df = fetch_backtest_candles(broker_name, obj, instrument, date)
         if df is None:
             return {"stage": "fetch", "result": "df is None", "broker": broker_name, "raw_res": raw_res}
