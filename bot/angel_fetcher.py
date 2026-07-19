@@ -801,6 +801,19 @@ def run_user_bot_multi(user_id: int, broker_name: str, creds: dict, state: dict)
             )
             hero = is_hero_window_active()
 
+            try:
+                _manage_paper_trade_multi(
+                    user_id, broker_name, underlying,
+                    market_data["price"],
+                    signal_data.get("signal"),
+                    signal_data.get("score"),
+                    signal_data.get("trade_allowed"),
+                    settings, obj,
+                    spot_atr=market_data["atr"],
+                )
+            except Exception:
+                pass
+
             state.update({
                 **signal_data,
                 "hero": hero,
@@ -830,3 +843,242 @@ def start_user_bot_multi(user_id: int, broker_name: str, creds: dict) -> dict:
         t = threading.Thread(target=run_user_bot_multi, args=(user_id, broker_name, creds, state), daemon=True)
         t.start()
         return {"success": True, "message": f"Bot started ({broker_name})"}
+
+
+# ============================================================
+# Broker-neutral pure ATR paper exit engine (V2)
+# ============================================================
+from bot.dynamic_exit import (
+    calculate_option_atr_levels as _dynamic_atr_levels,
+    update_option_profit_lock as _dynamic_profit_lock,
+)
+from bot.option_chain import get_atm_strike as _dynamic_atm_strike
+
+
+def _dv(row, key, default=None):
+    try:
+        if key in row.keys() and row[key] is not None:
+            return row[key]
+    except Exception:
+        pass
+    return default
+
+
+def _dynamic_manage_open(conn, trade, ltp):
+    entry = float(trade["entry_price"] or 0)
+    qty = int(trade["qty"] or 1)
+    old_sl = float(_dv(trade, "sl_price", max(0.05, entry-0.05)))
+    risk = float(_dv(trade, "initial_risk", max(0.05, entry-old_sl)))
+    peak = float(_dv(trade, "peak_price", entry))
+    updates = int(_dv(trade, "trail_updates", 0))
+
+    trail = _dynamic_profit_lock(entry, risk, old_sl, peak, ltp)
+    if trail["updated"]:
+        updates += 1
+
+    conn.execute(
+        """UPDATE paper_trades
+           SET sl_price=?, target_price=NULL, initial_risk=?,
+               peak_price=?, trail_stage=?, trail_updates=?,
+               last_ltp=?
+           WHERE id=?""",
+        (
+            trail["sl_price"], risk, trail["peak_price"],
+            trail["stage"], updates, ltp, trade["id"],
+        ),
+    )
+
+    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    eod = now_ist.hour * 60 + now_ist.minute >= 15 * 60 + 25
+    hit = ltp <= trail["sl_price"]
+    if not hit and not eod:
+        conn.commit()
+        return
+
+    pnl = round((ltp-entry)*qty, 2)
+    if hit and trail["sl_price"] >= entry:
+        reason = (
+            "PROFIT LOCK TRAIL HIT"
+            f" | {trail['stage']}"
+            f" | locked={trail['locked_r']}R"
+        )
+    elif hit:
+        reason = "PURE ATR SL HIT"
+    else:
+        reason = "EOD EXIT 15:25 IST"
+
+    conn.execute(
+        """UPDATE paper_trades
+           SET exit_price=?, pnl=?, status='CLOSED',
+               reason=?, last_ltp=?
+           WHERE id=?""",
+        (ltp, pnl, reason, ltp, trade["id"]),
+    )
+    conn.commit()
+
+
+def _dynamic_insert_trade(
+    conn, user_id, broker_name, resolved, side,
+    entry, qty, score, spot_price, spot_atr,
+):
+    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    levels = _dynamic_atr_levels(
+        spot_price, entry, spot_atr,
+        is_expiry_day=now_ist.weekday() == 1,
+    )
+    if not levels["atr_available"]:
+        return
+
+    risk = levels["risk_points"]
+    conn.execute(
+        """INSERT INTO paper_trades
+           (
+             user_id,symbol,side,entry_price,qty,pnl,status,
+             reason,sl_price,target_price,token,exch_seg,
+             expiry,strike,created_at,initial_risk,
+             peak_price,trail_stage,trail_updates,last_ltp,
+             broker_name
+           )
+           VALUES (
+             ?,?,?,?,?,0,'OPEN',?,?,NULL,?,?,?,?,?,?,?,
+             'INITIAL_ATR',0,?,?
+           )""",
+        (
+            user_id, resolved["symbol"], side, entry, qty,
+            (
+                f"Real entry score {score}"
+                f" | {levels['mode']} | R={risk}"
+                " | DYNAMIC_PROFIT_LOCK"
+            ),
+            levels["sl_price"], resolved.get("token"),
+            resolved.get("exchange") or resolved.get("exch_seg"),
+            resolved.get("expiry"), resolved.get("strike"),
+            datetime.now(timezone.utc).isoformat(),
+            risk, entry, entry, broker_name,
+        ),
+    )
+    conn.commit()
+
+
+def _manage_paper_trade(
+    user_id, underlying, price, side, score,
+    trade_allowed, settings, obj, spot_atr=0.0,
+):
+    if settings.get("trading_mode", "paper") != "paper":
+        return
+    conn = get_db()
+    try:
+        trade = conn.execute(
+            """SELECT * FROM paper_trades
+               WHERE user_id=? AND status='OPEN'
+               ORDER BY id DESC LIMIT 1""",
+            (user_id,),
+        ).fetchone()
+
+        if trade:
+            try:
+                q = obj.ltpData(
+                    trade["exch_seg"], trade["symbol"], trade["token"]
+                )
+                ltp = float(q["data"]["ltp"])
+            except Exception:
+                return
+            _dynamic_manage_open(conn, trade, ltp)
+            return
+
+        if not trade_allowed or side not in ("CE","PE") or spot_atr <= 0:
+            return
+        now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+        if now_ist.hour*60 + now_ist.minute >= 15*60+25:
+            return
+
+        resolved = resolve_option(underlying, price, side)
+        if not resolved:
+            return
+        resolved = dict(resolved)
+        resolved["exchange"] = resolved.get("exch_seg")
+        try:
+            q = obj.ltpData(
+                resolved["exch_seg"], resolved["symbol"], resolved["token"]
+            )
+            entry = float(q["data"]["ltp"])
+        except Exception:
+            return
+        if entry <= 0:
+            return
+        _dynamic_insert_trade(
+            conn, user_id, "angelone", resolved, side, entry,
+            LOT_SIZES.get(underlying,1), score, price, spot_atr,
+        )
+    finally:
+        conn.close()
+
+
+def _manage_paper_trade_multi(
+    user_id, broker_name, underlying, price, side,
+    score, trade_allowed, settings, obj, spot_atr=0.0,
+):
+    if settings.get("trading_mode", "paper") != "paper":
+        return
+    conn = get_db()
+    try:
+        trade = conn.execute(
+            """SELECT * FROM paper_trades
+               WHERE user_id=? AND status='OPEN'
+               ORDER BY id DESC LIMIT 1""",
+            (user_id,),
+        ).fetchone()
+
+        if trade:
+            if broker_name == "upstox":
+                ref = _dv(trade, "token", trade["symbol"])
+                q = obj.get_ltp(ref, exchange=_dv(trade,"exch_seg","NSE_FO"))
+            else:
+                q = obj.get_ltp(
+                    trade["symbol"],
+                    exchange=_dv(trade,"exch_seg","NFO"),
+                )
+            if not q.get("success"):
+                return
+            _dynamic_manage_open(conn, trade, float(q["ltp"]))
+            return
+
+        if not trade_allowed or side not in ("CE","PE") or spot_atr <= 0:
+            return
+        now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+        if now_ist.hour*60 + now_ist.minute >= 15*60+25:
+            return
+
+        resolved = obj.search_option(
+            underlying, "current_week",
+            _dynamic_atm_strike(underlying, price), side,
+        )
+        if not resolved.get("success"):
+            return
+
+        if broker_name == "upstox":
+            q = obj.get_ltp(
+                resolved.get("token") or resolved["symbol"],
+                exchange=resolved.get("exchange","NSE_FO"),
+            )
+        else:
+            q = obj.get_ltp(
+                resolved["symbol"],
+                exchange=resolved.get("exchange","NFO"),
+            )
+        if not q.get("success"):
+            return
+        entry = float(q["ltp"])
+        if entry <= 0:
+            return
+
+        qty = int(
+            resolved.get("lot_size")
+            or LOT_SIZES.get(underlying,1)
+        )
+        _dynamic_insert_trade(
+            conn, user_id, broker_name, resolved, side, entry,
+            qty, score, price, spot_atr,
+        )
+    finally:
+        conn.close()

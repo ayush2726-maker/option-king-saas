@@ -68,7 +68,44 @@ class ZerodhaBroker(BaseBroker):
             return {"success":False,"message":str(e)}
 
     def search_option(self, underlying, expiry, strike, option_type):
-        return {"success":True,"symbol":f"{underlying}{expiry}{int(strike)}{option_type}","token":""}
+        try:
+            from datetime import date, datetime
+            u = str(underlying).upper()
+            ot = str(option_type).upper()
+            exchange = "BFO" if u == "SENSEX" else "NFO"
+            today = date.today()
+            found = []
+            for row in self.kite.instruments(exchange):
+                if str(row.get("name") or "").upper() != u:
+                    continue
+                if str(row.get("instrument_type") or "").upper() != ot:
+                    continue
+                ex = row.get("expiry")
+                if isinstance(ex, datetime):
+                    ex = ex.date()
+                elif not isinstance(ex, date):
+                    try:
+                        ex = datetime.fromisoformat(str(ex)).date()
+                    except Exception:
+                        continue
+                if ex < today:
+                    continue
+                rs = float(row.get("strike") or 0)
+                found.append((ex, abs(rs - float(strike)), row))
+            if not found:
+                return {"success":False,"message":"Zerodha option not found"}
+            _, _, best = min(found, key=lambda x: (x[0], x[1]))
+            return {
+                "success": True,
+                "symbol": best["tradingsymbol"],
+                "token": str(best["instrument_token"]),
+                "exchange": exchange,
+                "expiry": str(best["expiry"]),
+                "strike": float(best["strike"]),
+                "lot_size": int(best.get("lot_size") or 0),
+            }
+        except Exception as e:
+            return {"success":False,"message":str(e)}
 
     def place_order(self, symbol, token, transaction_type, quantity, order_type="MARKET", price=0, exchange="NFO"):
         try:

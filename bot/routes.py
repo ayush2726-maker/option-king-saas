@@ -33,9 +33,10 @@ DEFAULT_SETTINGS = {
     "adx_threshold": 25,
     "volume_threshold": 1.2,
     "max_trades_per_day": 5,
-    "sl_percent": 12,
-    "target_percent": 24,
+    "sl_percent": 0,
+    "target_percent": 0,
     "trailing_sl": True,
+    "exit_model": "DYNAMIC_ATR_PROFIT_LOCK",
     "expiry_gamma_mode": True,
     "trading_mode": "paper",
     "paper_capital": 100000,
@@ -139,7 +140,15 @@ def ensure_tables(conn):
         )
     """)
 
-    for col, coltype in [("sl_price","REAL"), ("target_price","REAL"), ("token","TEXT"), ("exch_seg","TEXT"), ("expiry","TEXT"), ("strike","REAL")]:
+    for col, coltype in [
+        ("sl_price","REAL"), ("target_price","REAL"),
+        ("token","TEXT"), ("exch_seg","TEXT"),
+        ("expiry","TEXT"), ("strike","REAL"),
+        ("initial_risk","REAL"), ("peak_price","REAL"),
+        ("trail_stage","TEXT"),
+        ("trail_updates","INTEGER DEFAULT 0"),
+        ("last_ltp","REAL"), ("broker_name","TEXT"),
+    ]:
         try:
             conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {coltype}")
         except Exception:
@@ -522,8 +531,12 @@ def get_signal(authorization: str = Header(None)):
                 local_sl_percent = 50
                 local_target_percent = 100
 
-            sl_price = round(entry * (1 - local_sl_percent / 100), 2) if entry else None
-            target_price = round(entry * (1 + local_target_percent / 100), 2) if entry else None
+            sl_price = (
+                round(float(t["sl_price"]), 2)
+                if t["sl_price"] is not None
+                else None
+            )
+            target_price = None
 
             current_price = None
             unrealized_pnl = None

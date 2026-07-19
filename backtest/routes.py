@@ -18,9 +18,10 @@ try:
         INDEX_TOKENS, INDEX_EXCHANGE,
         ZERODHA_INDEX_TOKENS, ZERODHA_INDEX_EXCHANGE, UPSTOX_INDEX_KEYS,
     )
-    from bot.strategy import (
-        get_full_signal,
+    from bot.strategy import get_full_signal
+    from bot.dynamic_exit import (
         calculate_option_atr_levels,
+        update_option_profit_lock,
     )
     from bot.brokers.factory import create_broker
     ENGINE_AVAILABLE = True
@@ -242,127 +243,41 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             side = open_trade["side"]
             entry = open_trade["entry_price"]
             entry_spot = open_trade["entry_spot"]
-
             spot_close = float(last["close"])
             spot_high = float(last["high"])
             spot_low = float(last["low"])
 
-            close_move_pct = (
-                (spot_close - entry_spot)
-                / entry_spot
-                * 100
-            )
-
+            close_pct = (spot_close-entry_spot)/entry_spot*100
             if side == "CE":
-                favorable_move_pct = (
-                    (spot_high - entry_spot)
-                    / entry_spot
-                    * 100
-                )
-                adverse_move_pct = (
-                    (spot_low - entry_spot)
-                    / entry_spot
-                    * 100
-                )
+                good_pct = (spot_high-entry_spot)/entry_spot*100
+                bad_pct = (spot_low-entry_spot)/entry_spot*100
             else:
-                close_move_pct = -close_move_pct
-                favorable_move_pct = (
-                    (entry_spot - spot_low)
-                    / entry_spot
-                    * 100
-                )
-                adverse_move_pct = (
-                    (entry_spot - spot_high)
-                    / entry_spot
-                    * 100
-                )
+                close_pct = -close_pct
+                good_pct = (entry_spot-spot_low)/entry_spot*100
+                bad_pct = (entry_spot-spot_high)/entry_spot*100
 
-            premium_response = 8.0
+            response = 8.0
+            current_premium = max(0.5, entry*(1+close_pct*response/100))
+            premium_high = max(0.5, entry*(1+good_pct*response/100))
+            premium_low = max(0.5, entry*(1+bad_pct*response/100))
 
-            current_premium = max(
-                0.5,
-                entry * (
-                    1
-                    + (
-                        close_move_pct
-                        * premium_response
-                    ) / 100
-                ),
-            )
+            active_sl = open_trade["sl_price"]
+            hit_sl = premium_low <= active_sl
+            is_last = i == len(df)-1
 
-            estimated_premium_high = max(
-                0.5,
-                entry * (
-                    1
-                    + (
-                        favorable_move_pct
-                        * premium_response
-                    ) / 100
-                ),
-            )
-
-            estimated_premium_low = max(
-                0.5,
-                entry * (
-                    1
-                    + (
-                        adverse_move_pct
-                        * premium_response
-                    ) / 100
-                ),
-            )
-
-            hit_target = (
-                estimated_premium_high
-                >= open_trade["target_price"]
-            )
-            hit_sl = (
-                estimated_premium_low
-                <= open_trade["sl_price"]
-            )
-
-            intrabar_both_hit = (
-                hit_sl
-                and hit_target
-            )
-
-            is_last_candle = (i == len(df) - 1)
-
-            if (
-                hit_target
-                or hit_sl
-                or force_eod_exit
-                or is_last_candle
-            ):
-                # Historical 1-minute OHLC does not reveal whether
-                # high or low occurred first. If both levels are
-                # touched in one candle, use conservative SL-first.
+            if hit_sl or force_eod_exit or is_last:
                 if hit_sl:
-                    exit_price = round(
-                        open_trade["sl_price"],
-                        2,
+                    exit_price = round(active_sl,2)
+                    reason = (
+                        "PROFIT_LOCK_TRAIL"
+                        if active_sl >= entry
+                        else "PURE_ATR_SL"
                     )
-                    reason = "SL"
-                elif hit_target:
-                    exit_price = round(
-                        open_trade["target_price"],
-                        2,
-                    )
-                    reason = "TARGET"
                 else:
-                    exit_price = round(
-                        current_premium,
-                        2,
-                    )
-                    if force_eod_exit:
-                        reason = "EOD_EXIT_1525"
-                    else:
-                        reason = "DAY_END_EXIT"
+                    exit_price = round(current_premium,2)
+                    reason = "EOD_EXIT_1525" if force_eod_exit else "DAY_END_EXIT"
 
-                pnl = round(
-                    (exit_price - entry) * qty,
-                    2,
-                )
+                pnl = round((exit_price-entry)*qty,2)
                 trades.append({
                     "trade_no": trade_no,
                     "symbol": f"{instrument} {side}",
@@ -375,36 +290,39 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                     "score": open_trade["score"],
                     "entry_time": open_trade["entry_time"],
                     "exit_time": str(last["time"]),
-                    "sl_price": open_trade["sl_price"],
-                    "target_price": open_trade["target_price"],
+                    "initial_sl_price": open_trade["initial_sl_price"],
+                    "sl_price": active_sl,
+                    "target_price": None,
                     "risk_points": open_trade["risk_points"],
-                    "reward_multiple": open_trade[
-                        "reward_multiple"
-                    ],
                     "atr_mode": open_trade["atr_mode"],
-                    "spot_atr_at_entry": open_trade[
-                        "spot_atr_at_entry"
-                    ],
-                    "estimated_option_atr": open_trade[
-                        "estimated_option_atr"
-                    ],
-                    "estimated_premium_high": round(
-                        estimated_premium_high,
-                        2,
-                    ),
-                    "estimated_premium_low": round(
-                        estimated_premium_low,
-                        2,
-                    ),
-                    "intrabar_both_hit": intrabar_both_hit,
-                    "premium_response_factor": premium_response,
+                    "spot_atr_at_entry": open_trade["spot_atr_at_entry"],
+                    "estimated_option_atr": open_trade["estimated_option_atr"],
+                    "peak_price": open_trade["peak_price"],
+                    "peak_r": open_trade["peak_r"],
+                    "trail_stage": open_trade["trail_stage"],
+                    "trail_updates": open_trade["trail_updates"],
+                    "estimated_premium_high": round(premium_high,2),
+                    "estimated_premium_low": round(premium_low,2),
+                    "premium_response_factor": response,
+                    "fixed_target_enabled": False,
                 })
-                if pnl < 0:
-                    consecutive_losses += 1
-                else:
-                    consecutive_losses = 0
-
+                consecutive_losses = consecutive_losses + 1 if pnl < 0 else 0
                 open_trade = None
+                continue
+
+            trail = update_option_profit_lock(
+                entry,
+                open_trade["risk_points"],
+                active_sl,
+                open_trade["peak_price"],
+                premium_high,
+            )
+            if trail["updated"]:
+                open_trade["trail_updates"] += 1
+            open_trade["sl_price"] = trail["sl_price"]
+            open_trade["peak_price"] = trail["peak_price"]
+            open_trade["peak_r"] = trail["peak_r"]
+            open_trade["trail_stage"] = trail["stage"]
             continue
 
         # Do not open another trade after the force-exit time.
@@ -511,23 +429,17 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                 "entry_spot": price,
                 "score": signal_data["score"],
                 "entry_time": str(last["time"]),
+                "initial_sl_price": atr_levels["sl_price"],
                 "sl_price": atr_levels["sl_price"],
-                "target_price": atr_levels[
-                    "target_price"
-                ],
-                "risk_points": atr_levels[
-                    "risk_points"
-                ],
-                "reward_multiple": atr_levels[
-                    "reward_multiple"
-                ],
+                "target_price": None,
+                "risk_points": atr_levels["risk_points"],
                 "atr_mode": atr_levels["mode"],
-                "spot_atr_at_entry": atr_levels[
-                    "spot_atr"
-                ],
-                "estimated_option_atr": atr_levels[
-                    "estimated_option_atr"
-                ],
+                "spot_atr_at_entry": atr_levels["spot_atr"],
+                "estimated_option_atr": atr_levels["estimated_option_atr"],
+                "peak_price": est_entry_premium,
+                "peak_r": 0.0,
+                "trail_stage": "INITIAL_ATR",
+                "trail_updates": 0,
             }
 
     total_pnl = round(sum(t["pnl"] for t in trades), 2)
@@ -611,24 +523,22 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
         ),
         "debug_top_candidates": top_candidates,
         "exit_model": {
-            "type": "ATR_RISK_REWARD",
+            "type": "DYNAMIC_ATR_PROFIT_LOCK",
+            "fixed_percentage_sl": False,
+            "fixed_target_enabled": False,
             "normal_option_response": 0.50,
             "expiry_option_response": 1.00,
             "normal_atr_multiplier": 1.20,
             "expiry_atr_multiplier": 1.50,
-            "normal_min_sl_percent": max(
-                12.0,
-                sl_percent,
-            ),
-            "expiry_min_sl_percent": max(
-                15.0,
-                sl_percent,
-            ),
-            "reward_multiple": round(
-                reward_multiple,
-                2,
-            ),
+            "profit_lock_ladder": {
+                "0.8R": "BREAKEVEN",
+                "1.2R": "LOCK_0.5R",
+                "1.8R": "LOCK_1R",
+                "after_1.8R": "PEAK_MINUS_0.8R",
+            },
+            "trail_activation": "NEXT_CANDLE",
             "expiry_day": "TUESDAY",
+            "ignored_request_fields": ["sl_percent","target_percent"],
         },
         "note": "Signal timing/score based on REAL historical index candles. Option premium is an ATR-based estimate since real historical option premiums aren't available from the broker's live scrip master.",
         "summary": {

@@ -76,7 +76,50 @@ class UpstoxBroker(BaseBroker):
             return {"success":False,"message":str(e)}
 
     def search_option(self, underlying, expiry, strike, option_type):
-        return {"success":True,"symbol":f"{underlying}{expiry}{int(strike)}{option_type}","token":""}
+        try:
+            u = str(underlying).upper()
+            ot = str(option_type).upper()
+            exchange = "BSE" if u == "SENSEX" else "NSE"
+            r = requests.get(
+                f"{self.BASE_URL}/instruments/search",
+                params={
+                    "query": u,
+                    "exchanges": exchange,
+                    "segments": "FO",
+                    "instrument_types": ot,
+                    "expiry": expiry or "current_week",
+                    "atm_offset": 0,
+                    "page_number": 1,
+                    "records": 30,
+                },
+                headers=self._h(),
+                timeout=15,
+            )
+            payload = r.json()
+            if r.status_code != 200:
+                return {"success":False,"message":str(payload)[:250]}
+            found = []
+            for row in payload.get("data") or []:
+                if str(row.get("instrument_type") or "").upper() != ot:
+                    continue
+                if str(row.get("underlying_symbol") or "").upper() != u:
+                    continue
+                rs = float(row.get("strike_price") or 0)
+                found.append((str(row.get("expiry") or ""), abs(rs-float(strike)), row))
+            if not found:
+                return {"success":False,"message":"Upstox option not found"}
+            _, _, best = min(found, key=lambda x: (x[0], x[1]))
+            return {
+                "success": True,
+                "symbol": best["trading_symbol"],
+                "token": best["instrument_key"],
+                "exchange": best.get("segment") or ("BSE_FO" if u=="SENSEX" else "NSE_FO"),
+                "expiry": str(best.get("expiry") or ""),
+                "strike": float(best.get("strike_price") or 0),
+                "lot_size": int(best.get("lot_size") or 0),
+            }
+        except Exception as e:
+            return {"success":False,"message":str(e)}
 
     def place_order(self, symbol, token, transaction_type, quantity, order_type="MARKET", price=0, exchange="NFO"):
         try:
