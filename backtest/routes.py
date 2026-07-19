@@ -4,6 +4,7 @@ from auth.routes import get_current_user
 from auth.utils import decrypt_credential
 from datetime import datetime
 import json
+import math
 
 try:
     from telegram.routes import notify_user
@@ -27,6 +28,52 @@ except Exception:
 router = APIRouter(prefix="/backtest", tags=["Backtest"])
 
 LOT_SIZES = {"NIFTY": 65, "BANKNIFTY": 30, "SENSEX": 20}
+
+
+def _json_safe(value, stats=None):
+    """
+    Convert NaN, Infinity, numpy scalars and other values into
+    strict JSON-compatible Python values.
+    """
+    if stats is None:
+        stats = {"non_finite": 0}
+
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+
+        stats["non_finite"] = stats.get("non_finite", 0) + 1
+        return None
+
+    # numpy/pandas scalar values
+    if hasattr(value, "item"):
+        try:
+            return _json_safe(value.item(), stats)
+        except Exception:
+            pass
+
+    if isinstance(value, dict):
+        return {
+            str(key): _json_safe(item, stats)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple, set)):
+        return [
+            _json_safe(item, stats)
+            for item in value
+        ]
+
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+
+    return str(value)
 
 
 def ensure_backtest_table(conn):
@@ -393,7 +440,27 @@ def run_backtest(body: dict, authorization: str = Header(None)):
             conn.close()
             return {"success": False, "message": f"Broker login failed: {str(e)[:150]}"}
 
-        result = run_realistic_day_backtest(broker_name, obj, instrument, run_date, capital, entry_score, sl_percent, target_percent)
+        raw_result = run_realistic_day_backtest(
+            broker_name,
+            obj,
+            instrument,
+            run_date,
+            capital,
+            entry_score,
+            sl_percent,
+            target_percent,
+        )
+
+        json_stats = {"non_finite": 0}
+        result = _json_safe(raw_result, json_stats)
+
+        if isinstance(result, dict):
+            result["debug_sanitized_non_finite"] = json_stats[
+                "non_finite"
+            ]
+
+        # Validate strict JSON here so serialization errors become visible.
+        json.dumps(result, allow_nan=False)
 
         if not result.get("success"):
             conn.close()
@@ -405,7 +472,8 @@ def run_backtest(body: dict, authorization: str = Header(None)):
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 user["id"], instrument, run_date, capital, entry_score,
-                sl_percent, target_percent, json.dumps(result),
+                sl_percent, target_percent,
+                json.dumps(result, allow_nan=False),
                 datetime.utcnow().isoformat()
             )
         )
