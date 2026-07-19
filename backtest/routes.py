@@ -814,7 +814,7 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                 "opposite ST+EMA trend flip OR "
                 "valid opposite 82+ signal"
             ),
-            "expiry_day": "TUESDAY",
+            "expiry_day": _okai_expiry_rule_label(instrument),
             "ignored_request_fields": ["sl_percent","target_percent"],
         },
         "note": "Signal timing/score based on REAL historical index candles. Option premium is an ATR-based estimate since real historical option premiums aren't available from the broker's live scrip master.",
@@ -1976,14 +1976,28 @@ def _okai_run_monthly_backtest_sync(
             "max_drawdown_percent": drawdown[
                 "max_drawdown_percent"
             ],
-            "position_sizing": {
-                "mode": (
-                    "CAPITAL_90_PERCENT"
-                ),
-                "capital_use_percent": 90,
-                "equity_compounding": True,
-                "whole_lots_only": True,
-            },
+            "position_sizing": (
+                {
+                    "mode": "HERO_ZERO_CAP_2000",
+                    "hero_zero_capital_cap": 2000,
+                    "equity_compounding": True,
+                    "whole_lots_only": True,
+                }
+                if strategy_mode == "HERO_ZERO"
+                else {
+                    "mode": (
+                        "COMBINED_CAP90_AND_HERO2000"
+                        if strategy_mode == "COMBINED"
+                        else "CAPITAL_90_PERCENT"
+                    ),
+                    "capital_use_percent": 90,
+                    "hero_zero_capital_cap": (
+                        2000 if strategy_mode == "COMBINED" else None
+                    ),
+                    "equity_compounding": True,
+                    "whole_lots_only": True,
+                }
+            ),
             "auto_scan": {
                 "enabled": (
                     instrument == "AUTO"
@@ -2036,11 +2050,20 @@ def _okai_run_monthly_backtest_sync(
                         "max_drawdown_percent"
                     ]
                 ),
-                "capital_use_percent": 90,
+                "capital_use_percent": (
+                    None if strategy_mode == "HERO_ZERO" else 90
+                ),
+                "hero_zero_capital_cap": (
+                    2000
+                    if strategy_mode in ("HERO_ZERO", "COMBINED")
+                    else None
+                ),
                 "note": (
-                    "Monthly AUTO backtest uses "
-                    "90% current equity and "
-                    "ATR-estimated option premiums."
+                    "Monthly Hero Zero uses maximum Rs 2,000 per trade and the instrument expiry calendar."
+                    if strategy_mode == "HERO_ZERO"
+                    else "Monthly Combined uses 90% equity for Normal and maximum Rs 2,000 for Hero Zero."
+                    if strategy_mode == "COMBINED"
+                    else "Monthly AUTO backtest uses 90% current equity and ATR-estimated option premiums."
                 ),
             },
         }
@@ -2130,8 +2153,10 @@ def _okai_run_monthly_backtest_sync(
 
 # ============================================================
 # OKAI HERO ZERO BACKTEST V1
-# Tuesday expiry, entry 14:30-15:00 IST, force exit 15:25,
-# score 82, estimated premium Rs 0.50-Rs 10,
+# Instrument-aware expiry calendar:
+# NIFTY every Tuesday, BANKNIFTY last Tuesday,
+# SENSEX every Thursday. Entry 14:30-15:00 IST,
+# force exit 15:25, score 82, premium Rs 0.50-Rs 10,
 # capital cap Rs 2,000, max one trade per day.
 # ============================================================
 _OKAI_HERO_WINDOW_START = 14 * 60 + 30
@@ -2166,16 +2191,49 @@ def _okai_normalize_strategy_mode(value):
     return text
 
 
-def _okai_is_tuesday_expiry(date_str):
+def _okai_expiry_rule_label(instrument):
+    instrument = str(instrument or "AUTO").upper()
+    return {
+        "NIFTY": "EVERY_TUESDAY",
+        "BANKNIFTY": "LAST_TUESDAY",
+        "SENSEX": "EVERY_THURSDAY",
+        "AUTO": "NIFTY_TUESDAY__BANKNIFTY_LAST_TUESDAY__SENSEX_THURSDAY",
+    }.get(instrument, "UNSUPPORTED")
+
+
+def _okai_is_last_weekday_of_month(day, weekday):
+    return (
+        day.weekday() == weekday
+        and (day + timedelta(days=7)).month != day.month
+    )
+
+
+def _okai_is_instrument_expiry(instrument, date_str):
     try:
-        return (
-            datetime.fromisoformat(
-                str(date_str)
-            ).weekday()
-            == 1
-        )
+        day = datetime.fromisoformat(str(date_str)).date()
     except Exception:
         return False
+
+    instrument = str(instrument or "").upper()
+    if instrument == "NIFTY":
+        return day.weekday() == 1
+    if instrument == "BANKNIFTY":
+        return _okai_is_last_weekday_of_month(day, 1)
+    if instrument == "SENSEX":
+        return day.weekday() == 3
+    return False
+
+
+def _okai_expiry_instruments_for_date(date_str):
+    return tuple(
+        instrument
+        for instrument in _OKAI_AUTO_INSTRUMENTS
+        if _okai_is_instrument_expiry(instrument, date_str)
+    )
+
+
+def _okai_is_tuesday_expiry(date_str):
+    return _okai_is_instrument_expiry("NIFTY", date_str)
 
 
 def _okai_hero_estimated_entry_premium(
@@ -2313,7 +2371,7 @@ def _okai_empty_hero_result(
         "hero_zero": {
             "entry_window": "14:30-15:00 IST",
             "force_exit": "15:25 IST",
-            "expiry_day": "TUESDAY",
+            "expiry_day": _okai_expiry_rule_label(instrument),
             "capital_cap": _OKAI_HERO_CAPITAL_CAP,
             "premium_range": [
                 _OKAI_HERO_PREMIUM_MIN,
@@ -2355,8 +2413,9 @@ def _okai_run_hero_zero_single(
     date_str,
     capital,
 ):
-    expiry_day = _okai_is_tuesday_expiry(
-        date_str
+    expiry_day = _okai_is_instrument_expiry(
+        instrument,
+        date_str,
     )
 
     if not expiry_day:
@@ -2364,7 +2423,12 @@ def _okai_run_hero_zero_single(
             instrument,
             date_str,
             capital,
-            "Hero Zero skipped: Tuesday expiry day nahi hai.",
+            (
+                "Hero Zero skipped: "
+                f"{instrument} expiry rule "
+                f"{_okai_expiry_rule_label(instrument)} "
+                "match nahi hua."
+            ),
             False,
         )
 
@@ -2656,6 +2720,7 @@ def _okai_run_hero_zero_single(
                         _OKAI_HERO_THETA_DECAY_PER_MINUTE
                     ),
                     "expiry_day": True,
+                    "expiry_rule": _okai_expiry_rule_label(instrument),
                     "fixed_target_enabled": True,
                 }
                 break
@@ -2865,7 +2930,7 @@ def _okai_run_hero_zero_single(
         "hero_zero": {
             "entry_window": "14:30-15:00 IST",
             "force_exit": "15:25 IST",
-            "expiry_day": "TUESDAY",
+            "expiry_day": _okai_expiry_rule_label(instrument),
             "capital_cap": _OKAI_HERO_CAPITAL_CAP,
             "premium_range": [
                 _OKAI_HERO_PREMIUM_MIN,
@@ -2930,14 +2995,20 @@ def _okai_run_hero_zero_day(
             capital,
         )
 
-    if not _okai_is_tuesday_expiry(
+    eligible_instruments = _okai_expiry_instruments_for_date(
         date_str
-    ):
+    )
+
+    if not eligible_instruments:
         return _okai_empty_hero_result(
             "AUTO",
             date_str,
             capital,
-            "Hero Zero skipped: Tuesday expiry day nahi hai.",
+            (
+                "Hero Zero skipped: is date par "
+                "NIFTY, BANKNIFTY ya SENSEX ki "
+                "configured expiry nahi hai."
+            ),
             False,
         )
 
@@ -2947,7 +3018,7 @@ def _okai_run_hero_zero_day(
     candidates = []
 
     for position, symbol in enumerate(
-        _OKAI_AUTO_INSTRUMENTS
+        eligible_instruments
     ):
         if position > 0:
             _okai_hero_time.sleep(0.45)
@@ -2976,8 +3047,9 @@ def _okai_run_hero_zero_day(
             date_str,
             capital,
             (
-                "Hero Zero AUTO: tino indices me "
-                "valid score 82 setup nahi mila."
+                "Hero Zero AUTO: eligible expiry "
+                "instruments me valid score 82 "
+                "setup nahi mila."
             ),
             True,
         )
@@ -3102,7 +3174,7 @@ def _okai_run_hero_zero_day(
         "hero_zero": {
             "entry_window": "14:30-15:00 IST",
             "force_exit": "15:25 IST",
-            "expiry_day": "TUESDAY",
+            "expiry_day": _okai_expiry_rule_label(instrument),
             "capital_cap": _OKAI_HERO_CAPITAL_CAP,
             "premium_range": [
                 _OKAI_HERO_PREMIUM_MIN,
