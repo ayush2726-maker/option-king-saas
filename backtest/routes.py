@@ -181,10 +181,6 @@ _OKAI_NORMAL_MIN_CORE_CONFIRMATIONS = 4
 # Smart reservation keeps a genuinely strong Normal position.
 _OKAI_SMART_RESERVE_MIN_CURRENT_R = 0.50
 
-# Severe adverse movement still exits after two reversal candles.
-_OKAI_ADAPTIVE_REVERSAL_SEVERE_LOSS_R = -0.60
-
-
 def _candle_minutes_ist(value):
     """Return candle time as IST minutes from midnight."""
     try:
@@ -616,24 +612,11 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                     )
                 )
             )
-            severe_loss = (
-                current_r
-                <= _OKAI_ADAPTIVE_REVERSAL_SEVERE_LOSS_R
-            )
-            protecting_profit = (
-                current_r >= 0
-                or active_sl >= entry
-            )
 
-            reversal_required_candles = (
-                2
-                if (
-                    strong_reversal
-                    or severe_loss
-                    or protecting_profit
-                )
-                else 3
-            )
+            # Confirmed reversal must persist for two complete
+            # candles. Three-candle waiting increased drawdown
+            # and allowed losing trades to run too long.
+            reversal_required_candles = 2
 
             open_trade["reversal_details"] = reversal
             open_trade[
@@ -679,8 +662,7 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                         2,
                     )
                     reason = (
-                        "ADAPTIVE_REVERSAL_EXIT_"
-                        f"{open_trade.get('reversal_required_candles', 2)}C"
+                        "TWO_CANDLE_REVERSAL_EXIT"
                     )
                 else:
                     exit_price = round(
@@ -1078,15 +1060,8 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             },
             "trail_activation": "NEXT_CANDLE",
             "structural_reversal_exit": {
-                "mode": "ADAPTIVE_2_OR_3_CANDLE",
-                "two_candle_when": [
-                    "trade_in_profit_or_breakeven",
-                    "current_R_at_or_below_minus_0.60",
-                    "trend_flip_and_valid_opposite_82_signal",
-                ],
-                "three_candle_when": (
-                    "mild_loss_and_only_partial_reversal_confirmation"
-                ),
+                "mode": "CONFIRMED_TWO_CANDLE",
+                "confirmation_candles": 2,
                 "CE": (
                     "close<VWAP and close<EMA9 with "
                     "opposite trend or opposite 82+ signal"
