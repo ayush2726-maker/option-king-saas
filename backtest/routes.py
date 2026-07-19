@@ -105,7 +105,7 @@ def fetch_backtest_candles(broker_name, obj, instrument, date_str):
 
     elif broker_name == "upstox":
         key = UPSTOX_INDEX_KEYS.get(instrument)
-        res = obj.get_candles(symbol=key, interval="5m", from_date=date_str, to_date=date_str)
+        res = obj.get_candles(symbol=key, interval="1m", from_date=date_str, to_date=date_str)
         rows = res.get("candles", []) if res.get("success") else []
         df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume", "oi"]) if rows else pd.DataFrame()
         if not df.empty:
