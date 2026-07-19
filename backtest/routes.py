@@ -837,3 +837,460 @@ def backtest_history(authorization: str = Header(None)):
             "error": str(e),
             "error_type": e.__class__.__name__
         }
+
+
+# ============================================================
+# OKAI AUTO INDEX BACKTEST V1
+# Scans NIFTY, BANKNIFTY and SENSEX.
+# Keeps only one open trade at a time.
+# Uses 90% of current equity with whole lots.
+# ============================================================
+from copy import deepcopy as _okai_deepcopy
+from bot.position_sizing import (
+    CAPITAL_USE_FRACTION as _OKAI_CAPITAL_USE_FRACTION,
+    calculate_lot_sizing as _okai_calculate_lot_sizing,
+)
+
+_OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST = (
+    run_realistic_day_backtest
+)
+_OKAI_AUTO_INSTRUMENTS = (
+    "NIFTY",
+    "BANKNIFTY",
+    "SENSEX",
+)
+_OKAI_INSTRUMENT_PRIORITY = {
+    "NIFTY": 0,
+    "BANKNIFTY": 1,
+    "SENSEX": 2,
+}
+
+
+def _okai_parse_trade_time(value):
+    try:
+        return datetime.fromisoformat(
+            str(value).replace(
+                "Z",
+                "+00:00",
+            )
+        )
+    except Exception:
+        return datetime.min
+
+
+def _okai_recalculate_summary(
+    result,
+    capital,
+    trades,
+):
+    total_pnl = round(
+        sum(
+            float(trade.get("pnl") or 0)
+            for trade in trades
+        ),
+        2,
+    )
+    wins = sum(
+        1
+        for trade in trades
+        if float(trade.get("pnl") or 0) >= 0
+    )
+    losses = len(trades) - wins
+    win_rate = (
+        round(wins / len(trades) * 100, 2)
+        if trades
+        else 0
+    )
+
+    result["trades"] = trades
+    result["total_trades"] = len(trades)
+    result["wins"] = wins
+    result["losses"] = losses
+    result["win_rate"] = win_rate
+    result["total_pnl"] = total_pnl
+    result["ending_capital"] = round(
+        float(capital) + total_pnl,
+        2,
+    )
+    result["position_sizing"] = {
+        "mode": "CAPITAL_90_PERCENT",
+        "capital_use_percent": 90,
+        "whole_lots_only": True,
+        "equity_compounding": True,
+        "one_open_trade_at_a_time": True,
+    }
+
+    summary = dict(
+        result.get("summary") or {}
+    )
+    summary.update({
+        "trades": len(trades),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "capital": float(capital),
+        "net_pnl": total_pnl,
+        "ending_capital": result[
+            "ending_capital"
+        ],
+        "capital_use_percent": 90,
+    })
+    result["summary"] = summary
+    return result
+
+
+def _okai_scale_trades_to_capital(
+    raw_result,
+    capital,
+):
+    result = _okai_deepcopy(raw_result)
+    if (
+        not isinstance(result, dict)
+        or not result.get("success")
+    ):
+        return result
+
+    current_equity = float(capital)
+    scaled = []
+
+    for trade in result.get("trades", []):
+        instrument = str(
+            trade.get("instrument")
+            or result.get("instrument")
+            or "NIFTY"
+        ).upper()
+        lot_size = LOT_SIZES.get(
+            instrument,
+            1,
+        )
+        entry = float(
+            trade.get("entry_price") or 0
+        )
+        exit_price = float(
+            trade.get("exit_price") or 0
+        )
+
+        sizing = _okai_calculate_lot_sizing(
+            current_equity,
+            entry,
+            lot_size,
+            _OKAI_CAPITAL_USE_FRACTION,
+        )
+
+        if not sizing["affordable"]:
+            continue
+
+        updated = dict(trade)
+        updated["trade_no"] = len(scaled) + 1
+        updated["instrument"] = instrument
+        updated["lot_size"] = lot_size
+        updated["lots"] = sizing["lots"]
+        updated["qty"] = sizing["quantity"]
+        updated["capital_before_trade"] = round(
+            current_equity,
+            2,
+        )
+        updated["usable_capital"] = sizing[
+            "usable_capital"
+        ]
+        updated["capital_used"] = sizing[
+            "capital_used"
+        ]
+        updated[
+            "capital_utilization_percent"
+        ] = sizing[
+            "capital_utilization_percent"
+        ]
+        updated["pnl"] = round(
+            (exit_price - entry)
+            * sizing["quantity"],
+            2,
+        )
+
+        current_equity += updated["pnl"]
+        updated["capital_after_trade"] = round(
+            current_equity,
+            2,
+        )
+        scaled.append(updated)
+
+    return _okai_recalculate_summary(
+        result,
+        capital,
+        scaled,
+    )
+
+
+def _okai_run_auto_index_backtest(
+    broker_name,
+    obj,
+    date_str,
+    capital,
+    entry_threshold,
+    sl_percent,
+    target_percent,
+):
+    single_results = {}
+    combined_trades = []
+    combined_candidates = []
+
+    for instrument in _OKAI_AUTO_INSTRUMENTS:
+        result = (
+            _OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST(
+                broker_name,
+                obj,
+                instrument,
+                date_str,
+                capital,
+                entry_threshold,
+                sl_percent,
+                target_percent,
+            )
+        )
+        single_results[instrument] = result
+
+        if (
+            not isinstance(result, dict)
+            or not result.get("success")
+        ):
+            continue
+
+        for trade in result.get("trades", []):
+            row = dict(trade)
+            row["instrument"] = instrument
+            combined_trades.append(row)
+
+        for candidate in result.get(
+            "debug_top_candidates",
+            [],
+        ):
+            row = dict(candidate)
+            row["instrument"] = instrument
+            combined_candidates.append(row)
+
+    combined_trades.sort(
+        key=lambda trade: (
+            _okai_parse_trade_time(
+                trade.get("entry_time")
+            ),
+            -int(trade.get("score") or 0),
+            _OKAI_INSTRUMENT_PRIORITY.get(
+                trade.get("instrument"),
+                99,
+            ),
+        )
+    )
+
+    selected = []
+    busy_until = None
+
+    for trade in combined_trades:
+        entry_time = _okai_parse_trade_time(
+            trade.get("entry_time")
+        )
+        exit_time = _okai_parse_trade_time(
+            trade.get("exit_time")
+        )
+
+        if (
+            busy_until is not None
+            and entry_time < busy_until
+        ):
+            continue
+
+        selected.append(trade)
+        busy_until = exit_time
+
+    raw_auto = {
+        "success": True,
+        "instrument": "AUTO",
+        "date": date_str,
+        "capital": float(capital),
+        "trades": selected,
+        "debug_top_candidates": sorted(
+            combined_candidates,
+            key=lambda row: (
+                int(row.get("score") or 0),
+                -_OKAI_INSTRUMENT_PRIORITY.get(
+                    row.get("instrument"),
+                    99,
+                ),
+            ),
+            reverse=True,
+        )[:15],
+        "debug_max_score": max(
+            (
+                result.get("debug_max_score")
+                for result
+                in single_results.values()
+                if isinstance(result, dict)
+                and result.get(
+                    "debug_max_score"
+                ) is not None
+            ),
+            default=None,
+        ),
+        "debug_chase_block_count": sum(
+            int(
+                result.get(
+                    "debug_chase_block_count",
+                    0,
+                )
+                or 0
+            )
+            for result
+            in single_results.values()
+            if isinstance(result, dict)
+        ),
+        "debug_ema_chase_block_count": sum(
+            int(
+                result.get(
+                    "debug_ema_chase_block_count",
+                    0,
+                )
+                or 0
+            )
+            for result
+            in single_results.values()
+            if isinstance(result, dict)
+        ),
+        "debug_vwap_chase_block_count": sum(
+            int(
+                result.get(
+                    "debug_vwap_chase_block_count",
+                    0,
+                )
+                or 0
+            )
+            for result
+            in single_results.values()
+            if isinstance(result, dict)
+        ),
+        "auto_scan": {
+            "enabled": True,
+            "instruments": list(
+                _OKAI_AUTO_INSTRUMENTS
+            ),
+            "selection": (
+                "EARLIEST_VALID_ENTRY_"
+                "THEN_HIGHEST_SCORE"
+            ),
+            "simultaneous_trades": False,
+            "model": (
+                "CONSERVATIVE_MERGE_V1"
+            ),
+        },
+        "per_instrument": {
+            instrument: {
+                "success": bool(
+                    isinstance(result, dict)
+                    and result.get("success")
+                ),
+                "message": (
+                    result.get("message")
+                    if isinstance(result, dict)
+                    else None
+                ),
+                "trades": (
+                    result.get(
+                        "total_trades",
+                        0,
+                    )
+                    if isinstance(result, dict)
+                    else 0
+                ),
+                "one_lot_pnl": (
+                    result.get(
+                        "total_pnl",
+                        0,
+                    )
+                    if isinstance(result, dict)
+                    else 0
+                ),
+                "max_score": (
+                    result.get(
+                        "debug_max_score"
+                    )
+                    if isinstance(result, dict)
+                    else None
+                ),
+            }
+            for instrument, result
+            in single_results.items()
+        },
+        "note": (
+            "AUTO scans all three indices. "
+            "Only one trade remains open at a time. "
+            "Option premium remains an ATR estimate."
+        ),
+        "summary": {
+            "capital": float(capital),
+            "note": (
+                "AUTO three-index scan with "
+                "90% capital sizing."
+            ),
+        },
+    }
+
+    first_success = next(
+        (
+            result
+            for result
+            in single_results.values()
+            if isinstance(result, dict)
+            and result.get("success")
+        ),
+        None,
+    )
+    if first_success:
+        raw_auto["exit_model"] = (
+            first_success.get("exit_model")
+        )
+
+    return _okai_scale_trades_to_capital(
+        raw_auto,
+        capital,
+    )
+
+
+def run_realistic_day_backtest(
+    broker_name,
+    obj,
+    instrument,
+    date_str,
+    capital,
+    entry_threshold,
+    sl_percent,
+    target_percent,
+):
+    instrument = str(
+        instrument or "AUTO"
+    ).upper()
+
+    if instrument == "AUTO":
+        return _okai_run_auto_index_backtest(
+            broker_name,
+            obj,
+            date_str,
+            capital,
+            entry_threshold,
+            sl_percent,
+            target_percent,
+        )
+
+    raw_result = (
+        _OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST(
+            broker_name,
+            obj,
+            instrument,
+            date_str,
+            capital,
+            entry_threshold,
+            sl_percent,
+            target_percent,
+        )
+    )
+    return _okai_scale_trades_to_capital(
+        raw_result,
+        capital,
+    )
