@@ -264,9 +264,41 @@ def update_trailing_sl(
     }
 
 # ── Full Signal Pipeline ─────────────────────────────────
-# ── Anti-chase thresholds (PROTECTED) ────────────────────
+# ── ATR-adaptive anti-chase thresholds ───────────────────
+# NIFTY keeps the existing minimum protection.
+# Higher-volatility indices receive wider limits automatically.
 EMA_STRETCH_BLOCK_POINTS = 22.0
 VWAP_STRETCH_BLOCK_POINTS = 35.0
+EMA_STRETCH_ATR_MULTIPLIER = 1.2
+VWAP_STRETCH_ATR_MULTIPLIER = 2.0
+
+
+def calculate_anti_chase_limits(spot_atr: float) -> dict:
+    # Return volatility-adaptive EMA/VWAP chase limits.
+    try:
+        atr = max(0.0, float(spot_atr or 0.0))
+    except (TypeError, ValueError):
+        atr = 0.0
+
+    ema_limit = max(
+        EMA_STRETCH_BLOCK_POINTS,
+        atr * EMA_STRETCH_ATR_MULTIPLIER,
+    )
+    vwap_limit = max(
+        VWAP_STRETCH_BLOCK_POINTS,
+        atr * VWAP_STRETCH_ATR_MULTIPLIER,
+    )
+
+    return {
+        "spot_atr": round(atr, 2),
+        "ema_limit": round(ema_limit, 2),
+        "vwap_limit": round(vwap_limit, 2),
+        "mode": (
+            "ATR_ADAPTIVE"
+            if atr > 0
+            else "FIXED_FALLBACK"
+        ),
+    }
 
 
 def required_score_for_losses(consecutive_losses: int) -> int:
@@ -295,6 +327,13 @@ def get_full_signal(market_data: dict, consecutive_losses: int = 0) -> dict:
     c1_bull      = bool(market_data.get("c1_bullish", False))
     c2_bull      = bool(market_data.get("c2_bullish", False))
     gap_day      = bool(market_data.get("gap_day", False))
+    try:
+        spot_atr = max(
+            0.0,
+            float(market_data.get("atr", 0) or 0),
+        )
+    except (TypeError, ValueError):
+        spot_atr = 0.0
     vwap_fallback_used = bool(
         market_data.get("vwap_fallback_used", False)
     )
@@ -322,14 +361,24 @@ def get_full_signal(market_data: dict, consecutive_losses: int = 0) -> dict:
     ema_stretch_points = abs(price - ema9) if ema9 else 0.0
     vwap_stretch_points = abs(price - vwap) if vwap else 0.0
 
+    anti_chase_limits = calculate_anti_chase_limits(
+        spot_atr
+    )
+    ema_stretch_limit = anti_chase_limits[
+        "ema_limit"
+    ]
+    vwap_stretch_limit = anti_chase_limits[
+        "vwap_limit"
+    ]
+
     ema_chase_blocked = (
-        ema_stretch_points > EMA_STRETCH_BLOCK_POINTS
+        ema_stretch_points > ema_stretch_limit
     )
 
     vwap_chase_enabled = not vwap_fallback_used
     vwap_chase_blocked = (
         vwap_chase_enabled
-        and vwap_stretch_points > VWAP_STRETCH_BLOCK_POINTS
+        and vwap_stretch_points > vwap_stretch_limit
     )
 
     chase_blocked = (
@@ -347,13 +396,15 @@ def get_full_signal(market_data: dict, consecutive_losses: int = 0) -> dict:
     if ema_chase_blocked:
         warnings.append(
             f"ANTI_CHASE_EMA_STRETCH:"
-            f"{ema_stretch_points:.1f}pt>{EMA_STRETCH_BLOCK_POINTS}pt"
+            f"{ema_stretch_points:.1f}pt>"
+            f"{ema_stretch_limit:.1f}pt"
         )
 
     if vwap_chase_blocked:
         warnings.append(
             f"ANTI_CHASE_VWAP_STRETCH:"
-            f"{vwap_stretch_points:.1f}pt>{VWAP_STRETCH_BLOCK_POINTS}pt"
+            f"{vwap_stretch_points:.1f}pt>"
+            f"{vwap_stretch_limit:.1f}pt"
         )
 
     # Step 4: Protected fixed score gate.
@@ -383,6 +434,16 @@ def get_full_signal(market_data: dict, consecutive_losses: int = 0) -> dict:
         "min_score": required_score,
         "ema_stretch_points": round(ema_stretch_points, 1),
         "vwap_stretch_points": round(vwap_stretch_points, 1),
+        "spot_atr": round(spot_atr, 2),
+        "ema_stretch_limit": round(
+            ema_stretch_limit,
+            2,
+        ),
+        "vwap_stretch_limit": round(
+            vwap_stretch_limit,
+            2,
+        ),
+        "anti_chase_mode": anti_chase_limits["mode"],
         "vwap_fallback_used": vwap_fallback_used,
         "vwap_chase_enabled": vwap_chase_enabled,
         "ema_chase_blocked": ema_chase_blocked,
