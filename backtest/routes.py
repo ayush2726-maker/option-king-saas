@@ -164,6 +164,17 @@ def _okai_precompute_indicators(dataframe):
     return indicator_df
 
 
+# OKAI COMBINED HERO RESERVATION V2
+# Thread-local context keeps concurrent monthly jobs isolated.
+_OKAI_BACKTEST_RUN_CONTEXT = threading.local()
+
+# Normal strategy must get at least 25 minutes before 15:25 exit.
+_OKAI_NORMAL_ENTRY_CUTOFF_MINUTES = 15 * 60
+
+# Combined expiry days reserve 14:30-15:00 for Hero Zero.
+_OKAI_COMBINED_HERO_RESERVE_MINUTES = 14 * 60 + 25
+
+
 def _candle_minutes_ist(value):
     """Return candle time as IST minutes from midnight."""
     try:
@@ -382,10 +393,12 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
     _score_log = []
     _score_detail_log = []
 
+    # OKAI INSTRUMENT EXPIRY ATR V2
+    # Expiry ATR applies only to the selected instrument's expiry.
     try:
-        is_expiry_day = (
-            datetime.fromisoformat(date_str).weekday()
-            == 1
+        is_expiry_day = _okai_is_instrument_expiry(
+            instrument,
+            date_str,
         )
     except Exception:
         is_expiry_day = False
@@ -409,6 +422,22 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
         candle_minutes = _candle_minutes_ist(last["time"])
         force_eod_exit = (
             candle_minutes >= 15 * 60 + 25
+        )
+
+        # OKAI NORMAL RUN TIMING CONTEXT V2
+        normal_entry_cutoff = getattr(
+            _OKAI_BACKTEST_RUN_CONTEXT,
+            "normal_entry_cutoff_minutes",
+            _OKAI_NORMAL_ENTRY_CUTOFF_MINUTES,
+        )
+        normal_force_exit = getattr(
+            _OKAI_BACKTEST_RUN_CONTEXT,
+            "normal_force_exit_minutes",
+            None,
+        )
+        force_combined_reserve_exit = (
+            normal_force_exit is not None
+            and candle_minutes >= normal_force_exit
         )
 
         if open_trade:
@@ -508,23 +537,42 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
 
             if (
                 hit_sl
+                or force_combined_reserve_exit
                 or structural_exit
                 or force_eod_exit
                 or is_last
             ):
                 if hit_sl:
-                    exit_price = round(active_sl,2)
+                    exit_price = round(active_sl, 2)
                     reason = (
                         "PROFIT_LOCK_TRAIL"
                         if active_sl >= entry
                         else "PURE_ATR_SL"
                     )
+                elif force_combined_reserve_exit:
+                    exit_price = round(
+                        current_premium,
+                        2,
+                    )
+                    reason = (
+                        "COMBINED_HERO_RESERVE_EXIT_1425"
+                    )
                 elif structural_exit:
-                    exit_price = round(current_premium, 2)
+                    exit_price = round(
+                        current_premium,
+                        2,
+                    )
                     reason = "TWO_CANDLE_REVERSAL_EXIT"
                 else:
-                    exit_price = round(current_premium,2)
-                    reason = "EOD_EXIT_1525" if force_eod_exit else "DAY_END_EXIT"
+                    exit_price = round(
+                        current_premium,
+                        2,
+                    )
+                    reason = (
+                        "EOD_EXIT_1525"
+                        if force_eod_exit
+                        else "DAY_END_EXIT"
+                    )
 
                 pnl = round((exit_price-entry)*qty,2)
                 trades.append({
@@ -580,8 +628,13 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             open_trade["trail_stage"] = trail["stage"]
             continue
 
-        # Do not open another trade after the force-exit time.
-        if force_eod_exit:
+        # OKAI NORMAL LATE ENTRY GUARD V2
+        # Normal entries stop at 15:00 on regular days.
+        # Combined expiry days use the stricter 14:25 cutoff.
+        if (
+            force_eod_exit
+            or candle_minutes >= normal_entry_cutoff
+        ):
             continue
 
         orb_high, orb_low = calculate_orb_levels(wdf)
@@ -3382,6 +3435,9 @@ def _okai_combine_normal_and_hero(
                 _OKAI_HERO_CAPITAL_CAP
             ),
             "overlapping_trade_skipped": True,
+            "normal_entry_cutoff": "14:25",
+            "normal_force_exit": "14:25",
+            "hero_reserved_window": "14:30-15:00",
         },
         "summary": {
             "period": "DAILY",
@@ -3407,6 +3463,27 @@ def _okai_combine_normal_and_hero(
             ),
         },
     }
+
+
+def _okai_combined_reservation_applies(
+    instrument,
+    date_str,
+):
+    instrument = str(
+        instrument or "AUTO"
+    ).upper()
+
+    if instrument == "AUTO":
+        return bool(
+            _okai_expiry_instruments_for_date(
+                date_str
+            )
+        )
+
+    return _okai_is_instrument_expiry(
+        instrument,
+        date_str,
+    )
 
 
 def _okai_run_backtest_mode(
@@ -3436,16 +3513,82 @@ def _okai_run_backtest_mode(
             capital,
         )
 
-    normal_result = run_realistic_day_backtest(
-        broker_name,
-        obj,
-        instrument,
-        date_str,
-        capital,
-        82,
-        sl_percent,
-        target_percent,
+    # OKAI COMBINED NORMAL CONTEXT V2
+    reserve_hero_window = (
+        mode == "COMBINED"
+        and _okai_combined_reservation_applies(
+            instrument,
+            date_str,
+        )
     )
+
+    had_cutoff = hasattr(
+        _OKAI_BACKTEST_RUN_CONTEXT,
+        "normal_entry_cutoff_minutes",
+    )
+    had_force_exit = hasattr(
+        _OKAI_BACKTEST_RUN_CONTEXT,
+        "normal_force_exit_minutes",
+    )
+    old_cutoff = getattr(
+        _OKAI_BACKTEST_RUN_CONTEXT,
+        "normal_entry_cutoff_minutes",
+        None,
+    )
+    old_force_exit = getattr(
+        _OKAI_BACKTEST_RUN_CONTEXT,
+        "normal_force_exit_minutes",
+        None,
+    )
+
+    try:
+        _OKAI_BACKTEST_RUN_CONTEXT.normal_entry_cutoff_minutes = (
+            _OKAI_COMBINED_HERO_RESERVE_MINUTES
+            if reserve_hero_window
+            else _OKAI_NORMAL_ENTRY_CUTOFF_MINUTES
+        )
+        _OKAI_BACKTEST_RUN_CONTEXT.normal_force_exit_minutes = (
+            _OKAI_COMBINED_HERO_RESERVE_MINUTES
+            if reserve_hero_window
+            else None
+        )
+
+        normal_result = run_realistic_day_backtest(
+            broker_name,
+            obj,
+            instrument,
+            date_str,
+            capital,
+            82,
+            sl_percent,
+            target_percent,
+        )
+    finally:
+        if had_cutoff:
+            _OKAI_BACKTEST_RUN_CONTEXT.normal_entry_cutoff_minutes = (
+                old_cutoff
+            )
+        else:
+            try:
+                delattr(
+                    _OKAI_BACKTEST_RUN_CONTEXT,
+                    "normal_entry_cutoff_minutes",
+                )
+            except AttributeError:
+                pass
+
+        if had_force_exit:
+            _OKAI_BACKTEST_RUN_CONTEXT.normal_force_exit_minutes = (
+                old_force_exit
+            )
+        else:
+            try:
+                delattr(
+                    _OKAI_BACKTEST_RUN_CONTEXT,
+                    "normal_force_exit_minutes",
+                )
+            except AttributeError:
+                pass
 
     if isinstance(normal_result, dict):
         normal_result["strategy_mode"] = (
@@ -3459,6 +3602,16 @@ def _okai_run_backtest_mode(
             or 0
         )
         normal_result["hero_zero_pnl"] = 0.0
+        normal_result[
+            "normal_entry_cutoff"
+        ] = (
+            "14:25"
+            if reserve_hero_window
+            else "15:00"
+        )
+        normal_result[
+            "combined_hero_window_reserved"
+        ] = bool(reserve_hero_window)
 
         if isinstance(
             normal_result.get("summary"),
