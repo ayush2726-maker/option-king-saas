@@ -261,6 +261,47 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             hit_sl = premium_low <= active_sl
             is_last = i == len(df)-1
 
+            orb_high_open, orb_low_open = (
+                calculate_orb_levels(wdf)
+            )
+            open_market_data = {
+                "price": spot_close,
+                "vwap": float(last["VWAP"]),
+                "ema9": float(last["EMA9"]),
+                "ema21": float(last["EMA21"]),
+                "adx": float(last["ADX"]),
+                "volume_ratio": float(
+                    last["VOL_RATIO"]
+                ),
+                "vwap_fallback_used": bool(
+                    last["VWAP_FALLBACK_USED"]
+                ),
+                "supertrend_dir": str(
+                    last["ST_DIR"]
+                ),
+                "trend": trend,
+                "mtf_confirmed": (
+                    trend != "SIDEWAYS"
+                ),
+                "c1_bullish": (
+                    float(c1["close"])
+                    > float(c1["open"])
+                ),
+                "c2_bullish": (
+                    float(c2["close"])
+                    > float(c2["open"])
+                ),
+                "gap_day": False,
+                "orb_high": orb_high_open,
+                "orb_low": orb_low_open,
+                "atr": float(last["ATR"]),
+            }
+
+            opposite_signal_data = get_full_signal(
+                open_market_data,
+                consecutive_losses=consecutive_losses,
+            )
+
             reversal = detect_structural_reversal(
                 position_side=side,
                 price=spot_close,
@@ -268,6 +309,15 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                 ema9=float(last["EMA9"]),
                 ema21=float(last["EMA21"]),
                 supertrend_dir=str(last["ST_DIR"]),
+                opposite_signal=opposite_signal_data.get(
+                    "signal",
+                    "WAIT",
+                ),
+                opposite_score=opposite_signal_data.get(
+                    "score",
+                    0,
+                ),
+                min_score=82,
             )
 
             if reversal["detected"]:
@@ -581,6 +631,13 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             },
             "entry_score_after_losses": 82,
             "loss_score_escalation_enabled": False,
+            "reversal_confirmation_version": (
+                "TRUE_OPPOSITE_V2"
+            ),
+            "reversal_requires": (
+                "opposite ST+EMA trend flip OR "
+                "valid opposite 82+ signal"
+            ),
             "expiry_day": "TUESDAY",
             "ignored_request_fields": ["sl_percent","target_percent"],
         },

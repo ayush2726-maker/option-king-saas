@@ -101,28 +101,49 @@ def detect_structural_reversal(
     ema9,
     ema21,
     supertrend_dir,
+    opposite_signal=None,
+    opposite_score=0,
+    min_score=82,
 ):
-    # Caller must require two consecutive closed candles.
+    """
+    Two-candle caller confirmation is still required.
+
+    A reversal is valid only when price breaks VWAP and EMA9,
+    plus either:
+      1. Supertrend and EMA trend both flip opposite, or
+      2. A fresh valid opposite-side signal scores at least 82.
+    """
     side = str(position_side or "").upper()
     close = float(price or 0)
     vwap_value = float(vwap or close)
     ema9_value = float(ema9 or close)
     ema21_value = float(ema21 or ema9_value)
     st = str(supertrend_dir or "NEUTRAL").upper()
+    signal = str(opposite_signal or "WAIT").upper()
+    score = float(opposite_score or 0)
+    score_gate = float(min_score or 82)
 
     if side == "CE":
         vwap_broken = close < vwap_value
         ema9_broken = close < ema9_value
-        opposite_confirmed = (
+        trend_flip_confirmed = (
             st == "DOWN"
-            or ema9_value < ema21_value
+            and ema9_value < ema21_value
+        )
+        valid_opposite_signal = (
+            signal == "PE"
+            and score >= score_gate
         )
     elif side == "PE":
         vwap_broken = close > vwap_value
         ema9_broken = close > ema9_value
-        opposite_confirmed = (
+        trend_flip_confirmed = (
             st == "UP"
-            or ema9_value > ema21_value
+            and ema9_value > ema21_value
+        )
+        valid_opposite_signal = (
+            signal == "CE"
+            and score >= score_gate
         )
     else:
         return {
@@ -131,7 +152,17 @@ def detect_structural_reversal(
             "vwap_broken": False,
             "ema9_broken": False,
             "opposite_confirmed": False,
+            "trend_flip_confirmed": False,
+            "valid_opposite_signal": False,
+            "opposite_signal": signal,
+            "opposite_score": round(score, 2),
+            "min_score": round(score_gate, 2),
         }
+
+    opposite_confirmed = (
+        trend_flip_confirmed
+        or valid_opposite_signal
+    )
 
     detected = (
         vwap_broken
@@ -145,10 +176,18 @@ def detect_structural_reversal(
         "vwap_broken": bool(vwap_broken),
         "ema9_broken": bool(ema9_broken),
         "opposite_confirmed": bool(opposite_confirmed),
+        "trend_flip_confirmed": bool(
+            trend_flip_confirmed
+        ),
+        "valid_opposite_signal": bool(
+            valid_opposite_signal
+        ),
+        "opposite_signal": signal,
+        "opposite_score": round(score, 2),
+        "min_score": round(score_gate, 2),
         "price": round(close, 2),
         "vwap": round(vwap_value, 2),
         "ema9": round(ema9_value, 2),
         "ema21": round(ema21_value, 2),
         "supertrend_dir": st,
     }
-

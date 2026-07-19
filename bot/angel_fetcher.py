@@ -570,6 +570,15 @@ def run_user_bot(user_id: int, creds: dict, state: dict):
             )
             hero = is_hero_window_active()
 
+            market_data["signal"] = signal_data.get(
+                "signal",
+                "WAIT",
+            )
+            market_data["signal_score"] = signal_data.get(
+                "score",
+                0,
+            )
+
             try:
                 _manage_paper_trade(
                     user_id,
@@ -803,6 +812,15 @@ def run_user_bot_multi(user_id: int, broker_name: str, creds: dict, state: dict)
             )
             hero = is_hero_window_active()
 
+            market_data["signal"] = signal_data.get(
+                "signal",
+                "WAIT",
+            )
+            market_data["signal_score"] = signal_data.get(
+                "score",
+                0,
+            )
+
             try:
                 _manage_paper_trade_multi(
                     user_id, broker_name, underlying,
@@ -897,6 +915,15 @@ def _dynamic_reversal_state(
         supertrend_dir=market_data.get(
             "supertrend_dir"
         ),
+        opposite_signal=market_data.get(
+            "signal",
+            "WAIT",
+        ),
+        opposite_score=market_data.get(
+            "signal_score",
+            0,
+        ),
+        min_score=82,
     )
 
     current_candle = str(candle_id)
