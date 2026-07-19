@@ -241,20 +241,91 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
         if open_trade:
             side = open_trade["side"]
             entry = open_trade["entry_price"]
-            underlying_move_pct = (price - open_trade["entry_spot"]) / open_trade["entry_spot"] * 100
-            if side == "PE":
-                underlying_move_pct = -underlying_move_pct
-            est_premium_move_pct = underlying_move_pct * 8
-            current_premium = max(0.5, entry * (1 + est_premium_move_pct / 100))
+            entry_spot = open_trade["entry_spot"]
+
+            spot_close = float(last["close"])
+            spot_high = float(last["high"])
+            spot_low = float(last["low"])
+
+            close_move_pct = (
+                (spot_close - entry_spot)
+                / entry_spot
+                * 100
+            )
+
+            if side == "CE":
+                favorable_move_pct = (
+                    (spot_high - entry_spot)
+                    / entry_spot
+                    * 100
+                )
+                adverse_move_pct = (
+                    (spot_low - entry_spot)
+                    / entry_spot
+                    * 100
+                )
+            else:
+                close_move_pct = -close_move_pct
+                favorable_move_pct = (
+                    (entry_spot - spot_low)
+                    / entry_spot
+                    * 100
+                )
+                adverse_move_pct = (
+                    (entry_spot - spot_high)
+                    / entry_spot
+                    * 100
+                )
+
+            premium_response = 8.0
+
+            current_premium = max(
+                0.5,
+                entry * (
+                    1
+                    + (
+                        close_move_pct
+                        * premium_response
+                    ) / 100
+                ),
+            )
+
+            estimated_premium_high = max(
+                0.5,
+                entry * (
+                    1
+                    + (
+                        favorable_move_pct
+                        * premium_response
+                    ) / 100
+                ),
+            )
+
+            estimated_premium_low = max(
+                0.5,
+                entry * (
+                    1
+                    + (
+                        adverse_move_pct
+                        * premium_response
+                    ) / 100
+                ),
+            )
 
             hit_target = (
-                current_premium
+                estimated_premium_high
                 >= open_trade["target_price"]
             )
             hit_sl = (
-                current_premium
+                estimated_premium_low
                 <= open_trade["sl_price"]
             )
+
+            intrabar_both_hit = (
+                hit_sl
+                and hit_target
+            )
+
             is_last_candle = (i == len(df) - 1)
 
             if (
@@ -263,17 +334,35 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                 or force_eod_exit
                 or is_last_candle
             ):
-                exit_price = round(current_premium, 2)
-                pnl = round((exit_price - entry) * qty, 2)
-
-                if hit_target:
-                    reason = "TARGET"
-                elif hit_sl:
+                # Historical 1-minute OHLC does not reveal whether
+                # high or low occurred first. If both levels are
+                # touched in one candle, use conservative SL-first.
+                if hit_sl:
+                    exit_price = round(
+                        open_trade["sl_price"],
+                        2,
+                    )
                     reason = "SL"
-                elif force_eod_exit:
-                    reason = "EOD_EXIT_1525"
+                elif hit_target:
+                    exit_price = round(
+                        open_trade["target_price"],
+                        2,
+                    )
+                    reason = "TARGET"
                 else:
-                    reason = "DAY_END_EXIT"
+                    exit_price = round(
+                        current_premium,
+                        2,
+                    )
+                    if force_eod_exit:
+                        reason = "EOD_EXIT_1525"
+                    else:
+                        reason = "DAY_END_EXIT"
+
+                pnl = round(
+                    (exit_price - entry) * qty,
+                    2,
+                )
                 trades.append({
                     "trade_no": trade_no,
                     "symbol": f"{instrument} {side}",
@@ -299,6 +388,16 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                     "estimated_option_atr": open_trade[
                         "estimated_option_atr"
                     ],
+                    "estimated_premium_high": round(
+                        estimated_premium_high,
+                        2,
+                    ),
+                    "estimated_premium_low": round(
+                        estimated_premium_low,
+                        2,
+                    ),
+                    "intrabar_both_hit": intrabar_both_hit,
+                    "premium_response_factor": premium_response,
                 })
                 if pnl < 0:
                     consecutive_losses += 1
