@@ -669,6 +669,10 @@ def run_backtest(body: dict, authorization: str = Header(None)):
         entry_score = int(body.get("entry_score") or body.get("entry_threshold") or 82)
         sl_percent = float(body.get("sl_percent") or 12)
         target_percent = float(body.get("target_percent") or 24)
+        strategy_mode = str(
+            body.get("strategy_mode")
+            or "NORMAL"
+        ).upper()
 
         if is_weekend(run_date):
             conn.close()
@@ -707,15 +711,16 @@ def run_backtest(body: dict, authorization: str = Header(None)):
             conn.close()
             return {"success": False, "message": f"Broker login failed: {str(e)[:150]}"}
 
-        raw_result = run_realistic_day_backtest(
-            broker_name,
-            obj,
-            instrument,
-            run_date,
-            capital,
-            entry_score,
-            sl_percent,
-            target_percent,
+        raw_result = _okai_run_backtest_mode(
+            broker_name=broker_name,
+            obj=obj,
+            instrument=instrument,
+            date_str=run_date,
+            capital=capital,
+            entry_threshold=82,
+            sl_percent=sl_percent,
+            target_percent=target_percent,
+            strategy_mode=strategy_mode,
         )
 
         json_stats = {"non_finite": 0}
@@ -751,6 +756,7 @@ def run_backtest(body: dict, authorization: str = Header(None)):
             msg = "\n".join([
                 "📊 <b>Backtest Complete (Real Signal)</b>",
                 f"Instrument: {instrument}",
+                f"Strategy: {result.get('strategy_mode', strategy_mode)}",
                 f"Date: {run_date}",
                 f"Trades: {result['total_trades']}",
                 f"Wins/Losses: {result['wins']}/{result['losses']}",
@@ -1425,6 +1431,10 @@ def run_monthly_backtest(
         entry_score = 82
         sl_percent = 0.0
         target_percent = 0.0
+        strategy_mode = str(
+            body.get("strategy_mode")
+            or "NORMAL"
+        ).upper()
 
         month_dates = _okai_month_weekdays(
             month_text
@@ -1525,6 +1535,8 @@ def run_monthly_backtest(
         flat_days = 0
         tested_days = 0
         skipped_days = 0
+        total_normal_pnl = 0.0
+        total_hero_zero_pnl = 0.0
 
         for index, date_text in enumerate(
             month_dates
@@ -1534,15 +1546,16 @@ def run_monthly_backtest(
                 # candle requests, so keep a safe gap.
                 _okai_time.sleep(0.75)
 
-            raw_day = run_realistic_day_backtest(
-                broker_name,
-                obj,
-                instrument,
-                date_text,
-                current_capital,
-                entry_score,
-                sl_percent,
-                target_percent,
+            raw_day = _okai_run_backtest_mode(
+                broker_name=broker_name,
+                obj=obj,
+                instrument=instrument,
+                date_str=date_text,
+                capital=current_capital,
+                entry_threshold=82,
+                sl_percent=sl_percent,
+                target_percent=target_percent,
+                strategy_mode=strategy_mode,
             )
 
             json_stats = {"non_finite": 0}
@@ -1635,6 +1648,18 @@ def run_monthly_backtest(
                     day.get("win_rate") or 0
                 ),
                 "pnl": round(day_pnl, 2),
+                "strategy_mode": day.get(
+                    "strategy_mode",
+                    strategy_mode,
+                ),
+                "normal_pnl": round(
+                    float(day.get("normal_pnl") or 0),
+                    2,
+                ),
+                "hero_zero_pnl": round(
+                    float(day.get("hero_zero_pnl") or 0),
+                    2,
+                ),
                 "max_score": day.get(
                     "debug_max_score"
                 ),
@@ -1659,6 +1684,12 @@ def run_monthly_backtest(
             total_trades += day_trades
             total_wins += day_wins
             total_losses += day_losses
+            total_normal_pnl += float(
+                day.get("normal_pnl") or 0
+            )
+            total_hero_zero_pnl += float(
+                day.get("hero_zero_pnl") or 0
+            )
 
         net_pnl = round(
             current_capital
@@ -1684,6 +1715,15 @@ def run_monthly_backtest(
             "period": "MONTHLY",
             "month": month_text,
             "instrument": instrument,
+            "strategy_mode": strategy_mode,
+            "normal_pnl": round(
+                total_normal_pnl,
+                2,
+            ),
+            "hero_zero_pnl": round(
+                total_hero_zero_pnl,
+                2,
+            ),
             "capital": round(
                 starting_capital,
                 2,
@@ -1742,6 +1782,15 @@ def run_monthly_backtest(
                 "period": "MONTHLY",
                 "month": month_text,
                 "instrument": instrument,
+                "strategy_mode": strategy_mode,
+                "normal_pnl": round(
+                    total_normal_pnl,
+                    2,
+                ),
+                "hero_zero_pnl": round(
+                    total_hero_zero_pnl,
+                    2,
+                ),
                 "trades": total_trades,
                 "wins": total_wins,
                 "losses": total_losses,
@@ -1799,7 +1848,12 @@ def run_monthly_backtest(
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 user["id"],
-                instrument + "_MONTHLY",
+                (
+                    instrument
+                    + "_"
+                    + strategy_mode
+                    + "_MONTHLY"
+                ),
                 month_text,
                 starting_capital,
                 entry_score,
@@ -1822,6 +1876,7 @@ def run_monthly_backtest(
                     "📅 <b>Monthly Backtest Complete</b>",
                     f"Month: {month_text}",
                     f"Instrument: {instrument}",
+                    f"Strategy: {strategy_mode}",
                     f"Tested Days: {tested_days}",
                     f"Trades: {total_trades}",
                     (
@@ -1852,3 +1907,1292 @@ def run_monthly_backtest(
                 "but error is visible."
             ),
         }
+
+
+# ============================================================
+# OKAI HERO ZERO BACKTEST V1
+# Tuesday expiry, entry 14:30-15:00 IST, force exit 15:25,
+# score 82, estimated premium Rs 0.50-Rs 10,
+# capital cap Rs 2,000, max one trade per day.
+# ============================================================
+_OKAI_HERO_WINDOW_START = 14 * 60 + 30
+_OKAI_HERO_WINDOW_END = 15 * 60
+_OKAI_HERO_FORCE_EXIT = 15 * 60 + 25
+_OKAI_HERO_CAPITAL_CAP = 2000.0
+_OKAI_HERO_PREMIUM_MIN = 0.50
+_OKAI_HERO_PREMIUM_MAX = 10.00
+_OKAI_HERO_GAMMA_RESPONSE = 25.0
+_OKAI_HERO_THETA_DECAY_PER_MINUTE = 0.006
+_OKAI_HERO_SL_FRACTION = 0.50
+_OKAI_HERO_TARGET_MULTIPLE = 2.00
+
+
+def _okai_normalize_strategy_mode(value):
+    text = str(value or "NORMAL").upper()
+    aliases = {
+        "HERO": "HERO_ZERO",
+        "HEROZERO": "HERO_ZERO",
+        "HERO ZERO": "HERO_ZERO",
+        "BOTH": "COMBINED",
+        "NORMAL+HERO": "COMBINED",
+        "NORMAL_HERO": "COMBINED",
+    }
+    text = aliases.get(text, text)
+    if text not in (
+        "NORMAL",
+        "HERO_ZERO",
+        "COMBINED",
+    ):
+        text = "NORMAL"
+    return text
+
+
+def _okai_is_tuesday_expiry(date_str):
+    try:
+        return (
+            datetime.fromisoformat(
+                str(date_str)
+            ).weekday()
+            == 1
+        )
+    except Exception:
+        return False
+
+
+def _okai_hero_estimated_entry_premium(
+    spot_atr,
+    candle_minutes,
+):
+    try:
+        atr = max(
+            0.0,
+            float(spot_atr or 0),
+        )
+    except (TypeError, ValueError):
+        atr = 0.0
+
+    elapsed = max(
+        0,
+        min(
+            30,
+            int(candle_minutes)
+            - _OKAI_HERO_WINDOW_START,
+        ),
+    )
+    window_decay = max(
+        0.55,
+        1.0 - elapsed / 70.0,
+    )
+    premium = atr * 0.22 * window_decay
+    premium = max(
+        _OKAI_HERO_PREMIUM_MIN,
+        min(
+            _OKAI_HERO_PREMIUM_MAX,
+            premium,
+        ),
+    )
+    premium = round(premium * 2.0) / 2.0
+    return round(
+        max(
+            _OKAI_HERO_PREMIUM_MIN,
+            premium,
+        ),
+        2,
+    )
+
+
+def _okai_hero_sizing(
+    capital,
+    entry_price,
+    lot_size,
+):
+    try:
+        available_capital = max(
+            0.0,
+            min(
+                float(capital or 0),
+                _OKAI_HERO_CAPITAL_CAP,
+            ),
+        )
+        entry = max(
+            0.0,
+            float(entry_price or 0),
+        )
+        lot = max(
+            1,
+            int(lot_size or 1),
+        )
+    except (TypeError, ValueError):
+        available_capital = 0.0
+        entry = 0.0
+        lot = 1
+
+    one_lot_cost = entry * lot
+    lots = (
+        int(available_capital // one_lot_cost)
+        if one_lot_cost > 0
+        else 0
+    )
+    qty = lots * lot
+    capital_used = qty * entry
+
+    return {
+        "hero_capital_cap": round(
+            available_capital,
+            2,
+        ),
+        "lot_size": lot,
+        "lots": lots,
+        "quantity": qty,
+        "capital_used": round(
+            capital_used,
+            2,
+        ),
+        "hero_capital_utilization_percent": (
+            round(
+                capital_used
+                / available_capital
+                * 100,
+                2,
+            )
+            if available_capital > 0
+            else 0.0
+        ),
+        "affordable": lots >= 1,
+    }
+
+
+def _okai_empty_hero_result(
+    instrument,
+    date_str,
+    capital,
+    reason,
+    expiry_day,
+):
+    return {
+        "success": True,
+        "period": "DAILY",
+        "instrument": instrument,
+        "date": date_str,
+        "strategy_mode": "HERO_ZERO",
+        "expiry_day": bool(expiry_day),
+        "hero_zero_eligible": bool(expiry_day),
+        "hero_zero_reason": reason,
+        "capital": round(float(capital), 2),
+        "ending_capital": round(
+            float(capital),
+            2,
+        ),
+        "total_trades": 0,
+        "wins": 0,
+        "losses": 0,
+        "win_rate": 0,
+        "total_pnl": 0.0,
+        "normal_pnl": 0.0,
+        "hero_zero_pnl": 0.0,
+        "trades": [],
+        "hero_zero": {
+            "entry_window": "14:30-15:00 IST",
+            "force_exit": "15:25 IST",
+            "expiry_day": "TUESDAY",
+            "capital_cap": _OKAI_HERO_CAPITAL_CAP,
+            "premium_range": [
+                _OKAI_HERO_PREMIUM_MIN,
+                _OKAI_HERO_PREMIUM_MAX,
+            ],
+            "entry_score": 82,
+            "max_trades_per_day": 1,
+            "premium_model": (
+                "EXPIRY_GAMMA_ESTIMATE_V1"
+            ),
+        },
+        "summary": {
+            "period": "DAILY",
+            "strategy_mode": "HERO_ZERO",
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0,
+            "capital": round(
+                float(capital),
+                2,
+            ),
+            "ending_capital": round(
+                float(capital),
+                2,
+            ),
+            "net_pnl": 0.0,
+            "normal_pnl": 0.0,
+            "hero_zero_pnl": 0.0,
+            "note": reason,
+        },
+    }
+
+
+def _okai_run_hero_zero_single(
+    broker_name,
+    obj,
+    instrument,
+    date_str,
+    capital,
+):
+    expiry_day = _okai_is_tuesday_expiry(
+        date_str
+    )
+
+    if not expiry_day:
+        return _okai_empty_hero_result(
+            instrument,
+            date_str,
+            capital,
+            "Hero Zero skipped: Tuesday expiry day nahi hai.",
+            False,
+        )
+
+    try:
+        df = fetch_backtest_candles(
+            broker_name,
+            obj,
+            instrument,
+            date_str,
+        )
+    except Exception as exc:
+        return {
+            "success": False,
+            "message": (
+                "Historical data fetch failed: "
+                + str(exc)[:150]
+            ),
+        }
+
+    if df is None or df.empty:
+        return {
+            "success": False,
+            "message": (
+                "No data found for this date "
+                "(market holiday or no historical data)."
+            ),
+        }
+
+    if len(df) < 30:
+        return {
+            "success": False,
+            "message": (
+                "Insufficient candle data for this date."
+            ),
+        }
+
+    open_trade = None
+    closed_trade = None
+    score_log = []
+    candidate_log = []
+
+    for index in range(28, len(df)):
+        window = df.iloc[:index + 1].copy()
+        calculated = calculate_indicators(
+            window
+        )
+        if calculated is None:
+            continue
+
+        wdf, trend = calculated
+        last = wdf.iloc[-1]
+        c1 = (
+            wdf.iloc[-3]
+            if len(wdf) >= 3
+            else wdf.iloc[-1]
+        )
+        c2 = (
+            wdf.iloc[-2]
+            if len(wdf) >= 2
+            else wdf.iloc[-1]
+        )
+
+        candle_minutes = _candle_minutes_ist(
+            last["time"]
+        )
+        price = float(last["close"])
+
+        if open_trade:
+            side = open_trade["side"]
+            entry = open_trade["entry_price"]
+            entry_spot = open_trade[
+                "entry_spot"
+            ]
+            entry_minutes = open_trade[
+                "entry_minutes"
+            ]
+
+            spot_close = float(last["close"])
+            spot_high = float(last["high"])
+            spot_low = float(last["low"])
+
+            close_pct = (
+                spot_close - entry_spot
+            ) / entry_spot * 100
+
+            if side == "CE":
+                good_pct = (
+                    spot_high - entry_spot
+                ) / entry_spot * 100
+                bad_pct = (
+                    spot_low - entry_spot
+                ) / entry_spot * 100
+            else:
+                close_pct = -close_pct
+                good_pct = (
+                    entry_spot - spot_low
+                ) / entry_spot * 100
+                bad_pct = (
+                    entry_spot - spot_high
+                ) / entry_spot * 100
+
+            elapsed_minutes = max(
+                0,
+                candle_minutes - entry_minutes,
+            )
+            theta_factor = max(
+                0.25,
+                1.0
+                - elapsed_minutes
+                * _OKAI_HERO_THETA_DECAY_PER_MINUTE,
+            )
+
+            current_premium = max(
+                0.05,
+                entry
+                * (
+                    1.0
+                    + close_pct
+                    * _OKAI_HERO_GAMMA_RESPONSE
+                    / 100.0
+                )
+                * theta_factor,
+            )
+            premium_high = max(
+                0.05,
+                entry
+                * (
+                    1.0
+                    + good_pct
+                    * _OKAI_HERO_GAMMA_RESPONSE
+                    / 100.0
+                )
+                * theta_factor,
+            )
+            premium_low = max(
+                0.05,
+                entry
+                * (
+                    1.0
+                    + bad_pct
+                    * _OKAI_HERO_GAMMA_RESPONSE
+                    / 100.0
+                )
+                * theta_factor,
+            )
+
+            sl_price = open_trade[
+                "sl_price"
+            ]
+            target_price = open_trade[
+                "target_price"
+            ]
+
+            hit_sl = premium_low <= sl_price
+            hit_target = (
+                premium_high >= target_price
+            )
+            force_exit = (
+                candle_minutes
+                >= _OKAI_HERO_FORCE_EXIT
+            )
+            is_last = index == len(df) - 1
+
+            if (
+                hit_sl
+                or hit_target
+                or force_exit
+                or is_last
+            ):
+                if hit_sl:
+                    exit_price = round(
+                        sl_price,
+                        2,
+                    )
+                    exit_reason = (
+                        "HERO_ZERO_50_PERCENT_SL"
+                    )
+                elif hit_target:
+                    exit_price = round(
+                        target_price,
+                        2,
+                    )
+                    exit_reason = (
+                        "HERO_ZERO_100_PERCENT_TARGET"
+                    )
+                else:
+                    exit_price = round(
+                        current_premium,
+                        2,
+                    )
+                    exit_reason = (
+                        "HERO_ZERO_FORCE_EXIT_1525"
+                        if force_exit
+                        else "HERO_ZERO_DAY_END"
+                    )
+
+                qty = open_trade["qty"]
+                pnl = round(
+                    (exit_price - entry) * qty,
+                    2,
+                )
+
+                closed_trade = {
+                    "trade_no": 1,
+                    "strategy": "HERO_ZERO",
+                    "instrument": instrument,
+                    "symbol": (
+                        f"{instrument} HEROZERO {side}"
+                    ),
+                    "side": side,
+                    "score": open_trade["score"],
+                    "entry_time": open_trade[
+                        "entry_time"
+                    ],
+                    "exit_time": str(
+                        last["time"]
+                    ),
+                    "entry_price": entry,
+                    "exit_price": exit_price,
+                    "sl_price": sl_price,
+                    "target_price": target_price,
+                    "pnl": pnl,
+                    "reason": exit_reason,
+                    "lot_size": open_trade[
+                        "lot_size"
+                    ],
+                    "lots": open_trade["lots"],
+                    "qty": qty,
+                    "capital_before_trade": round(
+                        float(capital),
+                        2,
+                    ),
+                    "capital_used": open_trade[
+                        "capital_used"
+                    ],
+                    "capital_utilization_percent": (
+                        round(
+                            open_trade[
+                                "capital_used"
+                            ]
+                            / float(capital)
+                            * 100,
+                            2,
+                        )
+                        if float(capital) > 0
+                        else 0.0
+                    ),
+                    "hero_capital_cap": open_trade[
+                        "hero_capital_cap"
+                    ],
+                    "hero_capital_utilization_percent": (
+                        open_trade[
+                            "hero_capital_utilization_percent"
+                        ]
+                    ),
+                    "capital_after_trade": round(
+                        float(capital) + pnl,
+                        2,
+                    ),
+                    "entry_spot": entry_spot,
+                    "spot_atr_at_entry": open_trade[
+                        "spot_atr_at_entry"
+                    ],
+                    "estimated_premium_high": round(
+                        premium_high,
+                        2,
+                    ),
+                    "estimated_premium_low": round(
+                        premium_low,
+                        2,
+                    ),
+                    "gamma_response_factor": (
+                        _OKAI_HERO_GAMMA_RESPONSE
+                    ),
+                    "theta_decay_per_minute": (
+                        _OKAI_HERO_THETA_DECAY_PER_MINUTE
+                    ),
+                    "expiry_day": True,
+                    "fixed_target_enabled": True,
+                }
+                break
+
+            continue
+
+        if not (
+            _OKAI_HERO_WINDOW_START
+            <= candle_minutes
+            < _OKAI_HERO_WINDOW_END
+        ):
+            continue
+
+        orb_high, orb_low = calculate_orb_levels(
+            wdf
+        )
+        market_data = {
+            "price": price,
+            "vwap": float(last["VWAP"]),
+            "ema9": float(last["EMA9"]),
+            "ema21": float(last["EMA21"]),
+            "adx": float(last["ADX"]),
+            "volume_ratio": float(
+                last["VOL_RATIO"]
+            ),
+            "vwap_fallback_used": bool(
+                last["VWAP_FALLBACK_USED"]
+            ),
+            "supertrend_dir": str(
+                last["ST_DIR"]
+            ),
+            "trend": trend,
+            "mtf_confirmed": (
+                trend != "SIDEWAYS"
+            ),
+            "c1_bullish": (
+                float(c1["close"])
+                > float(c1["open"])
+            ),
+            "c2_bullish": (
+                float(c2["close"])
+                > float(c2["open"])
+            ),
+            "gap_day": False,
+            "orb_high": orb_high,
+            "orb_low": orb_low,
+            "atr": float(last["ATR"]),
+        }
+
+        signal_data = get_full_signal(
+            market_data,
+            consecutive_losses=0,
+        )
+        score = int(
+            signal_data.get("score", 0)
+            or 0
+        )
+        score_log.append(score)
+
+        candidate_log.append({
+            "time": str(last["time"]),
+            "instrument": instrument,
+            "candidate_signal": (
+                signal_data.get(
+                    "candidate_signal"
+                )
+            ),
+            "final_signal": (
+                signal_data.get("signal")
+            ),
+            "score": score,
+            "trade_allowed": bool(
+                signal_data.get(
+                    "trade_allowed",
+                    False,
+                )
+            ),
+            "ema_stretch_points": (
+                signal_data.get(
+                    "ema_stretch_points",
+                    0,
+                )
+            ),
+            "ema_stretch_limit": (
+                signal_data.get(
+                    "ema_stretch_limit",
+                    0,
+                )
+            ),
+            "warnings": signal_data.get(
+                "warnings",
+                [],
+            ),
+        })
+
+        if not (
+            signal_data.get("trade_allowed")
+            and signal_data.get("signal")
+            in ("CE", "PE")
+            and score >= 82
+        ):
+            continue
+
+        entry_premium = (
+            _okai_hero_estimated_entry_premium(
+                market_data["atr"],
+                candle_minutes,
+            )
+        )
+        sizing = _okai_hero_sizing(
+            capital,
+            entry_premium,
+            LOT_SIZES.get(instrument, 1),
+        )
+
+        if not sizing["affordable"]:
+            continue
+
+        open_trade = {
+            "side": signal_data["signal"],
+            "score": score,
+            "entry_time": str(last["time"]),
+            "entry_minutes": candle_minutes,
+            "entry_spot": price,
+            "entry_price": entry_premium,
+            "sl_price": round(
+                entry_premium
+                * _OKAI_HERO_SL_FRACTION,
+                2,
+            ),
+            "target_price": round(
+                entry_premium
+                * _OKAI_HERO_TARGET_MULTIPLE,
+                2,
+            ),
+            "spot_atr_at_entry": (
+                market_data["atr"]
+            ),
+            **sizing,
+            "qty": sizing["quantity"],
+        }
+
+    if closed_trade is None:
+        reason = (
+            "Hero Zero: 14:30-15:00 me "
+            "valid score 82 setup nahi mila."
+        )
+        result = _okai_empty_hero_result(
+            instrument,
+            date_str,
+            capital,
+            reason,
+            True,
+        )
+        result["debug_max_score"] = (
+            max(score_log)
+            if score_log
+            else None
+        )
+        result["debug_top_candidates"] = sorted(
+            candidate_log,
+            key=lambda row: row["score"],
+            reverse=True,
+        )[:10]
+        return result
+
+    pnl = float(closed_trade["pnl"])
+    wins = 1 if pnl >= 0 else 0
+    losses = 1 - wins
+
+    return {
+        "success": True,
+        "period": "DAILY",
+        "instrument": instrument,
+        "date": date_str,
+        "strategy_mode": "HERO_ZERO",
+        "expiry_day": True,
+        "hero_zero_eligible": True,
+        "capital": round(
+            float(capital),
+            2,
+        ),
+        "ending_capital": round(
+            float(capital) + pnl,
+            2,
+        ),
+        "total_trades": 1,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": (
+            100.0 if wins else 0.0
+        ),
+        "total_pnl": round(pnl, 2),
+        "normal_pnl": 0.0,
+        "hero_zero_pnl": round(pnl, 2),
+        "trades": [closed_trade],
+        "debug_max_score": (
+            max(score_log)
+            if score_log
+            else closed_trade["score"]
+        ),
+        "debug_top_candidates": sorted(
+            candidate_log,
+            key=lambda row: row["score"],
+            reverse=True,
+        )[:10],
+        "hero_zero": {
+            "entry_window": "14:30-15:00 IST",
+            "force_exit": "15:25 IST",
+            "expiry_day": "TUESDAY",
+            "capital_cap": _OKAI_HERO_CAPITAL_CAP,
+            "premium_range": [
+                _OKAI_HERO_PREMIUM_MIN,
+                _OKAI_HERO_PREMIUM_MAX,
+            ],
+            "entry_score": 82,
+            "max_trades_per_day": 1,
+            "sl_percent": 50,
+            "target_percent": 100,
+            "premium_model": (
+                "EXPIRY_GAMMA_ESTIMATE_V1"
+            ),
+        },
+        "summary": {
+            "period": "DAILY",
+            "strategy_mode": "HERO_ZERO",
+            "trades": 1,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": (
+                100.0 if wins else 0.0
+            ),
+            "capital": round(
+                float(capital),
+                2,
+            ),
+            "ending_capital": round(
+                float(capital) + pnl,
+                2,
+            ),
+            "net_pnl": round(pnl, 2),
+            "normal_pnl": 0.0,
+            "hero_zero_pnl": round(
+                pnl,
+                2,
+            ),
+            "note": (
+                "Hero Zero uses maximum Rs 2,000 "
+                "capital and estimated expiry gamma premium."
+            ),
+        },
+    }
+
+
+def _okai_run_hero_zero_day(
+    broker_name,
+    obj,
+    instrument,
+    date_str,
+    capital,
+):
+    instrument = str(
+        instrument or "AUTO"
+    ).upper()
+
+    if instrument != "AUTO":
+        return _okai_run_hero_zero_single(
+            broker_name,
+            obj,
+            instrument,
+            date_str,
+            capital,
+        )
+
+    if not _okai_is_tuesday_expiry(
+        date_str
+    ):
+        return _okai_empty_hero_result(
+            "AUTO",
+            date_str,
+            capital,
+            "Hero Zero skipped: Tuesday expiry day nahi hai.",
+            False,
+        )
+
+    import time as _okai_hero_time
+
+    per_instrument = {}
+    candidates = []
+
+    for position, symbol in enumerate(
+        _OKAI_AUTO_INSTRUMENTS
+    ):
+        if position > 0:
+            _okai_hero_time.sleep(0.45)
+
+        result = _okai_run_hero_zero_single(
+            broker_name,
+            obj,
+            symbol,
+            date_str,
+            capital,
+        )
+        per_instrument[symbol] = result
+
+        if (
+            isinstance(result, dict)
+            and result.get("success")
+            and result.get("trades")
+        ):
+            candidates.append(
+                dict(result["trades"][0])
+            )
+
+    if not candidates:
+        result = _okai_empty_hero_result(
+            "AUTO",
+            date_str,
+            capital,
+            (
+                "Hero Zero AUTO: tino indices me "
+                "valid score 82 setup nahi mila."
+            ),
+            True,
+        )
+        result["per_instrument"] = {
+            symbol: {
+                "trades": int(
+                    value.get(
+                        "total_trades",
+                        0,
+                    )
+                    or 0
+                ),
+                "pnl": float(
+                    value.get(
+                        "total_pnl",
+                        0,
+                    )
+                    or 0
+                ),
+                "max_score": value.get(
+                    "debug_max_score"
+                ),
+                "reason": value.get(
+                    "hero_zero_reason"
+                ),
+            }
+            for symbol, value
+            in per_instrument.items()
+            if isinstance(value, dict)
+        }
+        result["debug_max_score"] = max(
+            (
+                value.get("debug_max_score")
+                for value
+                in per_instrument.values()
+                if isinstance(value, dict)
+                and value.get(
+                    "debug_max_score"
+                ) is not None
+            ),
+            default=None,
+        )
+        return result
+
+    candidates.sort(
+        key=lambda trade: (
+            _okai_parse_trade_time(
+                trade.get("entry_time")
+            ),
+            -int(trade.get("score") or 0),
+            _OKAI_INSTRUMENT_PRIORITY.get(
+                trade.get("instrument"),
+                99,
+            ),
+        )
+    )
+    chosen = candidates[0]
+    pnl = float(chosen.get("pnl") or 0)
+    wins = 1 if pnl >= 0 else 0
+    losses = 1 - wins
+
+    return {
+        "success": True,
+        "period": "DAILY",
+        "instrument": "AUTO",
+        "selected_instrument": chosen.get(
+            "instrument"
+        ),
+        "date": date_str,
+        "strategy_mode": "HERO_ZERO",
+        "expiry_day": True,
+        "hero_zero_eligible": True,
+        "capital": round(
+            float(capital),
+            2,
+        ),
+        "ending_capital": round(
+            float(capital) + pnl,
+            2,
+        ),
+        "total_trades": 1,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": (
+            100.0 if wins else 0.0
+        ),
+        "total_pnl": round(pnl, 2),
+        "normal_pnl": 0.0,
+        "hero_zero_pnl": round(pnl, 2),
+        "trades": [chosen],
+        "debug_max_score": max(
+            int(trade.get("score") or 0)
+            for trade in candidates
+        ),
+        "per_instrument": {
+            symbol: {
+                "trades": int(
+                    value.get(
+                        "total_trades",
+                        0,
+                    )
+                    or 0
+                ),
+                "pnl": float(
+                    value.get(
+                        "total_pnl",
+                        0,
+                    )
+                    or 0
+                ),
+                "max_score": value.get(
+                    "debug_max_score"
+                ),
+                "reason": value.get(
+                    "hero_zero_reason"
+                ),
+            }
+            for symbol, value
+            in per_instrument.items()
+            if isinstance(value, dict)
+        },
+        "hero_zero": {
+            "entry_window": "14:30-15:00 IST",
+            "force_exit": "15:25 IST",
+            "expiry_day": "TUESDAY",
+            "capital_cap": _OKAI_HERO_CAPITAL_CAP,
+            "premium_range": [
+                _OKAI_HERO_PREMIUM_MIN,
+                _OKAI_HERO_PREMIUM_MAX,
+            ],
+            "entry_score": 82,
+            "max_trades_per_day": 1,
+            "sl_percent": 50,
+            "target_percent": 100,
+            "premium_model": (
+                "EXPIRY_GAMMA_ESTIMATE_V1"
+            ),
+        },
+        "summary": {
+            "period": "DAILY",
+            "strategy_mode": "HERO_ZERO",
+            "trades": 1,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": (
+                100.0 if wins else 0.0
+            ),
+            "capital": round(
+                float(capital),
+                2,
+            ),
+            "ending_capital": round(
+                float(capital) + pnl,
+                2,
+            ),
+            "net_pnl": round(pnl, 2),
+            "normal_pnl": 0.0,
+            "hero_zero_pnl": round(
+                pnl,
+                2,
+            ),
+            "note": (
+                "AUTO Hero Zero selected the earliest "
+                "valid 82+ setup across all three indices."
+            ),
+        },
+    }
+
+
+def _okai_combine_normal_and_hero(
+    normal_result,
+    hero_result,
+    capital,
+    instrument,
+    date_str,
+):
+    if not (
+        isinstance(normal_result, dict)
+        and normal_result.get("success")
+    ):
+        return normal_result
+
+    if not (
+        isinstance(hero_result, dict)
+        and hero_result.get("success")
+    ):
+        return normal_result
+
+    combined_candidates = []
+
+    for trade in normal_result.get(
+        "trades",
+        [],
+    ):
+        row = dict(trade)
+        row["strategy"] = "NORMAL"
+        combined_candidates.append(row)
+
+    for trade in hero_result.get(
+        "trades",
+        [],
+    ):
+        row = dict(trade)
+        row["strategy"] = "HERO_ZERO"
+        combined_candidates.append(row)
+
+    strategy_priority = {
+        "HERO_ZERO": 0,
+        "NORMAL": 1,
+    }
+
+    combined_candidates.sort(
+        key=lambda trade: (
+            _okai_parse_trade_time(
+                trade.get("entry_time")
+            ),
+            -int(trade.get("score") or 0),
+            strategy_priority.get(
+                trade.get("strategy"),
+                99,
+            ),
+        )
+    )
+
+    selected = []
+    busy_until = None
+
+    for trade in combined_candidates:
+        entry_time = _okai_parse_trade_time(
+            trade.get("entry_time")
+        )
+        exit_time = _okai_parse_trade_time(
+            trade.get("exit_time")
+        )
+
+        if (
+            busy_until is not None
+            and entry_time < busy_until
+        ):
+            continue
+
+        selected.append(trade)
+        busy_until = exit_time
+
+    normal_pnl = round(
+        sum(
+            float(trade.get("pnl") or 0)
+            for trade in selected
+            if trade.get("strategy")
+            == "NORMAL"
+        ),
+        2,
+    )
+    hero_pnl = round(
+        sum(
+            float(trade.get("pnl") or 0)
+            for trade in selected
+            if trade.get("strategy")
+            == "HERO_ZERO"
+        ),
+        2,
+    )
+    total_pnl = round(
+        normal_pnl + hero_pnl,
+        2,
+    )
+    wins = sum(
+        1
+        for trade in selected
+        if float(trade.get("pnl") or 0) >= 0
+    )
+    losses = len(selected) - wins
+    win_rate = (
+        round(
+            wins / len(selected) * 100,
+            2,
+        )
+        if selected
+        else 0
+    )
+
+    for number, trade in enumerate(
+        selected,
+        start=1,
+    ):
+        trade["trade_no"] = number
+
+    scores = [
+        value
+        for value in (
+            normal_result.get("debug_max_score"),
+            hero_result.get("debug_max_score"),
+        )
+        if value is not None
+    ]
+
+    return {
+        "success": True,
+        "period": "DAILY",
+        "instrument": instrument,
+        "date": date_str,
+        "strategy_mode": "COMBINED",
+        "capital": round(
+            float(capital),
+            2,
+        ),
+        "ending_capital": round(
+            float(capital) + total_pnl,
+            2,
+        ),
+        "total_trades": len(selected),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "total_pnl": total_pnl,
+        "normal_pnl": normal_pnl,
+        "hero_zero_pnl": hero_pnl,
+        "trades": selected,
+        "debug_max_score": (
+            max(scores)
+            if scores
+            else None
+        ),
+        "combined": {
+            "one_open_trade_at_a_time": True,
+            "normal_position_sizing": (
+                "90_PERCENT_CURRENT_EQUITY"
+            ),
+            "hero_zero_capital_cap": (
+                _OKAI_HERO_CAPITAL_CAP
+            ),
+            "overlapping_trade_skipped": True,
+        },
+        "summary": {
+            "period": "DAILY",
+            "strategy_mode": "COMBINED",
+            "trades": len(selected),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": win_rate,
+            "capital": round(
+                float(capital),
+                2,
+            ),
+            "ending_capital": round(
+                float(capital) + total_pnl,
+                2,
+            ),
+            "net_pnl": total_pnl,
+            "normal_pnl": normal_pnl,
+            "hero_zero_pnl": hero_pnl,
+            "note": (
+                "Normal and Hero Zero are merged "
+                "chronologically with one open trade at a time."
+            ),
+        },
+    }
+
+
+def _okai_run_backtest_mode(
+    broker_name,
+    obj,
+    instrument,
+    date_str,
+    capital,
+    entry_threshold=82,
+    sl_percent=0.0,
+    target_percent=0.0,
+    strategy_mode="NORMAL",
+):
+    mode = _okai_normalize_strategy_mode(
+        strategy_mode
+    )
+    instrument = str(
+        instrument or "AUTO"
+    ).upper()
+
+    if mode == "HERO_ZERO":
+        return _okai_run_hero_zero_day(
+            broker_name,
+            obj,
+            instrument,
+            date_str,
+            capital,
+        )
+
+    normal_result = run_realistic_day_backtest(
+        broker_name,
+        obj,
+        instrument,
+        date_str,
+        capital,
+        82,
+        sl_percent,
+        target_percent,
+    )
+
+    if isinstance(normal_result, dict):
+        normal_result["strategy_mode"] = (
+            "NORMAL"
+        )
+        normal_result["normal_pnl"] = float(
+            normal_result.get(
+                "total_pnl",
+                0,
+            )
+            or 0
+        )
+        normal_result["hero_zero_pnl"] = 0.0
+
+        if isinstance(
+            normal_result.get("summary"),
+            dict,
+        ):
+            normal_result["summary"][
+                "strategy_mode"
+            ] = "NORMAL"
+            normal_result["summary"][
+                "normal_pnl"
+            ] = normal_result[
+                "normal_pnl"
+            ]
+            normal_result["summary"][
+                "hero_zero_pnl"
+            ] = 0.0
+
+        for trade in normal_result.get(
+            "trades",
+            [],
+        ):
+            trade["strategy"] = "NORMAL"
+
+    if mode == "NORMAL":
+        return normal_result
+
+    hero_result = _okai_run_hero_zero_day(
+        broker_name,
+        obj,
+        instrument,
+        date_str,
+        capital,
+    )
+
+    return _okai_combine_normal_and_hero(
+        normal_result,
+        hero_result,
+        capital,
+        instrument,
+        date_str,
+    )
