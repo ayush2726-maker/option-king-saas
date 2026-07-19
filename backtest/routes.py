@@ -137,6 +137,7 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
     trades = []
     open_trade = None
     trade_no = 0
+    consecutive_losses = 0
     _score_log = []
 
     for i in range(28, len(df)):
@@ -181,6 +182,11 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                     "entry_time": open_trade["entry_time"],
                     "exit_time": str(last["time"]),
                 })
+                if pnl < 0:
+                    consecutive_losses += 1
+                else:
+                    consecutive_losses = 0
+
                 open_trade = None
             continue
 
@@ -202,7 +208,10 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             "atr": float(last["ATR"]),
         }
 
-        signal_data = get_full_signal(market_data)
+        signal_data = get_full_signal(
+            market_data,
+            consecutive_losses=consecutive_losses,
+        )
         _score_log.append(signal_data.get("score", 0))
 
         if signal_data["trade_allowed"] and signal_data["signal"] in ("CE", "PE") and signal_data["score"] >= entry_threshold:

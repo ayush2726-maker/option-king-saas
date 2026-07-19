@@ -49,6 +49,58 @@ def _read_settings(user_id):
     return defaults
 
 
+def _get_consecutive_losses_today(user_id):
+    """
+    Return today's current consecutive losing-trade streak for this user.
+
+    A profitable or break-even closed trade resets the streak.
+    Open trades are ignored.
+    """
+    ist = timezone(timedelta(hours=5, minutes=30))
+    now_ist = datetime.now(ist)
+    day_start_utc = now_ist.replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    ).astimezone(timezone.utc)
+
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT pnl
+            FROM paper_trades
+            WHERE user_id=?
+              AND status='CLOSED'
+              AND datetime(created_at) >= datetime(?)
+            ORDER BY id DESC
+            """,
+            (
+                user_id,
+                day_start_utc.strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        ).fetchall()
+
+        streak = 0
+
+        for row in rows:
+            pnl = float(row["pnl"] or 0)
+
+            if pnl < 0:
+                streak += 1
+            else:
+                break
+
+        return streak
+
+    except Exception:
+        return 0
+
+    finally:
+        conn.close()
+
+
 def _manage_paper_trade(user_id, underlying, price, side, score, trade_allowed, settings, obj):
     """
     Checks/manages the user's open paper trade using REAL option premiums
@@ -304,7 +356,11 @@ def run_user_bot(user_id: int, creds: dict, state: dict):
                 "atr":           float(last["ATR"]),
             }
 
-            signal_data = get_full_signal(market_data)
+            consecutive_losses = _get_consecutive_losses_today(user_id)
+            signal_data = get_full_signal(
+                market_data,
+                consecutive_losses=consecutive_losses,
+            )
             hero = is_hero_window_active()
 
             try:
@@ -521,7 +577,11 @@ def run_user_bot_multi(user_id: int, broker_name: str, creds: dict, state: dict)
                 "atr": float(last["ATR"]),
             }
 
-            signal_data = get_full_signal(market_data)
+            consecutive_losses = _get_consecutive_losses_today(user_id)
+            signal_data = get_full_signal(
+                market_data,
+                consecutive_losses=consecutive_losses,
+            )
             hero = is_hero_window_active()
 
             state.update({

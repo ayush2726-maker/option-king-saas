@@ -146,8 +146,10 @@ def calculate_base_score(
         signal = "WAIT"
         base = 0
 
-    # Normalize to 100-point scale (max raw = 5)
-    normalized = int((base / 5) * 40)
+    # Base contributes maximum 55 points.
+    # TQU bonuses contribute maximum 45 points:
+    # ADX 20 + Volume 15 + MTF 10 = total score maximum 100.
+    normalized = int((base / 5) * 55)
 
     return {
         "signal": signal,
@@ -256,10 +258,27 @@ def update_trailing_sl(
     }
 
 # ── Full Signal Pipeline ─────────────────────────────────
-def get_full_signal(market_data: dict) -> dict:
+# ── Anti-chase thresholds (PROTECTED) ────────────────────
+EMA_STRETCH_BLOCK_POINTS = 22.0
+VWAP_STRETCH_BLOCK_POINTS = 35.0
+
+
+def required_score_for_losses(consecutive_losses: int) -> int:
+    """Escalating entry gate after losses: 82 -> 85 -> 87 (caps at 87)."""
+    if consecutive_losses <= 0:
+        return WEIGHTED_MIN_ENTRY_SCORE
+    elif consecutive_losses == 1:
+        return 85
+    else:
+        return 87
+
+
+def get_full_signal(market_data: dict, consecutive_losses: int = 0) -> dict:
     """
     Complete signal pipeline combining all strategies.
     Called by bot/routes.py
+    consecutive_losses: number of consecutive losing trades today (for this user),
+    used to escalate the required entry score (anti-revenge-trade rule).
     """
     price        = float(market_data.get("price", 0))
     vwap         = float(market_data.get("vwap", price))
@@ -290,8 +309,37 @@ def get_full_signal(market_data: dict) -> dict:
         mtf_ok, is_sideways, gap_day,
     )
 
-    # Step 3: Final decision
-    signal = base["signal"] if tqu["trade_allowed"] else "WAIT"
+    # Step 3: Anti-chase gate (EMA / VWAP stretch)
+    ema_stretch_points = abs(price - ema9) if ema9 else 0.0
+    vwap_stretch_points = abs(price - vwap) if vwap else 0.0
+    chase_blocked = (
+        ema_stretch_points > EMA_STRETCH_BLOCK_POINTS
+        or vwap_stretch_points > VWAP_STRETCH_BLOCK_POINTS
+    )
+
+    warnings = list(tqu["warnings"])
+    if chase_blocked:
+        if ema_stretch_points > EMA_STRETCH_BLOCK_POINTS:
+            warnings.append(
+                f"ANTI_CHASE_EMA_STRETCH:"
+                f"{ema_stretch_points:.1f}pt>{EMA_STRETCH_BLOCK_POINTS}pt"
+            )
+        if vwap_stretch_points > VWAP_STRETCH_BLOCK_POINTS:
+            warnings.append(
+                f"ANTI_CHASE_VWAP_STRETCH:"
+                f"{vwap_stretch_points:.1f}pt>{VWAP_STRETCH_BLOCK_POINTS}pt"
+            )
+
+    # Step 4: Loss-based score escalation
+    required_score = required_score_for_losses(consecutive_losses)
+    score_ok = tqu["score"] >= required_score
+    if not score_ok and consecutive_losses > 0:
+        warnings.append(f"LOSS_ESCALATION_GATE:need {required_score}, have {tqu['score']} (after {consecutive_losses} loss(es))")
+
+    trade_allowed = score_ok and not chase_blocked
+
+    # Step 5: Final decision
+    signal = base["signal"] if trade_allowed else "WAIT"
 
     return {
         "signal": signal,
@@ -304,8 +352,12 @@ def get_full_signal(market_data: dict) -> dict:
         "mtf_confirmed": mtf_ok,
         "mtf_bonus": tqu["mtf_bonus"],
         "regime_score": tqu["regime_score"],
-        "trade_allowed": tqu["trade_allowed"],
-        "min_score": WEIGHTED_MIN_ENTRY_SCORE,
-        "warnings": tqu["warnings"],
+        "trade_allowed": trade_allowed,
+        "min_score": required_score,
+        "ema_stretch_points": round(ema_stretch_points, 1),
+        "vwap_stretch_points": round(vwap_stretch_points, 1),
+        "chase_blocked": chase_blocked,
+        "consecutive_losses": consecutive_losses,
+        "warnings": warnings,
         "strategy": "TQU_ENHANCED",
     }
