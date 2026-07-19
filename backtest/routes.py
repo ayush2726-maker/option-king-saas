@@ -35,6 +35,101 @@ router = APIRouter(prefix="/backtest", tags=["Backtest"])
 LOT_SIZES = {"NIFTY": 65, "BANKNIFTY": 30, "SENSEX": 20}
 
 
+# Cache completed historical days. COMBINED first runs NORMAL
+# and then HERO ZERO for the same instrument/date candles.
+_OKAI_BACKTEST_CANDLE_CACHE = {}
+_OKAI_BACKTEST_CANDLE_CACHE_MAX = 96
+
+
+def _okai_is_completed_historical_date(date_str):
+    try:
+        requested = datetime.strptime(
+            str(date_str),
+            "%Y-%m-%d",
+        ).date()
+        ist_now = (
+            datetime.now(timezone.utc)
+            + timedelta(hours=5, minutes=30)
+        )
+        return requested < ist_now.date()
+    except Exception:
+        return False
+
+
+def _okai_candle_cache_key(
+    broker_name,
+    instrument,
+    date_str,
+):
+    return (
+        str(broker_name or "").lower(),
+        str(instrument or "").upper(),
+        str(date_str or ""),
+    )
+
+
+def _okai_get_cached_candles(
+    broker_name,
+    instrument,
+    date_str,
+):
+    if not _okai_is_completed_historical_date(
+        date_str
+    ):
+        return None
+
+    key = _okai_candle_cache_key(
+        broker_name,
+        instrument,
+        date_str,
+    )
+    cached = _OKAI_BACKTEST_CANDLE_CACHE.get(
+        key
+    )
+
+    if cached is None:
+        return None
+
+    return cached.copy(deep=True)
+
+
+def _okai_store_cached_candles(
+    broker_name,
+    instrument,
+    date_str,
+    dataframe,
+):
+    if not _okai_is_completed_historical_date(
+        date_str
+    ):
+        return
+
+    if dataframe is None or dataframe.empty:
+        return
+
+    key = _okai_candle_cache_key(
+        broker_name,
+        instrument,
+        date_str,
+    )
+
+    _OKAI_BACKTEST_CANDLE_CACHE[
+        key
+    ] = dataframe.copy(deep=True)
+
+    while (
+        len(_OKAI_BACKTEST_CANDLE_CACHE)
+        > _OKAI_BACKTEST_CANDLE_CACHE_MAX
+    ):
+        oldest_key = next(
+            iter(_OKAI_BACKTEST_CANDLE_CACHE)
+        )
+        _OKAI_BACKTEST_CANDLE_CACHE.pop(
+            oldest_key,
+            None,
+        )
+
+
 def _candle_minutes_ist(value):
     """Return candle time as IST minutes from midnight."""
     try:
@@ -145,6 +240,15 @@ def is_weekend(date_str):
 def fetch_backtest_candles(broker_name, obj, instrument, date_str):
     """Fetch a day's 5-min candles for any supported broker, normalized to time/open/high/low/close/volume."""
     import pandas as pd
+
+    cached = _okai_get_cached_candles(
+        broker_name,
+        instrument,
+        date_str,
+    )
+    if cached is not None:
+        return cached
+
     day = datetime.strptime(date_str, "%Y-%m-%d")
     from_dt = day.replace(hour=9, minute=15, second=0, microsecond=0)
     to_dt = day.replace(hour=15, minute=30, second=0, microsecond=0)
@@ -184,9 +288,31 @@ def fetch_backtest_candles(broker_name, obj, instrument, date_str):
 
     if df.empty:
         return None
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df.dropna().reset_index(drop=True)
+
+    for col in [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    ]:
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce",
+        )
+
+    clean_df = df.dropna().reset_index(
+        drop=True
+    )
+
+    _okai_store_cached_candles(
+        broker_name,
+        instrument,
+        date_str,
+        clean_df,
+    )
+
+    return clean_df.copy(deep=True)
 
 
 def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, entry_threshold, sl_percent, target_percent):
