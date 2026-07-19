@@ -130,6 +130,38 @@ def _okai_store_cached_candles(
         )
 
 
+def _okai_trend_from_indicator_row(row):
+    try:
+        ema9 = float(row["EMA9"])
+        ema21 = float(row["EMA21"])
+
+        if ema9 > ema21:
+            return "UPTREND"
+        if ema9 < ema21:
+            return "DOWNTREND"
+    except Exception:
+        pass
+
+    return "SIDEWAYS"
+
+
+def _okai_precompute_indicators(dataframe):
+    # Indicators are causal, so one complete-day calculation
+    # gives the same value at each historical candle.
+    if dataframe is None or dataframe.empty:
+        return None
+
+    calculated = calculate_indicators(
+        dataframe.copy(deep=True)
+    )
+
+    if calculated is None:
+        return None
+
+    indicator_df, _ = calculated
+    return indicator_df
+
+
 def _candle_minutes_ist(value):
     """Return candle time as IST minutes from midnight."""
     try:
@@ -329,6 +361,18 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
     if len(df) < 30:
         return {"success": False, "message": "Insufficient candle data for this date."}
 
+    full_indicator_df = _okai_precompute_indicators(
+        df
+    )
+    if full_indicator_df is None:
+        return {
+            "success": False,
+            "message": (
+                "Unable to calculate indicators "
+                "for this date."
+            ),
+        }
+
     trades = []
     open_trade = None
     trade_no = 0
@@ -344,13 +388,17 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
     except Exception:
         is_expiry_day = False
 
-    for i in range(28, len(df)):
-        window = df.iloc[:i + 1].copy()
-        result = calculate_indicators(window)
-        if result is None:
-            continue
-        wdf, trend = result
+    for i in range(
+        28,
+        len(full_indicator_df),
+    ):
+        wdf = full_indicator_df.iloc[
+            :i + 1
+        ]
         last = wdf.iloc[-1]
+        trend = _okai_trend_from_indicator_row(
+            last
+        )
         c1 = wdf.iloc[-3] if len(wdf) >= 3 else wdf.iloc[-1]
         c2 = wdf.iloc[-2] if len(wdf) >= 2 else wdf.iloc[-1]
 
@@ -2308,21 +2356,34 @@ def _okai_run_hero_zero_single(
             ),
         }
 
+    full_indicator_df = _okai_precompute_indicators(
+        df
+    )
+    if full_indicator_df is None:
+        return {
+            "success": False,
+            "message": (
+                "Unable to calculate Hero Zero "
+                "indicators for this date."
+            ),
+        }
+
     open_trade = None
     closed_trade = None
     score_log = []
     candidate_log = []
 
-    for index in range(28, len(df)):
-        window = df.iloc[:index + 1].copy()
-        calculated = calculate_indicators(
-            window
-        )
-        if calculated is None:
-            continue
-
-        wdf, trend = calculated
+    for index in range(
+        28,
+        len(full_indicator_df),
+    ):
+        wdf = full_indicator_df.iloc[
+            :index + 1
+        ]
         last = wdf.iloc[-1]
+        trend = _okai_trend_from_indicator_row(
+            last
+        )
         c1 = (
             wdf.iloc[-3]
             if len(wdf) >= 3
