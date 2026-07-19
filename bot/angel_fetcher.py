@@ -333,8 +333,49 @@ def calculate_indicators(df):
     df["EMA9"]  = df["close"].ewm(span=9,  adjust=False).mean()
     df["EMA21"] = df["close"].ewm(span=21, adjust=False).mean()
 
-    df["TP"] = (df["high"] + df["low"] + df["close"]) / 3
-    df["VWAP"] = (df["TP"] * df["volume"]).cumsum() / df["volume"].cumsum()
+    df["TP"] = (
+        df["high"]
+        + df["low"]
+        + df["close"]
+    ) / 3
+
+    # Index historical/live candles may contain zero volume.
+    # In that case normal VWAP becomes NaN because cumulative
+    # weighted price is divided by zero.
+    #
+    # Use true volume-weighted VWAP whenever volume is available.
+    # Otherwise use the expanding session average of typical price
+    # as a safe VWAP fallback. This does not create fake volume.
+    safe_volume = (
+        df["volume"]
+        .fillna(0)
+        .clip(lower=0)
+    )
+    cumulative_volume = safe_volume.cumsum()
+    cumulative_value = (
+        df["TP"] * safe_volume
+    ).cumsum()
+
+    session_price_average = df["TP"].expanding(
+        min_periods=1
+    ).mean()
+
+    volume_vwap = cumulative_value / cumulative_volume.where(
+        cumulative_volume > 0
+    )
+
+    df["VWAP"] = volume_vwap.where(
+        cumulative_volume > 0,
+        session_price_average,
+    )
+
+    df["VWAP"] = (
+        df["VWAP"]
+        .ffill()
+        .fillna(session_price_average)
+    )
+
+    df["VWAP_FALLBACK_USED"] = cumulative_volume <= 0
 
     df["H-L"]  = df["high"] - df["low"]
     df["H-PC"] = (df["high"] - df["close"].shift(1)).abs()
@@ -349,8 +390,20 @@ def calculate_indicators(df):
     dx = (df["DI+"] - df["DI-"]).abs() / (df["DI+"] + df["DI-"] + 1e-9) * 100
     df["ADX"] = dx.ewm(span=14, adjust=False).mean()
 
-    df["VOL_MA"] = df["volume"].rolling(20).mean()
-    df["VOL_RATIO"] = df["volume"] / df["VOL_MA"].replace(0, 1)
+    # Keep unavailable index volume neutral.
+    # Zero volume receives no bonus but must not produce NaN/Infinity.
+    df["VOL_MA"] = safe_volume.rolling(
+        20,
+        min_periods=1,
+    ).mean()
+
+    valid_volume_ma = df["VOL_MA"].where(
+        df["VOL_MA"] > 0
+    )
+
+    df["VOL_RATIO"] = (
+        safe_volume / valid_volume_ma
+    ).fillna(0.0)
 
     df["UPPER"] = df["TP"] + (2.0 * df["ATR"])
     df["LOWER"] = df["TP"] - (2.0 * df["ATR"])
