@@ -18,7 +18,10 @@ try:
         INDEX_TOKENS, INDEX_EXCHANGE,
         ZERODHA_INDEX_TOKENS, ZERODHA_INDEX_EXCHANGE, UPSTOX_INDEX_KEYS,
     )
-    from bot.strategy import get_full_signal
+    from bot.strategy import (
+        get_full_signal,
+        calculate_option_atr_levels,
+    )
     from bot.brokers.factory import create_broker
     ENGINE_AVAILABLE = True
 except Exception:
@@ -205,6 +208,19 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
     _score_log = []
     _score_detail_log = []
 
+    reward_multiple = max(
+        1.0,
+        target_percent / max(sl_percent, 1.0),
+    )
+
+    try:
+        is_expiry_day = (
+            datetime.fromisoformat(date_str).weekday()
+            == 1
+        )
+    except Exception:
+        is_expiry_day = False
+
     for i in range(28, len(df)):
         window = df.iloc[:i + 1].copy()
         result = calculate_indicators(window)
@@ -231,8 +247,14 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             est_premium_move_pct = underlying_move_pct * 8
             current_premium = max(0.5, entry * (1 + est_premium_move_pct / 100))
 
-            hit_target = current_premium >= entry * (1 + target_percent / 100)
-            hit_sl = current_premium <= entry * (1 - sl_percent / 100)
+            hit_target = (
+                current_premium
+                >= open_trade["target_price"]
+            )
+            hit_sl = (
+                current_premium
+                <= open_trade["sl_price"]
+            )
             is_last_candle = (i == len(df) - 1)
 
             if (
@@ -264,6 +286,19 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                     "score": open_trade["score"],
                     "entry_time": open_trade["entry_time"],
                     "exit_time": str(last["time"]),
+                    "sl_price": open_trade["sl_price"],
+                    "target_price": open_trade["target_price"],
+                    "risk_points": open_trade["risk_points"],
+                    "reward_multiple": open_trade[
+                        "reward_multiple"
+                    ],
+                    "atr_mode": open_trade["atr_mode"],
+                    "spot_atr_at_entry": open_trade[
+                        "spot_atr_at_entry"
+                    ],
+                    "estimated_option_atr": open_trade[
+                        "estimated_option_atr"
+                    ],
                 })
                 if pnl < 0:
                     consecutive_losses += 1
@@ -357,13 +392,43 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
         if signal_data["trade_allowed"] and signal_data["signal"] in ("CE", "PE") and signal_data["score"] >= entry_threshold:
             trade_no += 1
             atr = market_data["atr"]
-            est_entry_premium = round(max(20, atr * 6), 2)
+            est_entry_premium = round(
+                max(20, atr * 6),
+                2,
+            )
+
+            atr_levels = calculate_option_atr_levels(
+                spot_price=price,
+                option_entry_price=est_entry_premium,
+                spot_atr=atr,
+                is_expiry_day=is_expiry_day,
+                sl_floor_percent=sl_percent,
+                reward_multiple=reward_multiple,
+            )
+
             open_trade = {
                 "side": signal_data["signal"],
                 "entry_price": est_entry_premium,
                 "entry_spot": price,
                 "score": signal_data["score"],
                 "entry_time": str(last["time"]),
+                "sl_price": atr_levels["sl_price"],
+                "target_price": atr_levels[
+                    "target_price"
+                ],
+                "risk_points": atr_levels[
+                    "risk_points"
+                ],
+                "reward_multiple": atr_levels[
+                    "reward_multiple"
+                ],
+                "atr_mode": atr_levels["mode"],
+                "spot_atr_at_entry": atr_levels[
+                    "spot_atr"
+                ],
+                "estimated_option_atr": atr_levels[
+                    "estimated_option_atr"
+                ],
             }
 
     total_pnl = round(sum(t["pnl"] for t in trades), 2)
@@ -446,6 +511,26 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             if row["vwap_fallback_used"]
         ),
         "debug_top_candidates": top_candidates,
+        "exit_model": {
+            "type": "ATR_RISK_REWARD",
+            "normal_option_response": 0.50,
+            "expiry_option_response": 1.00,
+            "normal_atr_multiplier": 1.20,
+            "expiry_atr_multiplier": 1.50,
+            "normal_min_sl_percent": max(
+                12.0,
+                sl_percent,
+            ),
+            "expiry_min_sl_percent": max(
+                15.0,
+                sl_percent,
+            ),
+            "reward_multiple": round(
+                reward_multiple,
+                2,
+            ),
+            "expiry_day": "TUESDAY",
+        },
         "note": "Signal timing/score based on REAL historical index candles. Option premium is an ATR-based estimate since real historical option premiums aren't available from the broker's live scrip master.",
         "summary": {
             "trades": len(trades),

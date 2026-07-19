@@ -221,6 +221,93 @@ def calculate_atr_sl(
         "risk_reward": 2.0,
     }
 
+def calculate_option_atr_levels(
+    spot_price: float,
+    option_entry_price: float,
+    spot_atr: float,
+    is_expiry_day: bool = False,
+    sl_floor_percent: float = 12.0,
+    reward_multiple: float = 2.0,
+) -> dict:
+    # ATR-based SL/target for a bought CE or PE option.
+    spot_price = max(0.0, float(spot_price or 0))
+    entry = max(0.05, float(option_entry_price or 0.05))
+    spot_atr = max(0.0, float(spot_atr or 0))
+
+    if is_expiry_day:
+        response_factor = 1.00
+        atr_multiplier = 1.50
+        protected_floor_percent = max(
+            15.0,
+            float(sl_floor_percent or 0),
+        )
+        mode = "EXPIRY_ATR"
+    else:
+        response_factor = 0.50
+        atr_multiplier = 1.20
+        protected_floor_percent = max(
+            12.0,
+            float(sl_floor_percent or 0),
+        )
+        mode = "NORMAL_ATR"
+
+    estimated_option_atr = spot_atr * response_factor
+    atr_risk_points = estimated_option_atr * atr_multiplier
+    percentage_risk_points = (
+        entry * protected_floor_percent / 100
+    )
+
+    requested_risk_points = max(
+        atr_risk_points,
+        percentage_risk_points,
+    )
+
+    risk_points = min(
+        requested_risk_points,
+        max(0.05, entry - 0.05),
+    )
+
+    reward_multiple = max(
+        1.0,
+        float(reward_multiple or 2.0),
+    )
+
+    sl_price = max(0.05, entry - risk_points)
+    target_price = entry + risk_points * reward_multiple
+
+    return {
+        "mode": mode,
+        "spot_price": round(spot_price, 2),
+        "spot_atr": round(spot_atr, 2),
+        "response_factor": response_factor,
+        "estimated_option_atr": round(
+            estimated_option_atr,
+            2,
+        ),
+        "atr_multiplier": atr_multiplier,
+        "sl_floor_percent": round(
+            protected_floor_percent,
+            2,
+        ),
+        "atr_risk_points": round(
+            atr_risk_points,
+            2,
+        ),
+        "percentage_risk_points": round(
+            percentage_risk_points,
+            2,
+        ),
+        "risk_points": round(risk_points, 2),
+        "sl_price": round(sl_price, 2),
+        "target_price": round(target_price, 2),
+        "reward_multiple": round(
+            reward_multiple,
+            2,
+        ),
+        "is_expiry_day": is_expiry_day,
+    }
+
+
 # ── Loss Cooldown Check ──────────────────────────────────
 def is_in_loss_cooldown(last_loss_ts: float) -> bool:
     """15-minute cooldown after loss — same as personal bot"""

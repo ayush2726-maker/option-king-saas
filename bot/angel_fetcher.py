@@ -8,7 +8,11 @@ import json
 from datetime import datetime, timezone, timedelta
 from SmartApi import SmartConnect
 import pyotp
-from bot.strategy import get_full_signal, is_hero_window_active
+from bot.strategy import (
+    get_full_signal,
+    is_hero_window_active,
+    calculate_option_atr_levels,
+)
 from bot.option_chain import resolve_option
 from database import get_db
 
@@ -169,7 +173,17 @@ def _get_consecutive_losses_today(user_id):
         conn.close()
 
 
-def _manage_paper_trade(user_id, underlying, price, side, score, trade_allowed, settings, obj):
+def _manage_paper_trade(
+    user_id,
+    underlying,
+    price,
+    side,
+    score,
+    trade_allowed,
+    settings,
+    obj,
+    spot_atr=0.0,
+):
     """
     Checks/manages the user's open paper trade using REAL option premiums
     fetched from the broker. Closes on real SL/target hit, opens a new
@@ -276,19 +290,33 @@ def _manage_paper_trade(user_id, underlying, price, side, score, trade_allowed, 
             return
 
         qty = LOT_SIZES.get(underlying, 1)
-        sl_percent = float(settings.get("sl_percent", 12))
-        target_percent = float(settings.get("target_percent", 24))
 
-        # Both CE and PE are bought options, so option-premium
-        # SL stays below entry and target stays above entry.
-        sl_price = round(
-            entry_price * (1 - sl_percent / 100),
-            2,
+        sl_percent = float(
+            settings.get("sl_percent", 12)
         )
-        target_price = round(
-            entry_price * (1 + target_percent / 100),
-            2,
+        target_percent = float(
+            settings.get("target_percent", 24)
         )
+
+        reward_multiple = max(
+            1.0,
+            target_percent / max(sl_percent, 1.0),
+        )
+
+        # Strategy weekly expiry day: Tuesday.
+        is_expiry_day = now_ist.weekday() == 1
+
+        atr_levels = calculate_option_atr_levels(
+            spot_price=price,
+            option_entry_price=entry_price,
+            spot_atr=spot_atr,
+            is_expiry_day=is_expiry_day,
+            sl_floor_percent=sl_percent,
+            reward_multiple=reward_multiple,
+        )
+
+        sl_price = atr_levels["sl_price"]
+        target_price = atr_levels["target_price"]
 
         conn.execute(
             """INSERT INTO paper_trades
@@ -296,9 +324,23 @@ def _manage_paper_trade(user_id, underlying, price, side, score, trade_allowed, 
                 sl_price, target_price, token, exch_seg, expiry, strike, created_at)
                VALUES (?, ?, ?, ?, ?, 0, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                user_id, resolved["symbol"], side, entry_price, qty,
-                f"Real entry score {score}", sl_price, target_price,
-                resolved["token"], resolved["exch_seg"], resolved["expiry"], resolved["strike"],
+                user_id,
+                resolved["symbol"],
+                side,
+                entry_price,
+                qty,
+                (
+                    f"Real entry score {score}"
+                    f" | {atr_levels['mode']}"
+                    f" | R={atr_levels['risk_points']}"
+                    f" | RR={atr_levels['reward_multiple']}"
+                ),
+                sl_price,
+                target_price,
+                resolved["token"],
+                resolved["exch_seg"],
+                resolved["expiry"],
+                resolved["strike"],
                 datetime.now(timezone.utc).isoformat()
             )
         )
@@ -530,9 +572,15 @@ def run_user_bot(user_id: int, creds: dict, state: dict):
 
             try:
                 _manage_paper_trade(
-                    user_id, underlying, market_data["price"],
-                    signal_data.get("signal"), signal_data.get("score"),
-                    signal_data.get("trade_allowed"), settings, obj
+                    user_id,
+                    underlying,
+                    market_data["price"],
+                    signal_data.get("signal"),
+                    signal_data.get("score"),
+                    signal_data.get("trade_allowed"),
+                    settings,
+                    obj,
+                    spot_atr=market_data["atr"],
                 )
             except Exception:
                 pass
