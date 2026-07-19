@@ -294,6 +294,9 @@ def get_full_signal(market_data: dict, consecutive_losses: int = 0) -> dict:
     c1_bull      = bool(market_data.get("c1_bullish", False))
     c2_bull      = bool(market_data.get("c2_bullish", False))
     gap_day      = bool(market_data.get("gap_day", False))
+    vwap_fallback_used = bool(
+        market_data.get("vwap_fallback_used", False)
+    )
     is_sideways  = trend == "SIDEWAYS"
 
     # Step 1: Base score
@@ -309,26 +312,48 @@ def get_full_signal(market_data: dict, consecutive_losses: int = 0) -> dict:
         mtf_ok, is_sideways, gap_day,
     )
 
-    # Step 3: Anti-chase gate (EMA / VWAP stretch)
+    # Step 3: Anti-chase gate
+    #
+    # EMA chase protection is always active.
+    # VWAP chase protection is active only when true volume-weighted
+    # VWAP is available. Session-average fallback is useful for
+    # direction scoring, but should not act as a strict stretch guard.
     ema_stretch_points = abs(price - ema9) if ema9 else 0.0
     vwap_stretch_points = abs(price - vwap) if vwap else 0.0
-    chase_blocked = (
+
+    ema_chase_blocked = (
         ema_stretch_points > EMA_STRETCH_BLOCK_POINTS
-        or vwap_stretch_points > VWAP_STRETCH_BLOCK_POINTS
+    )
+
+    vwap_chase_enabled = not vwap_fallback_used
+    vwap_chase_blocked = (
+        vwap_chase_enabled
+        and vwap_stretch_points > VWAP_STRETCH_BLOCK_POINTS
+    )
+
+    chase_blocked = (
+        ema_chase_blocked
+        or vwap_chase_blocked
     )
 
     warnings = list(tqu["warnings"])
-    if chase_blocked:
-        if ema_stretch_points > EMA_STRETCH_BLOCK_POINTS:
-            warnings.append(
-                f"ANTI_CHASE_EMA_STRETCH:"
-                f"{ema_stretch_points:.1f}pt>{EMA_STRETCH_BLOCK_POINTS}pt"
-            )
-        if vwap_stretch_points > VWAP_STRETCH_BLOCK_POINTS:
-            warnings.append(
-                f"ANTI_CHASE_VWAP_STRETCH:"
-                f"{vwap_stretch_points:.1f}pt>{VWAP_STRETCH_BLOCK_POINTS}pt"
-            )
+
+    if vwap_fallback_used:
+        warnings.append(
+            "VWAP_FALLBACK_ACTIVE:VWAP_CHASE_DISABLED"
+        )
+
+    if ema_chase_blocked:
+        warnings.append(
+            f"ANTI_CHASE_EMA_STRETCH:"
+            f"{ema_stretch_points:.1f}pt>{EMA_STRETCH_BLOCK_POINTS}pt"
+        )
+
+    if vwap_chase_blocked:
+        warnings.append(
+            f"ANTI_CHASE_VWAP_STRETCH:"
+            f"{vwap_stretch_points:.1f}pt>{VWAP_STRETCH_BLOCK_POINTS}pt"
+        )
 
     # Step 4: Loss-based score escalation
     required_score = required_score_for_losses(consecutive_losses)
@@ -359,6 +384,10 @@ def get_full_signal(market_data: dict, consecutive_losses: int = 0) -> dict:
         "min_score": required_score,
         "ema_stretch_points": round(ema_stretch_points, 1),
         "vwap_stretch_points": round(vwap_stretch_points, 1),
+        "vwap_fallback_used": vwap_fallback_used,
+        "vwap_chase_enabled": vwap_chase_enabled,
+        "ema_chase_blocked": ema_chase_blocked,
+        "vwap_chase_blocked": vwap_chase_blocked,
         "chase_blocked": chase_blocked,
         "consecutive_losses": consecutive_losses,
         "warnings": warnings,

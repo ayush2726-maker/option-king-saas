@@ -248,6 +248,9 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             "ema21": float(last["EMA21"]),
             "adx": float(last["ADX"]),
             "volume_ratio": float(last["VOL_RATIO"]),
+            "vwap_fallback_used": bool(
+                last["VWAP_FALLBACK_USED"]
+            ),
             "supertrend_dir": str(last["ST_DIR"]),
             "trend": trend,
             "mtf_confirmed": trend != "SIDEWAYS",
@@ -289,6 +292,22 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             "vwap_stretch_points": signal_data.get(
                 "vwap_stretch_points",
                 0,
+            ),
+            "vwap_fallback_used": signal_data.get(
+                "vwap_fallback_used",
+                False,
+            ),
+            "vwap_chase_enabled": signal_data.get(
+                "vwap_chase_enabled",
+                True,
+            ),
+            "ema_chase_blocked": signal_data.get(
+                "ema_chase_blocked",
+                False,
+            ),
+            "vwap_chase_blocked": signal_data.get(
+                "vwap_chase_blocked",
+                False,
             ),
             "chase_blocked": signal_data.get(
                 "chase_blocked",
@@ -372,6 +391,21 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             1
             for row in _score_detail_log
             if row["chase_blocked"]
+        ),
+        "debug_ema_chase_block_count": sum(
+            1
+            for row in _score_detail_log
+            if row["ema_chase_blocked"]
+        ),
+        "debug_vwap_chase_block_count": sum(
+            1
+            for row in _score_detail_log
+            if row["vwap_chase_blocked"]
+        ),
+        "debug_vwap_fallback_count": sum(
+            1
+            for row in _score_detail_log
+            if row["vwap_fallback_used"]
         ),
         "debug_top_candidates": top_candidates,
         "note": "Signal timing/score based on REAL historical index candles. Option premium is an ATR-based estimate since real historical option premiums aren't available from the broker's live scrip master.",

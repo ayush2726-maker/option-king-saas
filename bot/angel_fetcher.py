@@ -467,6 +467,9 @@ def run_user_bot(user_id: int, creds: dict, state: dict):
                 "ema21":         float(last["EMA21"]),
                 "adx":           float(last["ADX"]),
                 "volume_ratio":  float(last["VOL_RATIO"]),
+                "vwap_fallback_used": bool(
+                    last["VWAP_FALLBACK_USED"]
+                ),
                 "supertrend_dir":str(last["ST_DIR"]),
                 "trend":         trend,
                 "mtf_confirmed": trend != "SIDEWAYS",
@@ -689,6 +692,9 @@ def run_user_bot_multi(user_id: int, broker_name: str, creds: dict, state: dict)
                 "ema21": float(last["EMA21"]),
                 "adx": float(last["ADX"]),
                 "volume_ratio": float(last["VOL_RATIO"]),
+                "vwap_fallback_used": bool(
+                    last["VWAP_FALLBACK_USED"]
+                ),
                 "supertrend_dir": str(last["ST_DIR"]),
                 "trend": trend,
                 "mtf_confirmed": trend != "SIDEWAYS",
