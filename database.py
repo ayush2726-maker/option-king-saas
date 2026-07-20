@@ -169,6 +169,8 @@ def init_db():
             accepted_text TEXT NOT NULL,
             age_confirmed INTEGER NOT NULL DEFAULT 0,
             risk_acknowledged INTEGER NOT NULL DEFAULT 0,
+            no_guarantee_acknowledged INTEGER NOT NULL DEFAULT 0,
+            technology_risk_acknowledged INTEGER NOT NULL DEFAULT 0,
             terms_accepted INTEGER NOT NULL DEFAULT 0,
             privacy_accepted INTEGER NOT NULL DEFAULT 0,
             algo_order_authorized INTEGER NOT NULL DEFAULT 0,

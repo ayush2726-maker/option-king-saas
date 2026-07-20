@@ -129,6 +129,8 @@ class RegisterRequest(BaseModel):
     policy_version: str
     age_confirmed: bool
     risk_acknowledged: bool
+    no_guarantee_acknowledged: bool
+    technology_risk_acknowledged: bool
     terms_accepted: bool
     privacy_accepted: bool
     algo_order_authorized: bool
@@ -193,7 +195,9 @@ def register(req: RegisterRequest, request: Request):
 
     required_acceptances = {
         "age confirmation": req.age_confirmed,
-        "risk and no-guarantee acknowledgement": req.risk_acknowledged,
+        "trading-risk acknowledgement": req.risk_acknowledged,
+        "no-profit-guarantee acknowledgement": req.no_guarantee_acknowledged,
+        "technology and broker-API risk acknowledgement": req.technology_risk_acknowledged,
         "Terms of Use": req.terms_accepted,
         "Privacy Notice": req.privacy_accepted,
         "automated-order acknowledgement": req.algo_order_authorized,
@@ -250,6 +254,8 @@ def register(req: RegisterRequest, request: Request):
             accepted_text,
             age_confirmed,
             risk_acknowledged,
+            no_guarantee_acknowledged,
+            technology_risk_acknowledged,
             terms_accepted,
             privacy_accepted,
             algo_order_authorized,
@@ -258,7 +264,7 @@ def register(req: RegisterRequest, request: Request):
             ip_address,
             user_agent
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             user_id,
@@ -267,6 +273,8 @@ def register(req: RegisterRequest, request: Request):
             policy_text,
             int(req.age_confirmed),
             int(req.risk_acknowledged),
+            int(req.no_guarantee_acknowledged),
+            int(req.technology_risk_acknowledged),
             int(req.terms_accepted),
             int(req.privacy_accepted),
             int(req.algo_order_authorized),
