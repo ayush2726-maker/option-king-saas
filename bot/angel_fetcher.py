@@ -509,6 +509,84 @@ def calculate_indicators(df):
     return df, trend
 
 
+def build_chart_candles(
+    df,
+    limit: int = 390,
+):
+    # Convert current full-day 1-minute dataframe into
+    # JSON-safe OHLC candles with indicator overlays.
+    if df is None or df.empty:
+        return []
+
+    import math
+
+    def safe_number(value):
+        try:
+            number = float(value)
+            return (
+                round(number, 4)
+                if math.isfinite(number)
+                else None
+            )
+        except Exception:
+            return None
+
+    result = []
+
+    for _, row in df.tail(limit).iterrows():
+        candle_time = row.get("time")
+
+        try:
+            candle_time = candle_time.isoformat()
+        except Exception:
+            candle_time = str(candle_time)
+
+        direction = str(
+            row.get("ST_DIR") or "NEUTRAL"
+        ).upper()
+
+        if direction == "UP":
+            supertrend = safe_number(
+                row.get("LOWER")
+            )
+        elif direction == "DOWN":
+            supertrend = safe_number(
+                row.get("UPPER")
+            )
+        else:
+            supertrend = None
+
+        result.append({
+            "time": candle_time,
+            "open": safe_number(row.get("open")),
+            "high": safe_number(row.get("high")),
+            "low": safe_number(row.get("low")),
+            "close": safe_number(row.get("close")),
+            "volume": safe_number(row.get("volume")),
+            "ema9": safe_number(row.get("EMA9")),
+            "ema21": safe_number(row.get("EMA21")),
+            "vwap": safe_number(row.get("VWAP")),
+            "supertrend": supertrend,
+            "supertrend_dir": direction,
+            "adx": safe_number(row.get("ADX")),
+            "atr": safe_number(row.get("ATR")),
+        })
+
+    return [
+        candle
+        for candle in result
+        if all(
+            candle.get(field) is not None
+            for field in (
+                "open",
+                "high",
+                "low",
+                "close",
+            )
+        )
+    ]
+
+
 def run_user_bot(user_id: int, creds: dict, state: dict):
     """Runs in background thread for each user"""
     obj = None
@@ -537,6 +615,10 @@ def run_user_bot(user_id: int, creds: dict, state: dict):
                 continue
 
             df, trend = result
+            chart_candles = build_chart_candles(
+                df,
+                limit=390,
+            )
             last = df.iloc[-2]
             c1   = df.iloc[-3]
             c2   = df.iloc[-2]
@@ -601,6 +683,9 @@ def run_user_bot(user_id: int, creds: dict, state: dict):
                 "hero": hero,
                 "price": market_data["price"],
                 "underlying": underlying,
+                "chart_instrument": underlying,
+                "chart_interval": "ONE_MINUTE",
+                "chart_candles": chart_candles,
                 "status": "RUNNING",
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })

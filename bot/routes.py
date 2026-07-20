@@ -1032,6 +1032,46 @@ def clear_paper_history(authorization: str = Header(None)):
 
 
 
+@router.get("/chart-data")
+def get_chart_data(
+    authorization: str = Header(None),
+):
+    # Return current-day real 1-minute OHLC candles
+    # and indicator overlays from the running engine.
+    user = get_current_user(authorization)
+    state = get_user_bot_state(user["id"])
+
+    candles = state.get(
+        "chart_candles",
+        [],
+    ) or []
+
+    return {
+        "success": True,
+        "running": bool(
+            state.get("running")
+        ),
+        "status": state.get(
+            "status",
+            "NOT_STARTED",
+        ),
+        "instrument": state.get(
+            "chart_instrument"
+        ) or state.get(
+            "underlying"
+        ),
+        "interval": state.get(
+            "chart_interval",
+            "ONE_MINUTE",
+        ),
+        "count": len(candles),
+        "candles": candles,
+        "updated_at": state.get(
+            "updated_at"
+        ),
+    }
+
+
 @router.get("/signal-history")
 def get_signal_history(authorization: str = Header(None), limit: int = 100):
     """
