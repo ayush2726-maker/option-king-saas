@@ -129,8 +129,8 @@ class RegisterRequest(BaseModel):
     policy_version: str
     age_confirmed: bool
     risk_acknowledged: bool
-    no_guarantee_acknowledged: bool
-    technology_risk_acknowledged: bool
+    no_guarantee_acknowledged: bool = None
+    technology_risk_acknowledged: bool = None
     terms_accepted: bool
     privacy_accepted: bool
     algo_order_authorized: bool
@@ -196,8 +196,8 @@ def register(req: RegisterRequest, request: Request):
     required_acceptances = {
         "age confirmation": req.age_confirmed,
         "trading-risk acknowledgement": req.risk_acknowledged,
-        "no-profit-guarantee acknowledgement": req.no_guarantee_acknowledged,
-        "technology and broker-API risk acknowledgement": req.technology_risk_acknowledged,
+        "no-profit-guarantee acknowledgement": (req.no_guarantee_acknowledged if req.no_guarantee_acknowledged is not None else req.risk_acknowledged),
+        "technology and broker-API risk acknowledgement": (req.technology_risk_acknowledged if req.technology_risk_acknowledged is not None else req.risk_acknowledged),
         "Terms of Use": req.terms_accepted,
         "Privacy Notice": req.privacy_accepted,
         "automated-order acknowledgement": req.algo_order_authorized,
@@ -273,8 +273,8 @@ def register(req: RegisterRequest, request: Request):
             policy_text,
             int(req.age_confirmed),
             int(req.risk_acknowledged),
-            int(req.no_guarantee_acknowledged),
-            int(req.technology_risk_acknowledged),
+            int(req.no_guarantee_acknowledged if req.no_guarantee_acknowledged is not None else req.risk_acknowledged),
+            int(req.technology_risk_acknowledged if req.technology_risk_acknowledged is not None else req.risk_acknowledged),
             int(req.terms_accepted),
             int(req.privacy_accepted),
             int(req.algo_order_authorized),
