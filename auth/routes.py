@@ -1,10 +1,122 @@
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header, Request
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta
+import hashlib
+import json
+import re
 from database import get_db
 from auth.utils import hash_password, verify_password, create_access_token, decode_token
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+
+REGISTRATION_POLICY_VERSION = "OKAI-RISK-2026-07-20-v1"
+
+REGISTRATION_DISCLOSURE = {
+    "policy_version": REGISTRATION_POLICY_VERSION,
+    "title": "Option King AI - Risk, Terms and Automated Trading Acknowledgement",
+    "summary": (
+        "Registration is completed only after the user separately accepts "
+        "the disclosures below."
+    ),
+    "acknowledgements": [
+        {
+            "key": "age_confirmed",
+            "required": True,
+            "text": "I confirm that I am at least 18 years old and legally capable of entering into this agreement.",
+        },
+        {
+            "key": "risk_acknowledged",
+            "required": True,
+            "text": (
+                "I understand that options and derivatives trading involves substantial risk, "
+                "rapid losses and possible loss of the entire trading capital."
+            ),
+        },
+        {
+            "key": "no_guarantee",
+            "required": True,
+            "text": (
+                "I understand that Option King AI does not promise or guarantee profit, returns, "
+                "accuracy, loss recovery or risk-free trading. Backtests and past performance do not "
+                "guarantee future results."
+            ),
+        },
+        {
+            "key": "algo_order_authorized",
+            "required": True,
+            "text": (
+                "I request automated order functionality only after all broker, exchange and legal "
+                "approvals/consents required for my account are in place. I remain responsible for my "
+                "broker account, capital, settings, live-mode activation and risk limits."
+            ),
+        },
+        {
+            "key": "technology_risk",
+            "required": True,
+            "text": (
+                "I understand that market-data, internet, mobile, server, broker API, order-routing, "
+                "software or exchange failures may cause delayed, duplicate, rejected, missed or "
+                "incorrect orders and losses."
+            ),
+        },
+        {
+            "key": "terms_accepted",
+            "required": True,
+            "text": (
+                "I have read and accept the Terms of Use and Risk Disclosure. The subscription fee is "
+                "for access to software features and is not a fee for guaranteed returns."
+            ),
+        },
+        {
+            "key": "privacy_accepted",
+            "required": True,
+            "text": (
+                "I have read and accept the Privacy Notice and consent to processing of the information "
+                "needed to provide, secure and audit the service."
+            ),
+        },
+        {
+            "key": "whatsapp_trade_alert_opt_in",
+            "required": True,
+            "text": (
+                "I agree to receive only my executed PAPER/LIVE trade alerts and essential account "
+                "messages on the WhatsApp number provided by me."
+            ),
+        },
+    ],
+    "important_note": (
+        "This acknowledgement does not remove any statutory rights of the user and does not replace "
+        "SEBI, exchange, broker, algo-provider or other legal compliance requirements."
+    ),
+}
+
+
+def _registration_policy_text():
+    return json.dumps(
+        REGISTRATION_DISCLOSURE,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _registration_policy_hash():
+    return hashlib.sha256(
+        _registration_policy_text().encode("utf-8")
+    ).hexdigest()
+
+
+def _normalise_phone(value):
+    digits = re.sub(r"\D", "", str(value or ""))
+    if len(digits) == 10:
+        digits = "91" + digits
+    if len(digits) < 11 or len(digits) > 15:
+        raise HTTPException(
+            status_code=400,
+            detail="Valid WhatsApp number with country code is required",
+        )
+    return "+" + digits
 
 
 # ─── Request Models ───────────────────────────────────────────────
@@ -13,7 +125,16 @@ class RegisterRequest(BaseModel):
     name: str
     email: str
     password: str
-    phone: str = None
+    phone: str
+    policy_version: str
+    age_confirmed: bool
+    risk_acknowledged: bool
+    no_guarantee_acknowledged: bool = None
+    technology_risk_acknowledged: bool = None
+    terms_accepted: bool
+    privacy_accepted: bool
+    algo_order_authorized: bool
+    whatsapp_trade_alert_opt_in: bool
 
 
 class LoginRequest(BaseModel):
@@ -48,12 +169,55 @@ def get_current_user(authorization: str = Header(None)):
 
 # ─── Routes ───────────────────────────────────────────────────────
 
+@router.get("/registration-disclosure")
+def registration_disclosure():
+    return {
+        "success": True,
+        "disclosure": REGISTRATION_DISCLOSURE,
+        "policy_hash": _registration_policy_hash(),
+    }
+
+
 @router.post("/register")
-def register(req: RegisterRequest):
+def register(req: RegisterRequest, request: Request):
     # Validate
     if len(req.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
 
+    if req.policy_version != REGISTRATION_POLICY_VERSION:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Risk disclosure has changed. Please reload registration "
+                "and review the latest rules."
+            ),
+        )
+
+    required_acceptances = {
+        "age confirmation": req.age_confirmed,
+        "trading-risk acknowledgement": req.risk_acknowledged,
+        "no-profit-guarantee acknowledgement": (req.no_guarantee_acknowledged if req.no_guarantee_acknowledged is not None else req.risk_acknowledged),
+        "technology and broker-API risk acknowledgement": (req.technology_risk_acknowledged if req.technology_risk_acknowledged is not None else req.risk_acknowledged),
+        "Terms of Use": req.terms_accepted,
+        "Privacy Notice": req.privacy_accepted,
+        "automated-order acknowledgement": req.algo_order_authorized,
+        "WhatsApp trade-alert consent": req.whatsapp_trade_alert_opt_in,
+    }
+    missing = [
+        label
+        for label, accepted in required_acceptances.items()
+        if not accepted
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Registration acknowledgement is required: "
+                + ", ".join(missing)
+            ),
+        )
+
+    normalised_phone = _normalise_phone(req.phone)
     conn = get_db()
 
     # Check email exists
@@ -71,9 +235,55 @@ def register(req: RegisterRequest):
     cursor = conn.execute(
         """INSERT INTO users (name, email, password_hash, phone, trial_ends_at, subscription_status)
            VALUES (?, ?, ?, ?, ?, 'trial')""",
-        (req.name.strip(), req.email.lower().strip(), password_hash, req.phone, trial_ends)
+        (req.name.strip(), req.email.lower().strip(), password_hash, normalised_phone, trial_ends)
     )
     user_id = cursor.lastrowid
+
+    accepted_at = datetime.utcnow().isoformat()
+    policy_text = _registration_policy_text()
+    policy_hash = _registration_policy_hash()
+    ip_address = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent", "")[:500]
+
+    conn.execute(
+        """
+        INSERT INTO user_consents (
+            user_id,
+            policy_version,
+            policy_hash,
+            accepted_text,
+            age_confirmed,
+            risk_acknowledged,
+            no_guarantee_acknowledged,
+            technology_risk_acknowledged,
+            terms_accepted,
+            privacy_accepted,
+            algo_order_authorized,
+            whatsapp_trade_alert_opt_in,
+            accepted_at,
+            ip_address,
+            user_agent
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            REGISTRATION_POLICY_VERSION,
+            policy_hash,
+            policy_text,
+            int(req.age_confirmed),
+            int(req.risk_acknowledged),
+            int(req.no_guarantee_acknowledged if req.no_guarantee_acknowledged is not None else req.risk_acknowledged),
+            int(req.technology_risk_acknowledged if req.technology_risk_acknowledged is not None else req.risk_acknowledged),
+            int(req.terms_accepted),
+            int(req.privacy_accepted),
+            int(req.algo_order_authorized),
+            int(req.whatsapp_trade_alert_opt_in),
+            accepted_at,
+            ip_address,
+            user_agent,
+        ),
+    )
 
     # Create bot_status entry
     conn.execute(
@@ -95,7 +305,11 @@ def register(req: RegisterRequest):
             "name": req.name,
             "email": req.email.lower(),
             "subscription_status": "trial",
-            "trial_ends_at": trial_ends
+            "trial_ends_at": trial_ends,
+            "phone": normalised_phone,
+            "consent_policy_version": REGISTRATION_POLICY_VERSION,
+            "consent_policy_hash": policy_hash,
+            "consent_accepted_at": accepted_at
         }
     }
 
