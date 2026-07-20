@@ -28,6 +28,12 @@ DEFAULT_SETTINGS = {
     "paper_capital": 100000,
     "primary_instrument": "NIFTY",
     "enabled_instruments": ["NIFTY", "BANKNIFTY", "SENSEX"],
+    "auto_scan": True,
+    "max_concurrent_trades": 2,
+    "slot_one_percent": 50,
+    "slot_two_percent": 40,
+    "reserve_percent": 10,
+    "different_index_required": True,
     "allow_custom": True
 }
 
@@ -122,6 +128,13 @@ def normalize_settings(body: dict):
     base["primary_instrument"] = primary
     base["enabled_instruments"] = enabled
 
+    # Protected AUTO Portfolio V1 allocation.
+    base["auto_scan"] = True
+    base["max_concurrent_trades"] = 2
+    base["slot_one_percent"] = 50
+    base["slot_two_percent"] = 40
+    base["reserve_percent"] = 10
+    base["different_index_required"] = True
     base["allow_custom"] = True
     return base
 

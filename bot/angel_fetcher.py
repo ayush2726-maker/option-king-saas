@@ -1784,3 +1784,16 @@ def _manage_paper_trade_multi(
         )
     finally:
         conn.close()
+
+
+# ============================================================
+# AUTO three-index portfolio runtime:
+# 50% first slot + 40% second slot + 10% reserve.
+# This late import intentionally replaces the legacy
+# single-index loops while retaining tested helpers.
+# ============================================================
+from bot.auto_portfolio_runtime import (
+    run_user_bot_auto as run_user_bot,
+    run_user_bot_multi_auto as run_user_bot_multi,
+)
+

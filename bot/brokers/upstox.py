@@ -123,7 +123,17 @@ class UpstoxBroker(BaseBroker):
 
     def place_order(self, symbol, token, transaction_type, quantity, order_type="MARKET", price=0, exchange="NFO"):
         try:
-            r = requests.post(f"{self.BASE_URL}/order/place", json={"quantity":quantity,"product":"I","validity":"DAY","price":price,"instrument_token":f"NSE_FO|{symbol}","order_type":order_type,"transaction_type":transaction_type,"disclosed_quantity":0,"trigger_price":0,"is_amo":False}, headers=self._h(), timeout=10)
+            raw_token = str(token or "")
+            if "|" in raw_token:
+                instrument_token = raw_token
+            else:
+                segment = (
+                    "BSE_FO"
+                    if str(exchange).upper().startswith("BSE")
+                    else "NSE_FO"
+                )
+                instrument_token = f"{segment}|{symbol}"
+            r = requests.post(f"{self.BASE_URL}/order/place", json={"quantity":quantity,"product":"I","validity":"DAY","price":price,"instrument_token":instrument_token,"order_type":order_type,"transaction_type":transaction_type,"disclosed_quantity":0,"trigger_price":0,"is_amo":False}, headers=self._h(), timeout=10)
             data = r.json()
             if data.get("status") == "success":
                 oid = data["data"]["order_id"]

@@ -312,6 +312,17 @@ def ensure_tables(conn):
         ("last_ltp","REAL"), ("broker_name","TEXT"),
         ("reversal_count","INTEGER DEFAULT 0"),
         ("reversal_last_candle","TEXT"),
+        ("underlying","TEXT"),
+        ("trading_mode","TEXT DEFAULT 'paper'"),
+        ("capital_slot","INTEGER"),
+        ("allocation_pct","REAL"),
+        ("capital_base","REAL"),
+        ("lot_size","INTEGER"),
+        ("lots","INTEGER"),
+        ("capital_used","REAL"),
+        ("entry_order_id","TEXT"),
+        ("exit_order_id","TEXT"),
+        ("live_order_status","TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {col} {coltype}")
@@ -512,13 +523,8 @@ def get_signal(authorization: str = Header(None)):
     ).fetchone()
 
     if trading_mode == "paper" and is_running and open_trade:
-        # Correct old wrong qty also
-        if int(open_trade["qty"] or 0) != qty:
-            conn.execute(
-                "UPDATE paper_trades SET qty=? WHERE id=?",
-                (qty, open_trade["id"])
-            )
-            conn.commit()
+        # AUTO portfolio quantities are position-specific.
+        # Never overwrite them with the chart instrument lot size.
 
         entry_price = float(open_trade["entry_price"] or 0)
         old_qty = qty
@@ -596,9 +602,16 @@ def get_signal(authorization: str = Header(None)):
             )
             engine_state = recovery["state"]
 
-        engine_ready = (
+        engine_ready = bool(
+            engine_state.get("running")
+        ) and (
             engine_state.get("strategy")
-            == "TQU_ENHANCED"
+            in (
+                "TQU_ENHANCED",
+                "CUSTOM_PROFILE_V1",
+            )
+            or engine_state.get("engine_mode")
+            == "AUTO_PORTFOLIO_V1"
         )
 
         if engine_ready:
@@ -613,10 +626,25 @@ def get_signal(authorization: str = Header(None)):
             mtf_score = int(engine_state.get("mtf_bonus", 0))
             regime_score = int(engine_state.get("regime_score", 0))
             side = engine_state.get("signal", "WAIT")
-            if side not in ("CE", "PE"):
-                side = "CE"
-            display_symbol, broker_symbol, strike, expiry = make_paper_option_symbol(primary, side)
-            symbol = display_symbol
+            selected_underlying = (
+                engine_state.get("underlying")
+                or primary
+            )
+            primary = selected_underlying
+            entry_threshold = int(
+                engine_state.get(
+                    "min_score",
+                    entry_threshold,
+                )
+            )
+            if side in ("CE", "PE"):
+                display_symbol, broker_symbol, strike, expiry = make_paper_option_symbol(
+                    selected_underlying,
+                    side,
+                )
+                symbol = display_symbol
+            else:
+                symbol = None
 
             if open_trade:
                 signal = "HOLD_" + str(open_trade["side"])
@@ -666,6 +694,7 @@ def get_signal(authorization: str = Header(None)):
     total_trades = 0
     total_pnl = 0
     active_trade = None
+    active_trades = []
     latest_trade = None
 
     try:
@@ -699,7 +728,7 @@ def get_signal(authorization: str = Header(None)):
 
             entry = float(t["entry_price"] or 0)
             exit_p = t["exit_price"]
-            qty_v = int(t["qty"] or qty)
+            qty_v = int(t["qty"] or 0)
 
             trade_text = (str(t["symbol"] or "") + " " + str(t["reason"] or "")).upper()
             local_sl_percent = sl_percent
@@ -720,21 +749,80 @@ def get_signal(authorization: str = Header(None)):
             unrealized_pnl = None
 
             if str(t["status"]).upper() == "OPEN":
-                random.seed(f"view-{user['id']}-{t['id']}-{datetime.utcnow().strftime('%H%M%S')}")
-
-                if "HEROZERO" in trade_text or "HERO ZERO" in trade_text:
-                    move_pct_view = random.uniform(-0.60, 1.10)
-                else:
-                    move_pct_view = random.uniform(-0.08, 0.18)
-
-                current_price = round(entry * (1 + move_pct_view), 2)
-                unrealized_pnl = round((current_price - entry) * qty_v, 2)
+                current_price = (
+                    round(float(t["last_ltp"]), 2)
+                    if (
+                        "last_ltp" in t.keys()
+                        and t["last_ltp"] is not None
+                    )
+                    else entry
+                )
+                unrealized_pnl = round(
+                    (current_price - entry) * qty_v,
+                    2,
+                )
 
             return {
                 "id": t["id"],
                 "symbol": t["symbol"],
                 "side": t["side"],
                 "qty": qty_v,
+                "underlying": (
+                    t["underlying"]
+                    if (
+                        "underlying" in t.keys()
+                        and t["underlying"]
+                    )
+                    else primary
+                ),
+                "trading_mode": (
+                    t["trading_mode"]
+                    if (
+                        "trading_mode" in t.keys()
+                        and t["trading_mode"]
+                    )
+                    else "paper"
+                ),
+                "capital_slot": (
+                    int(t["capital_slot"])
+                    if (
+                        "capital_slot" in t.keys()
+                        and t["capital_slot"] is not None
+                    )
+                    else None
+                ),
+                "allocation_pct": (
+                    float(t["allocation_pct"])
+                    if (
+                        "allocation_pct" in t.keys()
+                        and t["allocation_pct"] is not None
+                    )
+                    else None
+                ),
+                "lot_size": (
+                    int(t["lot_size"])
+                    if (
+                        "lot_size" in t.keys()
+                        and t["lot_size"] is not None
+                    )
+                    else None
+                ),
+                "lots": (
+                    int(t["lots"])
+                    if (
+                        "lots" in t.keys()
+                        and t["lots"] is not None
+                    )
+                    else None
+                ),
+                "capital_used": (
+                    float(t["capital_used"])
+                    if (
+                        "capital_used" in t.keys()
+                        and t["capital_used"] is not None
+                    )
+                    else None
+                ),
                 "entry_price": entry,
                 "current_price": current_price,
                 "sl_price": sl_price,
@@ -749,7 +837,21 @@ def get_signal(authorization: str = Header(None)):
                 "created_at": t["created_at"],
             }
 
-        active_trade = make_trade_view(open_row)
+        open_rows = conn.execute(
+            """SELECT * FROM paper_trades
+               WHERE user_id=? AND status='OPEN'
+               ORDER BY capital_slot ASC, id ASC""",
+            (user["id"],)
+        ).fetchall()
+        active_trades = [
+            make_trade_view(row)
+            for row in open_rows
+        ]
+        active_trade = (
+            active_trades[0]
+            if active_trades
+            else None
+        )
         latest_trade = make_trade_view(latest_row)
 
     except Exception:
@@ -787,7 +889,47 @@ def get_signal(authorization: str = Header(None)):
         "enabled_instruments": enabled,
         "qty": qty,
         "active_trade": active_trade,
+        "active_trades": active_trades,
+        "open_trade_count": len(active_trades),
         "latest_trade": latest_trade,
+        "engine_mode": (
+            engine_state.get("engine_mode")
+            if is_running
+            else None
+        ),
+        "scan_results": (
+            engine_state.get("scan_results", [])
+            if is_running
+            else []
+        ),
+        "capital_plan": (
+            engine_state.get(
+                "capital_plan",
+                {
+                    "slot_1_percent": 50,
+                    "slot_2_percent": 40,
+                    "reserve_percent": 10,
+                    "max_open_positions": 2,
+                    "different_index_required": True,
+                },
+            )
+            if is_running
+            else {
+                "slot_1_percent": 50,
+                "slot_2_percent": 40,
+                "reserve_percent": 10,
+                "max_open_positions": 2,
+                "different_index_required": True,
+            }
+        ),
+        "strategy_profile_name": (
+            engine_state.get(
+                "strategy_profile_name",
+                "OKAI Default 82",
+            )
+            if is_running
+            else "OKAI Default 82"
+        ),
         "trade_symbol": active_trade.get("symbol") if active_trade else None,
         "trade_side": active_trade.get("side") if active_trade else None,
         "trade_qty": active_trade.get("qty") if active_trade else qty,
