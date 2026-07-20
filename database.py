@@ -159,6 +159,33 @@ def init_db():
         )
     """)
 
+    # Registration risk/terms consent audit
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_consents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            policy_version TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            accepted_text TEXT NOT NULL,
+            age_confirmed INTEGER NOT NULL DEFAULT 0,
+            risk_acknowledged INTEGER NOT NULL DEFAULT 0,
+            terms_accepted INTEGER NOT NULL DEFAULT 0,
+            privacy_accepted INTEGER NOT NULL DEFAULT 0,
+            algo_order_authorized INTEGER NOT NULL DEFAULT 0,
+            whatsapp_trade_alert_opt_in INTEGER NOT NULL DEFAULT 0,
+            accepted_at TEXT NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(user_id, policy_version),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_user_consents_user
+        ON user_consents(user_id)
+    """)
+
     # Broker credentials table (encrypted)
     c.execute("""
         CREATE TABLE IF NOT EXISTS broker_credentials (
