@@ -2,11 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database import init_db
 from auth.routes import router as auth_router
-from auth.recovery_routes import (
-    router as recovery_router,
-    ensure_recovery_schema,
-    RegistrationEmailVerificationMiddleware,
-)
+from auth.recovery_routes import router as recovery_router, ensure_recovery_schema
+from auth.registration_email_middleware import SafeRegistrationEmailVerificationMiddleware
 from broker.routes import router as broker_router
 from subscription.routes import router as subscription_router
 from admin.routes import router as admin_router
@@ -29,7 +26,7 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-app.add_middleware(RegistrationEmailVerificationMiddleware)
+app.add_middleware(SafeRegistrationEmailVerificationMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
