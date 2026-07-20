@@ -15,6 +15,7 @@ from bot.strategy import (
 )
 from bot.option_chain import resolve_option
 from database import get_db
+from strategy.profile_engine import get_active_profile_config
 
 # ── Per-user bot instances ────────────────────────────────
 _user_bots = {}  # user_id -> bot state
@@ -978,9 +979,37 @@ def run_user_bot(user_id: int, creds: dict, state: dict):
             }
 
             consecutive_losses = _get_consecutive_losses_today(user_id)
+            active_profile = (
+                get_active_profile_config(
+                    user_id
+                )
+            )
             signal_data = get_full_signal(
                 market_data,
                 consecutive_losses=consecutive_losses,
+                profile=active_profile,
+            )
+            signal_data.setdefault(
+                "strategy_profile_key",
+                active_profile.get(
+                    "profile_key",
+                    "okai_default_82",
+                ),
+            )
+            signal_data.setdefault(
+                "strategy_profile_name",
+                active_profile.get(
+                    "profile_name",
+                    "OKAI Default 82",
+                ),
+            )
+            signal_data[
+                "strategy_profile_locked"
+            ] = bool(
+                active_profile.get(
+                    "profile_locked",
+                    False,
+                )
             )
             hero = is_hero_window_active()
 
@@ -991,6 +1020,10 @@ def run_user_bot(user_id: int, creds: dict, state: dict):
             market_data["signal_score"] = signal_data.get(
                 "score",
                 0,
+            )
+            market_data["signal_min_score"] = signal_data.get(
+                "min_score",
+                82,
             )
 
             try:
@@ -1254,9 +1287,37 @@ def run_user_bot_multi(user_id: int, broker_name: str, creds: dict, state: dict)
             }
 
             consecutive_losses = _get_consecutive_losses_today(user_id)
+            active_profile = (
+                get_active_profile_config(
+                    user_id
+                )
+            )
             signal_data = get_full_signal(
                 market_data,
                 consecutive_losses=consecutive_losses,
+                profile=active_profile,
+            )
+            signal_data.setdefault(
+                "strategy_profile_key",
+                active_profile.get(
+                    "profile_key",
+                    "okai_default_82",
+                ),
+            )
+            signal_data.setdefault(
+                "strategy_profile_name",
+                active_profile.get(
+                    "profile_name",
+                    "OKAI Default 82",
+                ),
+            )
+            signal_data[
+                "strategy_profile_locked"
+            ] = bool(
+                active_profile.get(
+                    "profile_locked",
+                    False,
+                )
             )
             hero = is_hero_window_active()
 
@@ -1267,6 +1328,10 @@ def run_user_bot_multi(user_id: int, broker_name: str, creds: dict, state: dict)
             market_data["signal_score"] = signal_data.get(
                 "score",
                 0,
+            )
+            market_data["signal_min_score"] = signal_data.get(
+                "min_score",
+                82,
             )
 
             try:
@@ -1402,7 +1467,10 @@ def _dynamic_reversal_state(
             "signal_score",
             0,
         ),
-        min_score=82,
+        min_score=market_data.get(
+            "signal_min_score",
+            82,
+        ),
     )
 
     current_candle = str(candle_id)

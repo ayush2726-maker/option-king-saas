@@ -306,13 +306,405 @@ def required_score_for_losses(consecutive_losses: int) -> int:
     return WEIGHTED_MIN_ENTRY_SCORE
 
 
-def get_full_signal(market_data: dict, consecutive_losses: int = 0) -> dict:
+def _custom_profile_signal(
+    market_data,
+    profile,
+    consecutive_losses=0,
+):
+    price = float(market_data.get("price", 0))
+    vwap = float(market_data.get("vwap", price))
+    ema9 = float(market_data.get("ema9", price))
+    ema21 = float(market_data.get("ema21", price))
+    adx = float(market_data.get("adx", 0))
+    volume_ratio = float(
+        market_data.get("volume_ratio", 0)
+    )
+    supertrend = str(
+        market_data.get(
+            "supertrend_dir",
+            "NEUTRAL",
+        )
+    ).upper()
+    trend = str(
+        market_data.get(
+            "trend",
+            "SIDEWAYS",
+        )
+    ).upper()
+    mtf_ok = bool(
+        market_data.get("mtf_confirmed", False)
+    )
+    orb_high = float(
+        market_data.get("orb_high", 0)
+    )
+    orb_low = float(
+        market_data.get("orb_low", 0)
+    )
+    c1_bull = bool(
+        market_data.get("c1_bullish", False)
+    )
+    c2_bull = bool(
+        market_data.get("c2_bullish", False)
+    )
+    spot_atr = max(
+        0.0,
+        float(market_data.get("atr", 0) or 0),
+    )
+    vwap_fallback_used = bool(
+        market_data.get(
+            "vwap_fallback_used",
+            False,
+        )
+    )
+
+    weights = dict(
+        profile.get("weights", {})
+    )
+    enabled = dict(
+        profile.get("enabled", {})
+    )
+
+    ce_checks = {
+        "vwap": price > vwap,
+        "supertrend": supertrend == "UP",
+        "ema_trend": (
+            ema9 > ema21
+            and trend == "UPTREND"
+        ),
+        "orb": (
+            orb_high > 0
+            and price > orb_high + 5
+        ),
+        "momentum": c1_bull and c2_bull,
+    }
+    pe_checks = {
+        "vwap": price < vwap,
+        "supertrend": supertrend == "DOWN",
+        "ema_trend": (
+            ema9 < ema21
+            and trend == "DOWNTREND"
+        ),
+        "orb": (
+            orb_low > 0
+            and price < orb_low - 5
+        ),
+        "momentum": (
+            not c1_bull
+            and not c2_bull
+        ),
+    }
+
+    directional_keys = (
+        "vwap",
+        "supertrend",
+        "ema_trend",
+        "orb",
+        "momentum",
+    )
+
+    ce_score = sum(
+        int(weights.get(key, 0))
+        for key in directional_keys
+        if enabled.get(key, True)
+        and ce_checks[key]
+    )
+    pe_score = sum(
+        int(weights.get(key, 0))
+        for key in directional_keys
+        if enabled.get(key, True)
+        and pe_checks[key]
+    )
+
+    ce_confirmations = sum(
+        1
+        for key in directional_keys
+        if enabled.get(key, True)
+        and ce_checks[key]
+    )
+    pe_confirmations = sum(
+        1
+        for key in directional_keys
+        if enabled.get(key, True)
+        and pe_checks[key]
+    )
+
+    if ce_score > pe_score:
+        candidate = "CE"
+        directional_score = ce_score
+    elif pe_score > ce_score:
+        candidate = "PE"
+        directional_score = pe_score
+    else:
+        candidate = "WAIT"
+        directional_score = 0
+
+    warnings = []
+    score = float(directional_score)
+
+    adx_bonus = 0
+    if enabled.get("adx", True):
+        adx_threshold = float(
+            profile.get("adx_threshold", 25)
+        )
+        if adx > 0 and adx >= adx_threshold:
+            adx_bonus = int(
+                weights.get("adx", 0)
+            )
+            score += adx_bonus
+        else:
+            warnings.append(
+                f"ADX_WEAK:{adx:.1f}<"
+                f"{adx_threshold:.1f}"
+            )
+
+    volume_bonus = 0
+    if enabled.get("volume", True):
+        volume_threshold = float(
+            profile.get(
+                "volume_threshold",
+                1.2,
+            )
+        )
+        if (
+            volume_ratio > 0
+            and volume_ratio >= volume_threshold
+        ):
+            volume_bonus = int(
+                weights.get("volume", 0)
+            )
+            score += volume_bonus
+        else:
+            warnings.append(
+                f"VOLUME_LOW:{volume_ratio:.2f}x"
+            )
+
+    mtf_bonus = 0
+    if enabled.get("mtf", True):
+        if mtf_ok:
+            mtf_bonus = int(
+                weights.get("mtf", 0)
+            )
+            score += mtf_bonus
+        else:
+            warnings.append(
+                "MTF_NOT_CONFIRMED"
+            )
+
+    sideways_mode = str(
+        profile.get("sideways_mode", "cap")
+    ).lower()
+    sideways_blocked = False
+
+    if trend == "SIDEWAYS":
+        if sideways_mode == "block":
+            sideways_blocked = True
+            warnings.append(
+                "SIDEWAYS_MARKET_BLOCKED"
+            )
+        elif sideways_mode == "cap":
+            score = min(score, 70)
+            warnings.append(
+                "SIDEWAYS_SCORE_CAP_70"
+            )
+        else:
+            warnings.append(
+                "SIDEWAYS_ALLOWED"
+            )
+
+    anti = dict(
+        profile.get("anti_chase", {})
+    )
+
+    ema_limit = max(
+        float(
+            anti.get("ema_min_points", 22)
+        ),
+        spot_atr
+        * float(
+            anti.get(
+                "ema_atr_multiplier",
+                1.2,
+            )
+        ),
+    )
+    vwap_limit = max(
+        float(
+            anti.get("vwap_min_points", 35)
+        ),
+        spot_atr
+        * float(
+            anti.get(
+                "vwap_atr_multiplier",
+                2.0,
+            )
+        ),
+    )
+
+    ema_stretch = (
+        abs(price - ema9) if ema9 else 0.0
+    )
+    vwap_stretch = (
+        abs(price - vwap) if vwap else 0.0
+    )
+
+    ema_chase_blocked = (
+        bool(anti.get("ema_enabled", True))
+        and ema_stretch > ema_limit
+    )
+    vwap_chase_enabled = (
+        bool(
+            anti.get("vwap_enabled", True)
+        )
+        and not vwap_fallback_used
+    )
+    vwap_chase_blocked = (
+        vwap_chase_enabled
+        and vwap_stretch > vwap_limit
+    )
+    chase_blocked = (
+        ema_chase_blocked
+        or vwap_chase_blocked
+    )
+
+    if vwap_fallback_used:
+        warnings.append(
+            "VWAP_FALLBACK_ACTIVE:"
+            "VWAP_CHASE_DISABLED"
+        )
+    if ema_chase_blocked:
+        warnings.append(
+            "CUSTOM_ANTI_CHASE_EMA"
+        )
+    if vwap_chase_blocked:
+        warnings.append(
+            "CUSTOM_ANTI_CHASE_VWAP"
+        )
+
+    final_score = min(
+        100,
+        max(0, int(round(score))),
+    )
+    required_score = int(
+        profile.get("entry_threshold", 82)
+    )
+    trade_allowed = (
+        candidate in ("CE", "PE")
+        and final_score >= required_score
+        and not chase_blocked
+        and not sideways_blocked
+    )
+
+    return {
+        "signal": (
+            candidate if trade_allowed else "WAIT"
+        ),
+        "candidate_signal": candidate,
+        "ce_raw_score": ce_confirmations,
+        "pe_raw_score": pe_confirmations,
+        "score": final_score,
+        "base_score": int(directional_score),
+        "adx": adx,
+        "adx_bonus": adx_bonus,
+        "volume_ratio": volume_ratio,
+        "volume_bonus": volume_bonus,
+        "mtf_confirmed": mtf_ok,
+        "mtf_bonus": mtf_bonus,
+        "regime_score": 0,
+        "trade_allowed": trade_allowed,
+        "min_score": required_score,
+        "ema_stretch_points": round(
+            ema_stretch,
+            1,
+        ),
+        "vwap_stretch_points": round(
+            vwap_stretch,
+            1,
+        ),
+        "spot_atr": round(spot_atr, 2),
+        "ema_stretch_limit": round(
+            ema_limit,
+            2,
+        ),
+        "vwap_stretch_limit": round(
+            vwap_limit,
+            2,
+        ),
+        "anti_chase_mode": (
+            "CUSTOM_ATR_ADAPTIVE"
+        ),
+        "vwap_fallback_used": (
+            vwap_fallback_used
+        ),
+        "vwap_chase_enabled": (
+            vwap_chase_enabled
+        ),
+        "ema_chase_blocked": (
+            ema_chase_blocked
+        ),
+        "vwap_chase_blocked": (
+            vwap_chase_blocked
+        ),
+        "chase_blocked": chase_blocked,
+        "sideways_blocked": (
+            sideways_blocked
+        ),
+        "consecutive_losses": (
+            consecutive_losses
+        ),
+        "warnings": warnings,
+        "strategy": "CUSTOM_PROFILE_V1",
+        "strategy_profile_key": (
+            profile.get(
+                "profile_key",
+                "custom",
+            )
+        ),
+        "strategy_profile_name": (
+            profile.get(
+                "profile_name",
+                "Custom Strategy",
+            )
+        ),
+        "profile_weights": weights,
+        "profile_enabled": enabled,
+        "score_breakdown": {
+            "directional": int(
+                directional_score
+            ),
+            "adx": adx_bonus,
+            "volume": volume_bonus,
+            "mtf": mtf_bonus,
+        },
+    }
+
+
+def get_full_signal(
+    market_data: dict,
+    consecutive_losses: int = 0,
+    profile: dict = None,
+) -> dict:
     """
     Complete signal pipeline combining all strategies.
-    Called by bot/routes.py
-    consecutive_losses is retained only for diagnostics.
-    It does not increase the protected entry score above 82.
+
+    OKAI Default 82 uses the protected original logic.
+    Custom profiles use Strategy Builder V1 scoring.
     """
+    profile_key = str(
+        (profile or {}).get(
+            "profile_key",
+            "okai_default_82",
+        )
+    )
+
+    if (
+        profile
+        and profile_key != "okai_default_82"
+    ):
+        return _custom_profile_signal(
+            market_data,
+            profile,
+            consecutive_losses,
+        )
     price        = float(market_data.get("price", 0))
     vwap         = float(market_data.get("vwap", price))
     ema9         = float(market_data.get("ema9", price))
