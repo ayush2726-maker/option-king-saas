@@ -1,0 +1,119 @@
+name: Apply Account Recovery V1
+
+on:
+  push:
+    branches:
+      - agent/account-recovery-v1
+    paths:
+      - ".github/workflows/apply-account-recovery-v1.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/account-recovery-v1
+          fetch-depth: 0
+
+      - name: Wire recovery router and session invalidation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              if old not in text:
+                  raise RuntimeError(f"{label} marker missing")
+              return text.replace(old, new, 1)
+
+          main_path = Path("main.py")
+          main = main_path.read_text(encoding="utf-8")
+          main = replace_once(
+              main,
+              "from auth.routes import router as auth_router\n",
+              "from auth.routes import router as auth_router\nfrom auth.recovery_routes import router as recovery_router, ensure_recovery_schema\n",
+              "main import",
+          )
+          main = replace_once(
+              main,
+              "def startup():\n    init_db()\n",
+              "def startup():\n    init_db()\n    ensure_recovery_schema()\n",
+              "startup schema",
+          )
+          main = replace_once(
+              main,
+              "app.include_router(auth_router)\n",
+              "app.include_router(auth_router)\napp.include_router(recovery_router)\n",
+              "router include",
+          )
+          main_path.write_text(main, encoding="utf-8")
+
+          auth_path = Path("auth/routes.py")
+          auth = auth_path.read_text(encoding="utf-8")
+          old = '''    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    if not user["is_active"]:
+        raise HTTPException(status_code=403, detail="Account suspended")
+'''
+          new = '''    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    try:
+        password_changed_at = user["password_changed_at"]
+    except Exception:
+        password_changed_at = None
+
+    if password_changed_at and payload.get("iat"):
+        try:
+            token_issued_at = datetime.utcfromtimestamp(float(payload["iat"]))
+            changed_at = datetime.fromisoformat(password_changed_at)
+            if token_issued_at < changed_at:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Password changed. Please login again.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    if not user["is_active"]:
+        raise HTTPException(status_code=403, detail="Account suspended")
+'''
+          auth = replace_once(auth, old, new, "token invalidation")
+          auth_path.write_text(auth, encoding="utf-8")
+          PY
+
+      - name: Validate backend
+        run: |
+          python -m py_compile main.py auth/routes.py auth/recovery_routes.py database.py
+          python - <<'PY'
+          import os
+          os.environ.setdefault("DB_PATH", "/tmp/okai-recovery-test.db")
+          from database import init_db, get_db
+          from auth.recovery_routes import ensure_recovery_schema
+          init_db()
+          ensure_recovery_schema()
+          conn = get_db()
+          tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+          assert "password_reset_codes" in tables
+          assert "auth_recovery_events" in tables
+          columns = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+          assert "password_changed_at" in columns
+          conn.close()
+          print("account recovery schema OK")
+          PY
+
+      - name: Remove one-time workflow and push
+        shell: bash
+        run: |
+          rm -f .github/workflows/apply-account-recovery-v1.yml
+          git config user.name "okai-recovery-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Wire secure account recovery endpoints"
+          git push origin HEAD:agent/account-recovery-v1
