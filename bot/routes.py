@@ -65,6 +65,168 @@ PAPER_STRIKE_STEP = {
 }
 
 
+def _persisted_bot_should_run(
+    conn,
+    user_id: int,
+) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT is_running FROM user_bot_state WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+
+        if row is not None:
+            return bool(row["is_running"])
+    except Exception:
+        pass
+
+    try:
+        row = conn.execute(
+            "SELECT is_running FROM bot_status WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+
+        return (
+            bool(row["is_running"])
+            if row is not None
+            else False
+        )
+    except Exception:
+        return False
+
+
+def _start_saved_runtime_engine(
+    user_id: int,
+):
+    # Recreate in-memory broker engine after Railway restart.
+    current = get_user_bot_state(user_id)
+
+    if current.get("running"):
+        return {
+            "state": current,
+            "started": False,
+            "reason": None,
+        }
+
+    conn = get_db()
+
+    try:
+        ensure_tables(conn)
+
+        if not _persisted_bot_should_run(
+            conn,
+            user_id,
+        ):
+            return {
+                "state": current,
+                "started": False,
+                "reason": "BOT_STOPPED",
+            }
+
+        broker = conn.execute(
+            "SELECT * FROM broker_credentials "
+            "WHERE user_id=? AND is_active=1 "
+            "ORDER BY last_connected DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+
+        if not broker:
+            return {
+                "state": current,
+                "started": False,
+                "reason": "BROKER_NOT_CONNECTED",
+            }
+
+        creds = {
+            "api_key": decrypt_credential(
+                broker["api_key"]
+            ),
+            "client_id": broker["client_id"],
+            "password": decrypt_credential(
+                broker["api_secret"]
+            ),
+            "totp_secret": (
+                decrypt_credential(
+                    broker["totp_secret"]
+                )
+                if broker["totp_secret"]
+                else None
+            ),
+        }
+
+        broker_name = str(
+            broker["broker_name"]
+            or "angelone"
+        ).lower()
+
+    except Exception as exc:
+        return {
+            "state": current,
+            "started": False,
+            "reason": (
+                "CREDENTIAL_LOAD_FAILED: "
+                + str(exc)[:120]
+            ),
+        }
+
+    finally:
+        conn.close()
+
+    try:
+        if broker_name == "angelone":
+            result = start_user_bot(
+                user_id,
+                creds,
+            )
+        else:
+            from bot.angel_fetcher import (
+                start_user_bot_multi,
+            )
+
+            result = start_user_bot_multi(
+                user_id,
+                broker_name,
+                creds,
+            )
+
+        recovered = get_user_bot_state(
+            user_id
+        )
+
+        successful = bool(
+            recovered.get("running")
+        ) or bool(
+            isinstance(result, dict)
+            and result.get("success")
+        )
+
+        return {
+            "state": recovered,
+            "started": successful,
+            "reason": (
+                None
+                if successful
+                else (
+                    result.get("message")
+                    if isinstance(result, dict)
+                    else "ENGINE_START_FAILED"
+                )
+            ),
+        }
+
+    except Exception as exc:
+        return {
+            "state": get_user_bot_state(
+                user_id
+            ),
+            "started": False,
+            "reason": (
+                "ENGINE_START_FAILED: "
+                + str(exc)[:120]
+            ),
+        }
+
+
 def next_weekly_expiry_label():
     # Paper/demo expiry label only. Real expiry will come from broker option chain later.
     today = datetime.utcnow().date()
@@ -420,10 +582,24 @@ def get_signal(authorization: str = Header(None)):
 
             open_trade = None
 
-    # Dynamic signal - REAL ENGINE (TQU strategy.py) when broker connected
+    # Dynamic signal - REAL ENGINE (TQU strategy.py).
+    # Restore the in-memory engine automatically after
+    # a Railway deploy/restart when DB status is running.
     if is_running:
-        engine_state = get_user_bot_state(user["id"])
-        engine_ready = engine_state.get("strategy") == "TQU_ENHANCED"
+        engine_state = get_user_bot_state(
+            user["id"]
+        )
+
+        if not engine_state.get("running"):
+            recovery = _start_saved_runtime_engine(
+                user["id"]
+            )
+            engine_state = recovery["state"]
+
+        engine_ready = (
+            engine_state.get("strategy")
+            == "TQU_ENHANCED"
+        )
 
         if engine_ready:
             score = int(engine_state.get("score", 0))
@@ -1039,22 +1215,76 @@ def get_chart_data(
     # Return current-day real 1-minute OHLC candles
     # and indicator overlays from the running engine.
     user = get_current_user(authorization)
-    state = get_user_bot_state(user["id"])
+
+    state = get_user_bot_state(
+        user["id"]
+    )
+    auto_restarted = False
+    recovery_reason = None
+
+    if not state.get("running"):
+        recovery = _start_saved_runtime_engine(
+            user["id"]
+        )
+        state = recovery["state"]
+        auto_restarted = bool(
+            recovery["started"]
+        )
+        recovery_reason = recovery[
+            "reason"
+        ]
 
     candles = state.get(
         "chart_candles",
         [],
     ) or []
 
+    raw_status = state.get(
+        "status",
+        "NOT_STARTED",
+    )
+
+    if auto_restarted and not candles:
+        chart_status = "AUTO_RESTARTING"
+    else:
+        chart_status = raw_status
+
+    if candles:
+        message = (
+            f"{len(candles)} real candles loaded"
+        )
+    elif chart_status == "AUTO_RESTARTING":
+        message = (
+            "Broker engine auto-restarted. "
+            "Candles load ho rahi hain."
+        )
+    elif recovery_reason == "BOT_STOPPED":
+        message = "Bot stopped hai."
+    elif recovery_reason == "BROKER_NOT_CONNECTED":
+        message = (
+            "Active broker credentials nahi mile."
+        )
+    elif recovery_reason:
+        message = str(recovery_reason)
+    else:
+        message = (
+            "Broker engine candles prepare "
+            "kar raha hai."
+        )
+
     return {
         "success": True,
         "running": bool(
             state.get("running")
         ),
-        "status": state.get(
-            "status",
-            "NOT_STARTED",
+        "runtime_running": bool(
+            state.get("running")
         ),
+        "auto_restarted": auto_restarted,
+        "status": chart_status,
+        "runtime_status": raw_status,
+        "reason": recovery_reason,
+        "message": message,
         "instrument": state.get(
             "chart_instrument"
         ) or state.get(
