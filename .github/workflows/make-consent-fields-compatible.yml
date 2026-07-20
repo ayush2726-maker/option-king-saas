@@ -1,0 +1,40 @@
+name: Make Consent Fields Compatible
+
+on:
+  push:
+    branches:
+      - agent/registration-risk-consent-v1
+    paths:
+      - ".github/workflows/make-consent-fields-compatible.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/registration-risk-consent-v1
+          fetch-depth: 0
+      - name: Patch compatibility
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('auth/routes.py')
+          s=p.read_text(encoding='utf-8')
+          s=s.replace('    no_guarantee_acknowledged: bool\n    technology_risk_acknowledged: bool\n','    no_guarantee_acknowledged: bool = None\n    technology_risk_acknowledged: bool = None\n',1)
+          s=s.replace('        "no-profit-guarantee acknowledgement": req.no_guarantee_acknowledged,\n        "technology and broker-API risk acknowledgement": req.technology_risk_acknowledged,\n','        "no-profit-guarantee acknowledgement": (req.no_guarantee_acknowledged if req.no_guarantee_acknowledged is not None else req.risk_acknowledged),\n        "technology and broker-API risk acknowledgement": (req.technology_risk_acknowledged if req.technology_risk_acknowledged is not None else req.risk_acknowledged),\n',1)
+          s=s.replace('            int(req.no_guarantee_acknowledged),\n            int(req.technology_risk_acknowledged),\n','            int(req.no_guarantee_acknowledged if req.no_guarantee_acknowledged is not None else req.risk_acknowledged),\n            int(req.technology_risk_acknowledged if req.technology_risk_acknowledged is not None else req.risk_acknowledged),\n',1)
+          p.write_text(s,encoding='utf-8')
+          PY
+          python -m py_compile auth/routes.py database.py
+      - name: Remove workflow and push
+        run: |
+          rm -f .github/workflows/make-consent-fields-compatible.yml
+          git config user.name "okai-consent-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Keep registration consent backward compatible"
+          git push origin HEAD:agent/registration-risk-consent-v1
