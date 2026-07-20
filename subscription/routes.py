@@ -607,6 +607,46 @@ def get_subscription_status(authorization: str = Header(None)):
     _ensure_subscription_schema()
     user = get_current_user(authorization)
     now = _utcnow()
+
+    if bool(user["is_admin"]):
+        conn = get_db()
+        try:
+            conn.execute(
+                """
+                UPDATE users
+                SET subscription_status='active', trial_ends_at=NULL
+                WHERE id=?
+                """,
+                (user["id"],),
+            )
+            history = conn.execute(
+                """
+                SELECT plan, amount, status, payment_gateway, merchant_order_id,
+                       gateway_state, valid_from, valid_till, created_at
+                FROM subscriptions WHERE user_id=? ORDER BY created_at DESC
+                """,
+                (user["id"],),
+            ).fetchall()
+            conn.commit()
+        finally:
+            conn.close()
+
+        return {
+            "success": True,
+            "subscription_status": "active",
+            "days_remaining": None,
+            "unlimited": True,
+            "is_admin": True,
+            "active_subscription": {
+                "plan": "admin_unlimited",
+                "status": "active",
+                "valid_from": None,
+                "valid_till": None,
+            },
+            "history": [dict(row) for row in history],
+            "plan": PLAN,
+        }
+
     conn = get_db()
     try:
         expired = conn.execute(

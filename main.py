@@ -59,22 +59,31 @@ def startup():
             (admin_email,),
         ).fetchone()
 
-        if not existing:
-            trial_ends = (
-                datetime.utcnow() + timedelta(days=36500)
-            ).isoformat()
+        if existing:
+            conn.execute(
+                """
+                UPDATE users
+                SET is_admin=1,
+                    subscription_status='active',
+                    trial_ends_at=NULL
+                WHERE id=?
+                """,
+                (existing["id"],),
+            )
+            conn.commit()
+            print(f"Admin status refreshed: {admin_email}")
+        else:
             conn.execute(
                 """
                 INSERT INTO users (
                     name, email, password_hash, is_admin,
                     subscription_status, trial_ends_at
-                ) VALUES (?, ?, ?, 1, 'active', ?)
+                ) VALUES (?, ?, ?, 1, 'active', NULL)
                 """,
                 (
                     admin_name,
                     admin_email,
                     hash_password(admin_password),
-                    trial_ends,
                 ),
             )
             conn.commit()

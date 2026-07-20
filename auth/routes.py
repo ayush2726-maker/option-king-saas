@@ -328,16 +328,28 @@ def login(req: LoginRequest):
     if not user["is_active"]:
         raise HTTPException(status_code=403, detail="Account suspended. Contact support.")
 
-    # Check subscription status
-    status = user["subscription_status"]
-    trial_ends = user["trial_ends_at"]
+    # Check subscription status. Admin access is permanent and must never
+    # be downgraded by trial/subscription calculations.
+    status = "active" if bool(user["is_admin"]) else user["subscription_status"]
+    trial_ends = None if bool(user["is_admin"]) else user["trial_ends_at"]
     warning = None
 
-    if status == "trial" and trial_ends:
+    if bool(user["is_admin"]):
+        conn = get_db()
+        conn.execute(
+            """
+            UPDATE users
+            SET subscription_status='active', trial_ends_at=NULL
+            WHERE id=?
+            """,
+            (user["id"],),
+        )
+        conn.commit()
+        conn.close()
+    elif status == "trial" and trial_ends:
         trial_end_dt = datetime.fromisoformat(trial_ends)
         days_left = (trial_end_dt - datetime.utcnow()).days
         if days_left <= 0:
-            # Update to expired
             conn = get_db()
             conn.execute(
                 "UPDATE users SET subscription_status='expired' WHERE id=?", (user["id"],)
@@ -400,9 +412,10 @@ def get_me(authorization: str = Header(None)):
             "name": user["name"],
             "email": user["email"],
             "phone": user["phone"],
-            "subscription_status": user["subscription_status"],
-            "trial_ends_at": user["trial_ends_at"],
+            "subscription_status": "active" if bool(user["is_admin"]) else user["subscription_status"],
+            "trial_ends_at": None if bool(user["is_admin"]) else user["trial_ends_at"],
             "is_admin": bool(user["is_admin"]),
+            "unlimited_access": bool(user["is_admin"]),
             "brokers_connected": [dict(b) for b in brokers],
             "bot": dict(bot) if bot else None,
             "active_subscription": dict(sub) if sub else None
