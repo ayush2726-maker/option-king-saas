@@ -19,6 +19,7 @@ from database import get_db
 # ── Per-user bot instances ────────────────────────────────
 _user_bots = {}  # user_id -> bot state
 _lock = threading.Lock()
+_entry_guard_state = {}
 
 NIFTY_TOKEN  = "26000"
 NIFTY_SYMBOL = "Nifty 50"
@@ -587,6 +588,337 @@ def build_chart_candles(
     ]
 
 
+def _normalize_option_candles(rows):
+    normalized = []
+
+    for row in rows or []:
+        try:
+            if isinstance(row, dict):
+                timestamp = (
+                    row.get("date")
+                    or row.get("time")
+                    or row.get("timestamp")
+                    or ""
+                )
+                open_price = float(row.get("open"))
+                high_price = float(row.get("high"))
+                low_price = float(row.get("low"))
+                close_price = float(row.get("close"))
+            else:
+                if len(row) < 5:
+                    continue
+
+                timestamp = row[0]
+                open_price = float(row[1])
+                high_price = float(row[2])
+                low_price = float(row[3])
+                close_price = float(row[4])
+
+            if min(
+                open_price,
+                high_price,
+                low_price,
+                close_price,
+            ) <= 0:
+                continue
+
+            normalized.append({
+                "time": str(timestamp),
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "close": close_price,
+            })
+        except Exception:
+            continue
+
+    normalized.sort(
+        key=lambda candle: candle["time"]
+    )
+
+    return normalized
+
+
+def _premium_entry_quality(
+    rows,
+    current_ltp,
+):
+    candles = _normalize_option_candles(
+        rows
+    )
+    current = float(current_ltp or 0)
+
+    if current <= 0:
+        return {
+            "allowed": False,
+            "reason": "INVALID_OPTION_LTP",
+            "current_ltp": current,
+        }
+
+    if len(candles) < 4:
+        return {
+            "allowed": True,
+            "reason": "OPTION_CANDLES_INSUFFICIENT",
+            "current_ltp": round(current, 2),
+            "candle_count": len(candles),
+        }
+
+    recent = candles[-6:]
+    closes = [
+        candle["close"]
+        for candle in recent
+    ]
+    highs = [
+        candle["high"]
+        for candle in recent
+    ]
+
+    oldest_close = max(
+        0.05,
+        closes[0],
+    )
+    recent_high = max(highs)
+
+    sorted_closes = sorted(closes)
+    middle = len(sorted_closes) // 2
+
+    if len(sorted_closes) % 2:
+        median_close = sorted_closes[
+            middle
+        ]
+    else:
+        median_close = (
+            sorted_closes[middle - 1]
+            + sorted_closes[middle]
+        ) / 2
+
+    latest = recent[-1]
+
+    rise_pct = (
+        current / oldest_close - 1
+    ) * 100
+    pullback_pct = (
+        current / recent_high - 1
+    ) * 100
+    extension_pct = (
+        current / max(0.05, median_close)
+        - 1
+    ) * 100
+
+    latest_bearish = (
+        latest["close"]
+        < latest["open"]
+    )
+
+    spike_reversal = (
+        rise_pct >= 10.0
+        and pullback_pct <= -3.5
+    )
+
+    bearish_after_run = (
+        rise_pct >= 8.0
+        and latest_bearish
+        and current
+        <= latest["close"] * 1.005
+    )
+
+    extreme_extension = (
+        extension_pct >= 12.0
+    )
+
+    blocked = (
+        spike_reversal
+        or bearish_after_run
+        or extreme_extension
+    )
+
+    if spike_reversal:
+        reason = "OPTION_SPIKE_REVERSING"
+    elif bearish_after_run:
+        reason = "OPTION_BEARISH_AFTER_RUN"
+    elif extreme_extension:
+        reason = "OPTION_PREMIUM_OVEREXTENDED"
+    else:
+        reason = "OPTION_PREMIUM_ENTRY_OK"
+
+    return {
+        "allowed": not blocked,
+        "reason": reason,
+        "current_ltp": round(current, 2),
+        "candle_count": len(candles),
+        "rise_pct": round(rise_pct, 2),
+        "pullback_pct": round(
+            pullback_pct,
+            2,
+        ),
+        "extension_pct": round(
+            extension_pct,
+            2,
+        ),
+        "latest_bearish": bool(
+            latest_bearish
+        ),
+    }
+
+
+def _option_entry_quality_angel(
+    obj,
+    resolved,
+    current_ltp,
+):
+    try:
+        now_ist = (
+            datetime.now(timezone.utc)
+            + timedelta(
+                hours=5,
+                minutes=30,
+            )
+        )
+        from_dt = now_ist.replace(
+            hour=9,
+            minute=15,
+            second=0,
+            microsecond=0,
+        )
+
+        response = obj.getCandleData({
+            "exchange": resolved[
+                "exch_seg"
+            ],
+            "symboltoken": str(
+                resolved["token"]
+            ),
+            "interval": "ONE_MINUTE",
+            "fromdate": from_dt.strftime(
+                "%Y-%m-%d %H:%M"
+            ),
+            "todate": now_ist.strftime(
+                "%Y-%m-%d %H:%M"
+            ),
+        })
+
+        rows = (
+            response.get("data", [])
+            if isinstance(
+                response,
+                dict,
+            )
+            else []
+        )
+
+        return _premium_entry_quality(
+            rows,
+            current_ltp,
+        )
+    except Exception as exc:
+        return {
+            "allowed": True,
+            "reason": "OPTION_GUARD_FETCH_WARNING",
+            "warning": str(exc)[:120],
+            "current_ltp": round(
+                float(current_ltp or 0),
+                2,
+            ),
+        }
+
+
+def _option_entry_quality_multi(
+    broker_name,
+    obj,
+    resolved,
+    current_ltp,
+):
+    try:
+        now_ist = (
+            datetime.now(timezone.utc)
+            + timedelta(
+                hours=5,
+                minutes=30,
+            )
+        )
+        today = now_ist.strftime(
+            "%Y-%m-%d"
+        )
+
+        if broker_name == "upstox":
+            result = obj.get_candles(
+                symbol=(
+                    resolved.get("token")
+                    or resolved["symbol"]
+                ),
+                interval="1m",
+                from_date=today,
+                to_date=today,
+                exchange=resolved.get(
+                    "exchange",
+                    "NSE_FO",
+                ),
+            )
+        elif broker_name == "zerodha":
+            result = obj.get_candles(
+                symbol=resolved.get(
+                    "token"
+                ),
+                interval="minute",
+                from_date=now_ist.replace(
+                    hour=9,
+                    minute=15,
+                    second=0,
+                    microsecond=0,
+                ).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+                to_date=now_ist.strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+                exchange=resolved.get(
+                    "exchange",
+                    "NFO",
+                ),
+            )
+        else:
+            return {
+                "allowed": True,
+                "reason": (
+                    "OPTION_GUARD_UNSUPPORTED_BROKER"
+                ),
+            }
+
+        if (
+            not isinstance(result, dict)
+            or not result.get("success")
+        ):
+            return {
+                "allowed": True,
+                "reason": "OPTION_GUARD_FETCH_WARNING",
+                "warning": str(
+                    (result or {}).get(
+                        "message",
+                        "option candles unavailable",
+                    )
+                )[:120],
+                "current_ltp": round(
+                    float(current_ltp or 0),
+                    2,
+                ),
+            }
+
+        return _premium_entry_quality(
+            result.get("candles", []),
+            current_ltp,
+        )
+    except Exception as exc:
+        return {
+            "allowed": True,
+            "reason": "OPTION_GUARD_FETCH_WARNING",
+            "warning": str(exc)[:120],
+            "current_ltp": round(
+                float(current_ltp or 0),
+                2,
+            ),
+        }
+
+
 def run_user_bot(user_id: int, creds: dict, state: dict):
     """Runs in background thread for each user"""
     obj = None
@@ -686,16 +1018,43 @@ def run_user_bot(user_id: int, creds: dict, state: dict):
                 "chart_instrument": underlying,
                 "chart_interval": "ONE_MINUTE",
                 "chart_candles": chart_candles,
+                "entry_guard": _entry_guard_state.get(
+                    user_id
+                ),
+                "open_trade_monitor_seconds": 5,
                 "status": "RUNNING",
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
+
+            # Open position premium ko 5-second interval par monitor karo.
+            # WAIT/False isliye pass hota hai taaki exit ke baad isi old
+            # signal par accidental re-entry na ho.
+            for _ in range(12):
+                time.sleep(5)
+                if not state.get("running"):
+                    break
+                try:
+                    _manage_paper_trade(
+                        user_id,
+                        underlying,
+                        market_data["price"],
+                        "WAIT",
+                        0,
+                        False,
+                        settings,
+                        obj,
+                        spot_atr=market_data["atr"],
+                        market_data=market_data,
+                        candle_id=str(last["time"]),
+                    )
+                except Exception:
+                    pass
+            continue
 
         except Exception as e:
             obj = None
             state["status"] = f"ERROR: {str(e)[:100]}"
             time.sleep(60)
-
-        time.sleep(60)
 
 
 def start_user_bot(user_id: int, creds: dict) -> dict:
@@ -933,16 +1292,44 @@ def run_user_bot_multi(user_id: int, broker_name: str, creds: dict, state: dict)
                 "chart_instrument": underlying,
                 "chart_interval": "ONE_MINUTE",
                 "chart_candles": chart_candles,
+                "entry_guard": _entry_guard_state.get(
+                    user_id
+                ),
+                "open_trade_monitor_seconds": 5,
                 "status": "RUNNING",
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
+
+            # Open position premium ko 5-second interval par monitor karo.
+            # WAIT/False isliye pass hota hai taaki exit ke baad isi old
+            # signal par accidental re-entry na ho.
+            for _ in range(12):
+                time.sleep(5)
+                if not state.get("running"):
+                    break
+                try:
+                    _manage_paper_trade_multi(
+                        user_id,
+                        broker_name,
+                        underlying,
+                        market_data["price"],
+                        "WAIT",
+                        0,
+                        False,
+                        settings,
+                        obj,
+                        spot_atr=market_data["atr"],
+                        market_data=market_data,
+                        candle_id=str(last["time"]),
+                    )
+                except Exception:
+                    pass
+            continue
 
         except Exception as e:
             obj = None
             state["status"] = f"ERROR: {str(e)[:100]}"
             time.sleep(60)
-
-        time.sleep(60)
 
 
 def start_user_bot_multi(user_id: int, broker_name: str, creds: dict) -> dict:
@@ -1210,6 +1597,24 @@ def _manage_paper_trade(
             return
         if entry <= 0:
             return
+
+        entry_quality = (
+            _option_entry_quality_angel(
+                obj,
+                resolved,
+                entry,
+            )
+        )
+        _entry_guard_state[
+            user_id
+        ] = entry_quality
+
+        if not entry_quality.get(
+            "allowed",
+            True,
+        ):
+            return
+
         _dynamic_insert_trade(
             conn, user_id, "angelone", resolved, side, entry,
             LOT_SIZES.get(underlying,1), score, price, spot_atr,
@@ -1281,6 +1686,24 @@ def _manage_paper_trade_multi(
             return
         entry = float(q["ltp"])
         if entry <= 0:
+            return
+
+        entry_quality = (
+            _option_entry_quality_multi(
+                broker_name,
+                obj,
+                resolved,
+                entry,
+            )
+        )
+        _entry_guard_state[
+            user_id
+        ] = entry_quality
+
+        if not entry_quality.get(
+            "allowed",
+            True,
+        ):
             return
 
         qty = int(
