@@ -1,14 +1,142 @@
 import sqlite3
 import os
+import shutil
+from pathlib import Path
 from datetime import datetime
 
-DB_PATH = os.getenv("DB_PATH", "option_king_saas.db")
+
+DB_FILENAME = "option_king_saas.db"
+
+
+def _resolve_database_path():
+    explicit = str(
+        os.getenv("DB_PATH", "")
+    ).strip()
+    mount = str(
+        os.getenv(
+            "RAILWAY_VOLUME_MOUNT_PATH",
+            "",
+        )
+    ).strip()
+
+    if explicit:
+        db_file = Path(explicit).expanduser()
+        source = "DB_PATH"
+    elif mount:
+        db_file = Path(mount) / DB_FILENAME
+        source = "RAILWAY_VOLUME_MOUNT_PATH"
+    else:
+        db_file = Path(DB_FILENAME)
+        source = "LOCAL_EPHEMERAL"
+
+    db_file = db_file.resolve()
+    db_file.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    volume_path = (
+        Path(mount).resolve()
+        if mount
+        else None
+    )
+
+    return db_file, source, volume_path
+
+
+_DB_FILE, DB_STORAGE_SOURCE, _VOLUME_PATH = (
+    _resolve_database_path()
+)
+
+DB_PATH = str(_DB_FILE)
+
+
+def _inside_volume(child, parent):
+    if parent is None:
+        return False
+
+    try:
+        child.relative_to(parent)
+        return True
+    except Exception:
+        return False
+
+
+DB_STORAGE_PERSISTENT = _inside_volume(
+    _DB_FILE,
+    _VOLUME_PATH,
+)
+
+
+def _copy_local_database_once():
+    local_file = Path(
+        DB_FILENAME
+    ).resolve()
+
+    if (
+        local_file == _DB_FILE
+        or _DB_FILE.exists()
+        or not local_file.exists()
+        or local_file.stat().st_size <= 0
+    ):
+        return
+
+    try:
+        shutil.copy2(
+            local_file,
+            _DB_FILE,
+        )
+        print(
+            "✅ Existing database copied to "
+            f"persistent path: {DB_PATH}"
+        )
+    except Exception as exc:
+        print(
+            "⚠️ Database copy skipped: "
+            f"{str(exc)[:160]}"
+        )
+
+
+_copy_local_database_once()
+
+
+def get_db_storage_info():
+    return {
+        "path": DB_PATH,
+        "source": DB_STORAGE_SOURCE,
+        "persistent": bool(
+            DB_STORAGE_PERSISTENT
+        ),
+        "volume_attached": bool(
+            _VOLUME_PATH
+        ),
+        "exists": _DB_FILE.exists(),
+        "size_bytes": (
+            _DB_FILE.stat().st_size
+            if _DB_FILE.exists()
+            else 0
+        ),
+    }
+
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=30,
+    )
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(
+        "PRAGMA journal_mode=WAL"
+    )
+    conn.execute(
+        "PRAGMA synchronous=NORMAL"
+    )
+    conn.execute(
+        "PRAGMA busy_timeout=10000"
+    )
+    conn.execute(
+        "PRAGMA foreign_keys=ON"
+    )
     return conn
 
 def init_db():
@@ -144,7 +272,27 @@ def init_db():
 
     conn.commit()
     conn.close()
-    print("✅ Database initialized successfully")
+    storage = get_db_storage_info()
+    storage_type = (
+        "PERSISTENT"
+        if storage["persistent"]
+        else "EPHEMERAL"
+    )
+
+    print(
+        "✅ Database initialized successfully "
+        f"| {storage_type} "
+        f"| {storage['path']}"
+    )
+
+    if (
+        os.getenv("RAILWAY_ENVIRONMENT_ID")
+        and not storage["persistent"]
+    ):
+        print(
+            "⚠️ Railway persistent volume "
+            "attach nahi hai."
+        )
 
 if __name__ == "__main__":
     init_db()
