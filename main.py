@@ -127,7 +127,48 @@ def health():
     }
 
 
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from html import escape
+
+
+
+@app.get("/upstox/callback", response_class=HTMLResponse)
+def upstox_callback(code: str = "", state: str = ""):
+    safe_code = escape(str(code or ""))
+    safe_state = escape(str(state or ""))
+    code_html = (
+        "<p><b>Authorization Code:</b></p>"
+        f"<div style='word-break:break-all;color:#f5c842'>{safe_code}</div>"
+        if safe_code
+        else (
+            "<p>Redirect URL verified. Manual token ke liye "
+            "Developer Apps me Generate dabayein.</p>"
+        )
+    )
+    state_html = (
+        f"<p style='color:#777'>State: {safe_state}</p>"
+        if safe_state
+        else ""
+    )
+    return (
+        "<!doctype html><html><head>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Option King AI Upstox</title></head>"
+        "<body style='background:#0a0a0f;color:#e8e8f0;"
+        "font-family:Arial;padding:24px'>"
+        "<div style='max-width:680px;margin:auto;background:#13131f;"
+        "border:1px solid #252540;border-radius:18px;padding:22px'>"
+        "<h2 style='color:#00d4a0'>✅ Option King AI Upstox Callback</h2>"
+        "<p>Upstox redirect successfully receive ho gaya.</p>"
+        + code_html
+        + state_html
+        + "</div></body></html>"
+    )
+
+
+@app.post("/upstox/postback")
+def upstox_postback(body: dict = None):
+    return {"success": True, "received": True}
 
 
 @app.get("/admin/panel")

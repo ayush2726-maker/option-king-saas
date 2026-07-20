@@ -11,21 +11,50 @@ class UpstoxBroker(BaseBroker):
     @classmethod
     def required_fields(cls):
         return [
-            {"key":"client_id","label":"API Key (Client ID)","hint":"Upstox developer portal se","optional":False},
-            {"key":"api_key","label":"API Secret","hint":"Upstox developer portal se","optional":False},
-            {"key":"api_secret","label":"Access Token","hint":"OAuth login ke baad milta hai","optional":False}
+            {
+                "key": "client_id",
+                "label": "API Key (Client ID)",
+                "hint": "Developer Apps > Option King AI > API Key",
+                "optional": False,
+            },
+            {
+                "key": "api_key",
+                "label": "API Secret",
+                "hint": "Developer Apps > Option King AI > API Secret",
+                "optional": False,
+            },
+            {
+                "key": "api_secret",
+                "label": "Daily Access Token",
+                "hint": "Developer Apps me Generate karke token copy karein",
+                "optional": False,
+            },
         ]
+
     @classmethod
     def setup_guide(cls):
         return {
-            "broker":"Upstox","api_cost":"Free","free":True,
-            "api_portal_url":"https://developer.upstox.com",
-            "steps":[
-                {"step":1,"title":"Upstox Account","description":"upstox.com pe account kholein. F&O trading enable karwayein.","url":"https://upstox.com"},
-                {"step":2,"title":"Developer Portal","description":"developer.upstox.com pe login karein aur Create App karein.","url":"https://developer.upstox.com"},
-                {"step":3,"title":"App Create Karein","description":"App name daalo. Redirect URL http://localhost daalo. Client ID aur Secret milega.","url":None},
-                {"step":4,"title":"Access Token","description":"Pehli baar OAuth login karke access token generate karein.","url":None}
-            ]
+            "broker": "Upstox",
+            "api_cost": "Free",
+            "free": True,
+            "api_portal_url": "https://account.upstox.com/developer/apps",
+            "create_app_url": "https://account.upstox.com/developer/apps/createapp",
+            "official_auth_docs": "https://upstox.com/developer/api-documentation/authentication/",
+            "app_name": "Option King AI",
+            "redirect_url": "https://option-king-saas-production.up.railway.app/upstox/callback",
+            "postback_url": "https://option-king-saas-production.up.railway.app/upstox/postback",
+            "token_type": "Standard daily Access Token",
+            "token_expiry_note": "Standard token agle din 3:30 AM tak valid hota hai.",
+            "static_ip_note": "Live API orders ke liye registered static IP required ho sakti hai.",
+            "steps": [
+                {"step": 1, "title": "Developer Apps", "description": "Upstox Developer Apps page kholein.", "url": "https://account.upstox.com/developer/apps"},
+                {"step": 2, "title": "Create App", "description": "App Name me Option King AI daalein.", "url": "https://account.upstox.com/developer/apps/createapp"},
+                {"step": 3, "title": "Exact URLs", "description": "Redirect aur Postback URL guide me diye exact values se bharein.", "url": None},
+                {"step": 4, "title": "API Key and Secret", "description": "Created app se API Key aur API Secret copy karein.", "url": None},
+                {"step": 5, "title": "Generate Token", "description": "Generate dabakar standard daily Access Token copy karein.", "url": None},
+                {"step": 6, "title": "Fill OKAI", "description": "API Key, API Secret aur Daily Access Token bharein. TOTP nahi chahiye.", "url": None},
+                {"step": 7, "title": "Save and Test", "description": "Save Credentials aur Test Broker Connection dabayein.", "url": None},
+            ],
         }
 
     def _h(self):
