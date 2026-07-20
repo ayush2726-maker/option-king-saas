@@ -864,6 +864,10 @@ def run_user_bot_multi(user_id: int, broker_name: str, creds: dict, state: dict)
                 continue
 
             df, trend = result
+            chart_candles = build_chart_candles(
+                df,
+                limit=390,
+            )
             last = df.iloc[-2]
             c1 = df.iloc[-3]
             c2 = df.iloc[-2]
@@ -926,6 +930,9 @@ def run_user_bot_multi(user_id: int, broker_name: str, creds: dict, state: dict)
                 "hero": hero,
                 "price": market_data["price"],
                 "underlying": underlying,
+                "chart_instrument": underlying,
+                "chart_interval": "ONE_MINUTE",
+                "chart_candles": chart_candles,
                 "status": "RUNNING",
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
