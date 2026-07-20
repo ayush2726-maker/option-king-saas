@@ -1,3 +1,4 @@
+# retrigger: phonepe-1999-v1
 name: Test PhonePe 1999 Integration
 
 on:
@@ -18,80 +19,41 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: agent/phonepe-upi-1999-v1
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Install backend dependencies
-        run: pip install -r requirements.txt
-
-      - name: Compile payment backend
-        run: python -m py_compile subscription/routes.py database.py auth/routes.py
-
-      - name: Validate schema, exact amount and idempotent activation
+      - run: pip install -r requirements.txt
+      - run: python -m py_compile subscription/routes.py database.py auth/routes.py
+      - name: Validate exact amount, schema and idempotency
         env:
           DB_PATH: /tmp/okai-phonepe-test.db
         run: |
           rm -f /tmp/okai-phonepe-test.db
           python - <<'PY'
-          from datetime import datetime
           from database import init_db, get_db
           from auth.utils import hash_password
-          from subscription.routes import (
-              PLAN,
-              PLAN_ID,
-              _activate_subscription,
-              _ensure_subscription_schema,
-          )
+          from subscription.routes import PLAN, PLAN_ID, _activate_subscription, _ensure_subscription_schema
 
           assert PLAN["price"] == 199900
           assert PLAN["amount_rupees"] == 1999
           assert PLAN["duration_days"] == 30
-
-          init_db()
-          _ensure_subscription_schema()
+          init_db(); _ensure_subscription_schema()
           conn = get_db()
-          conn.execute(
-              """INSERT INTO users(name,email,password_hash,phone,subscription_status)
-                 VALUES (?,?,?,?,?)""",
-              ("Test User", "paytest@example.com", hash_password("secret1"), "+919999999999", "expired"),
-          )
-          user_id = conn.execute("SELECT id FROM users WHERE email=?", ("paytest@example.com",)).fetchone()["id"]
-          conn.execute(
-              """INSERT INTO subscriptions(
-                    user_id,plan,amount,status,payment_gateway,
-                    merchant_order_id,gateway_state
-                 ) VALUES (?,?,?,'pending','phonepe',?,'PENDING')""",
-              (user_id, PLAN_ID, 1999.0, "OKAI_1_1234567890_ABCDEF1234"),
-          )
+          conn.execute("INSERT INTO users(name,email,password_hash,phone,subscription_status) VALUES (?,?,?,?,?)", ("Test User","paytest@example.com",hash_password("secret1"),"+919999999999","expired"))
+          uid = conn.execute("SELECT id FROM users WHERE email='paytest@example.com'").fetchone()["id"]
+          conn.execute("INSERT INTO subscriptions(user_id,plan,amount,status,payment_gateway,merchant_order_id,gateway_state) VALUES (?,?,?,'pending','phonepe',?,'PENDING')", (uid,PLAN_ID,1999.0,"OKAI_1_1234567890_ABCDEF1234"))
           conn.commit()
-          sub = conn.execute("SELECT * FROM subscriptions WHERE user_id=?", (user_id,)).fetchone()
-          payload = {
-              "state": "COMPLETED",
-              "amount": 199900,
-              "paymentDetails": [{
-                  "state": "COMPLETED",
-                  "transactionId": "PHONEPE_TXN_TEST",
-                  "paymentMode": "UPI_INTENT",
-              }],
-          }
+          sub = conn.execute("SELECT * FROM subscriptions WHERE user_id=?", (uid,)).fetchone()
+          payload = {"state":"COMPLETED","amount":199900,"paymentDetails":[{"state":"COMPLETED","transactionId":"PHONEPE_TXN_TEST","paymentMode":"UPI_INTENT"}]}
           first = _activate_subscription(conn, sub, payload)
           assert first["activated"] is True
-          first_till = first["valid_till"]
           fresh = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub["id"],)).fetchone()
           second = _activate_subscription(conn, fresh, payload)
           assert second["activated"] is False
-          assert second["valid_till"] == first_till
-          user = conn.execute("SELECT subscription_status FROM users WHERE id=?", (user_id,)).fetchone()
-          assert user["subscription_status"] == "active"
-          columns = {row[1] for row in conn.execute("PRAGMA table_info(subscriptions)")}
-          for required in {
-              "payment_gateway", "merchant_order_id", "gateway_order_id",
-              "gateway_transaction_id", "gateway_state", "gateway_payload",
-              "checkout_url", "activated_at", "updated_at",
-          }:
-              assert required in columns, required
+          assert second["valid_till"] == first["valid_till"]
+          assert conn.execute("SELECT subscription_status FROM users WHERE id=?", (uid,)).fetchone()["subscription_status"] == "active"
+          cols = {r[1] for r in conn.execute("PRAGMA table_info(subscriptions)")}
+          assert {"payment_gateway","merchant_order_id","gateway_order_id","gateway_transaction_id","gateway_state","gateway_payload","checkout_url","activated_at","updated_at"} <= cols
           conn.close()
           print("PhonePe backend validation OK")
           PY
