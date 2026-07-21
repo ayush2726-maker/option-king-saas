@@ -6,8 +6,9 @@ can be deducted twice from the same already-costed result.
 
 This startup hook also activates:
 - historical index-token safety;
-- true cost-safe break-even and the quantity-preserving 8% premium stop cap;
-- exact Paper/Live net P&L and exact trade-cost break-even; and
+- true cost-safe break-even and the quantity-preserving premium stop cap;
+- exact Paper/Live net P&L and exact trade-cost break-even;
+- Balanced Exit V2 for smaller losses and larger trend profits; and
 - the maximum five Backtest trades per trading day.
 """
 
@@ -20,6 +21,10 @@ from backtest.angel_historical_index_patch import (
 
 
 def _activate_final_parity_patches():
+    from bot.balanced_exit_v2_patch import (
+        apply_balanced_backtest_exit_patch,
+        apply_balanced_risk_profit_patch,
+    )
     from backtest.cost_safe_breakeven_risk_patch import (
         apply_cost_safe_breakeven_risk_patch,
     )
@@ -33,12 +38,15 @@ def _activate_final_parity_patches():
         apply_daily_trade_limit_patch,
     )
 
-    # Order matters: cost/risk wrappers must be final before the daily result is
-    # capped, and runtime structural-exit patches are already active in main.py.
+    # Source-level Backtest logic must be installed before cost/risk wrappers
+    # capture the one-index function. Final runtime/ladder functions are installed
+    # last so no older patch can overwrite the balanced settings.
+    apply_balanced_backtest_exit_patch()
     apply_cost_safe_breakeven_risk_patch()
     apply_all_in_risk_cap_patch()
     apply_live_net_pnl_breakeven_patch()
     apply_daily_trade_limit_patch()
+    apply_balanced_risk_profit_patch()
 
 
 def apply_cost_idempotence_patch():
