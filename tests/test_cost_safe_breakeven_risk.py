@@ -67,39 +67,61 @@ def test_first_trail_waits_for_costs_plus_two_percent():
     assert "TRUE_BE" in locked["stage"] or "2PCT" in locked["stage"]
 
 
-def test_all_in_risk_cap_reduces_eight_sensex_lots_to_one():
-    apply_all_in_risk_cap_patch()
-    trade = {
+def _oversized_sensex_trade(reason, exit_price):
+    return {
         "instrument": "SENSEX",
         "entry_price": 500.0,
-        "exit_price": 375.0,
+        "exit_price": exit_price,
         "qty": 160,
         "lots": 8,
         "lot_size": 20,
         "risk_points": 125.0,
-        "sl_price": 375.0,
-        "reason": "PURE_ATR_SL",
+        "sl_price": exit_price,
+        "reason": reason,
         "peak_price": 500.0,
     }
-    result = {
+
+
+def _auto_result():
+    return {
         "success": True,
         "instrument": "AUTO",
         "capital": 100000.0,
     }
 
+
+def test_all_in_risk_cap_reduces_eight_sensex_lots_to_one():
+    apply_all_in_risk_cap_patch()
     capped = true_be._risk_capped_trade(
-        trade,
-        result,
+        _oversized_sensex_trade("PURE_ATR_SL", 375.0),
+        _auto_result(),
         "angelone",
         100000.0,
     )
 
-    assert capped["risk_cap_skipped"] is not True if "risk_cap_skipped" in capped else True
+    assert not capped.get("risk_cap_skipped", False)
     assert capped["lots"] == 1
     assert capped["qty"] == 20
     assert math.isclose(capped["exit_price"], 460.0, abs_tol=0.01)
     assert capped["expected_max_loss_after_all_costs"] <= 1000.0
     assert capped["max_loss_rupees"] == 1000.0
+    assert capped["pnl"] >= -1000.0
+
+
+def test_hard_stop_precedes_reversal_or_day_end_below_stop():
+    apply_all_in_risk_cap_patch()
+    capped = true_be._risk_capped_trade(
+        _oversized_sensex_trade("TWO_CANDLE_REVERSAL_EXIT", 300.0),
+        _auto_result(),
+        "angelone",
+        100000.0,
+    )
+
+    assert not capped.get("risk_cap_skipped", False)
+    assert capped["reason"] == "HARD_RISK_CAP_SL"
+    assert capped["hard_stop_precedence_applied"] is True
+    assert math.isclose(capped["exit_price"], 460.0, abs_tol=0.01)
+    assert capped["expected_max_loss_after_all_costs"] <= 1000.0
     assert capped["pnl"] >= -1000.0
 
 
