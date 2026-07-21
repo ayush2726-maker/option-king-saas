@@ -2,21 +2,23 @@
 """OKAI static-IP gateway risk engine V2.
 
 This wrapper keeps the battle-tested gateway command/Angel order flow and adds:
-- a genuine one-lot hard cap at the local phone;
+- a genuine one-lot hard cap on each user's own phone/desktop;
 - use of the server-provided ATR stop instead of recalculating a fixed stop;
 - first profit lock at entry + estimated round-trip charges + 2% profit;
 - R-based dynamic profit trailing checked against option LTP every second;
 - fixed target disabled; remote structural exit depends on the active Railway release;
-- local SQLite migration, so open-position trail state survives restarts.
+- local SQLite migration, so open-position trail state survives restarts;
+- generic multi-user setup prompts without exposing broker credentials to SaaS.
 """
 
+import ipaddress
 import math
 from datetime import datetime
 
 import okai_local_gateway as base
 
 
-RISK_ENGINE_VERSION = "1.1.1-RISK-V2"
+RISK_ENGINE_VERSION = "1.2.0-RISK-V2-MULTIUSER"
 
 # Conservative Angel One equity-option charge model. Rates are decimals.
 # Brokerage is charged per executed order. Slight over-estimation is intentional:
@@ -275,12 +277,65 @@ class RiskV2GatewayRunner(base.GatewayRunner):
                 )
 
 
+def command_setup_v2():
+    print("=== OKAI USER STATIC-IP GATEWAY SETUP ===")
+    print("Use only your own OKAI account, Angel account and registered static IPv4.")
+    saas_url = input(f"SaaS URL [{base.DEFAULT_SAAS_URL}]: ").strip() or base.DEFAULT_SAAS_URL
+    email = input("OKAI account email: ").strip().lower()
+    password = base.getpass.getpass("OKAI account password: ")
+    device_name = input("Device name [My Gateway Device]: ").strip() or "My Gateway Device"
+    expected_ip = input("Registered public static IPv4: ").strip()
+    try:
+        parsed = ipaddress.ip_address(expected_ip)
+    except ValueError as exc:
+        raise RuntimeError("Valid public static IPv4 is required") from exc
+    if parsed.version != 4:
+        raise RuntimeError("Angel SmartAPI gateway requires IPv4")
+
+    gateway_token = base.login_and_pair(
+        saas_url,
+        email,
+        password,
+        device_name,
+        str(parsed),
+    )
+
+    print("\nAngel credentials stay only on this device in a permission-protected JSON file.")
+    print("Never send API key, MPIN, password, TOTP secret or gateway token to anyone.")
+    angel = {
+        "api_key": base.getpass.getpass("Angel SmartAPI API key: ").strip(),
+        "client_id": input("Angel client ID: ").strip(),
+        "password": base.getpass.getpass("Angel 4-digit MPIN: ").strip(),
+        "totp_secret": base.getpass.getpass("Angel permanent TOTP secret: ")
+        .replace(" ", "")
+        .strip(),
+    }
+    if not all(angel.values()):
+        raise RuntimeError("All Angel credentials are required")
+
+    config = {
+        "saas_url": saas_url.rstrip("/"),
+        "gateway_token": gateway_token,
+        "device_name": device_name,
+        "expected_static_ip": str(parsed),
+        "local_armed": False,
+        "angel": angel,
+        "created_at": base.now_iso(),
+        "risk_engine": RISK_ENGINE_VERSION,
+    }
+    base.save_config(config)
+    base.STOP_FILE.touch(exist_ok=True)
+    print(f"✅ Setup saved: {base.CONFIG_PATH}")
+    print("Gateway is DISARMED. Next: python okai_local_gateway_v2.py doctor")
+
+
 def command_doctor_v2():
     _original_command_doctor()
     conn = migrated_state_db()
     conn.close()
     print("=== LOCAL RISK ENGINE CHECK ===")
     print(f"Risk engine: {RISK_ENGINE_VERSION} ✅")
+    print("Per-user token and command isolation: ENABLED ✅")
     print("One-lot hard cap: ENABLED ✅")
     print("Initial stop: SERVER ATR SL ✅")
     print("First lock: ENTRY + ROUND-TRIP CHARGES + 2% ✅")
@@ -293,6 +348,7 @@ def install_patches():
     base.AGENT_VERSION = RISK_ENGINE_VERSION
     base.state_db = migrated_state_db
     base.GatewayRunner = RiskV2GatewayRunner
+    base.command_setup = command_setup_v2
     base.command_doctor = command_doctor_v2
 
 
