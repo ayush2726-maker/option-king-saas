@@ -25,6 +25,9 @@ from backtest.live_strategy_consistency_patch import (
 from backtest.live_frequency_portfolio_patch import (
     apply_live_frequency_portfolio_patch,
 )
+from backtest.angel_historical_index_patch import (
+    apply_angel_historical_index_patch,
+)
 from backtest.realism_costs_patch import apply_backtest_realism_costs_patch
 from backtest.cost_idempotence_patch import apply_cost_idempotence_patch
 from backtest.monthly_job_start_patch import apply_monthly_job_start_patch
@@ -64,11 +67,12 @@ apply_hero_zero_guard_patch()
 apply_manual_exit_patch()
 apply_backtest_live_strategy_patch()
 apply_live_frequency_portfolio_patch()
+apply_angel_historical_index_patch()
 apply_backtest_realism_costs_patch()
 apply_cost_idempotence_patch()
 apply_monthly_job_start_patch()
 
-RELEASE_VERSION = "monthly-job-start-background-task-v2"
+RELEASE_VERSION = "auto-index-history-tokens-v3"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
@@ -178,97 +182,3 @@ def root():
         "status": "running",
         "docs": "/docs",
     }
-
-
-@app.get("/health")
-def health():
-    try:
-        from database import get_db
-        conn = get_db()
-        conn.execute("SELECT 1")
-        conn.close()
-        db_status = "ok"
-    except Exception as exc:
-        db_status = f"error: {str(exc)}"
-
-    return {
-        "status": "healthy",
-        "database": db_status,
-        "release": RELEASE_VERSION,
-    }
-
-
-from fastapi.responses import FileResponse, HTMLResponse
-from html import escape
-
-
-@app.get("/upstox/callback", response_class=HTMLResponse)
-def upstox_callback(code: str = "", state: str = ""):
-    safe_code = escape(str(code or ""))
-    safe_state = escape(str(state or ""))
-    code_html = (
-        "<p><b>Authorization Code:</b></p>"
-        f"<div style='word-break:break-all;color:#f5c842'>{safe_code}</div>"
-        if safe_code
-        else (
-            "<p>Redirect URL verified. Manual token ke liye "
-            "Developer Apps me Generate dabayein.</p>"
-        )
-    )
-    state_html = (
-        f"<p style='color:#777'>State: {safe_state}</p>"
-        if safe_state
-        else ""
-    )
-    return (
-        "<!doctype html><html><head>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>Option King AI Upstox</title></head>"
-        "<body style='background:#0a0a0f;color:#e8e8f0;"
-        "font-family:Arial;padding:24px'>"
-        "<div style='max-width:680px;margin:auto;background:#13131f;"
-        "border:1px solid #252540;border-radius:18px;padding:22px'>"
-        "<h2 style='color:#00d4a0'>✅ Option King AI Upstox Callback</h2>"
-        "<p>Upstox redirect successfully receive ho gaya.</p>"
-        + code_html
-        + state_html
-        + "</div></body></html>"
-    )
-
-
-@app.post("/upstox/postback")
-def upstox_postback(body: dict = None):
-    return {"success": True, "received": True}
-
-
-@app.get("/admin/panel")
-def admin_panel():
-    return FileResponse(
-        os.path.join(os.path.dirname(__file__), "admin/panel.html")
-    )
-
-
-@app.get("/signup")
-def signup_page():
-    return FileResponse(
-        os.path.join(os.path.dirname(__file__), "signup.html")
-    )
-
-
-@app.get("/join")
-def join_page():
-    return FileResponse(
-        os.path.join(os.path.dirname(__file__), "signup.html")
-    )
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    port = int(os.getenv("PORT", 8001))
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=False,
-    )
