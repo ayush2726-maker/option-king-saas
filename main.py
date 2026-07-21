@@ -18,12 +18,14 @@ from bot.ai_routes import router as ai_router
 from backtest.routes import router as backtest_router
 from bot.score_history_patch import apply_score_history_patch
 from bot.upstox_live_candle_patch import apply_upstox_live_candle_patch
+from bot.live_scan_history_fallback_patch import apply_live_scan_history_fallback_patch
 import os
 
 apply_score_history_patch()
 apply_upstox_live_candle_patch()
+apply_live_scan_history_fallback_patch()
 
-RELEASE_VERSION = "today-score-upstox-live-v1"
+RELEASE_VERSION = "editable-strategy-live-scan-v2"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
