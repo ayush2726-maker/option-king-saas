@@ -40,5 +40,7 @@ jobs:
             backtest/cost_idempotence_patch.py
 
       - name: Run true break-even and all-in risk tests
+        env:
+          PYTHONPATH: .
         run: |
-          pytest -q tests/test_cost_safe_breakeven_risk.py
+          python -m pytest -q tests/test_cost_safe_breakeven_risk.py
