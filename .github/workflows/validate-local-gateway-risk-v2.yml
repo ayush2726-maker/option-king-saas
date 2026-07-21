@@ -1,0 +1,131 @@
+name: Validate Local Gateway Risk V2
+
+on:
+  pull_request:
+    paths:
+      - "local_gateway_agent/**"
+      - "local_gateway/**"
+      - "bot/local_gateway_structural_exit_patch.py"
+      - "main.py"
+      - ".github/workflows/validate-local-gateway-risk-v2.yml"
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile changed code
+        run: |
+          python -m py_compile \
+            local_gateway_agent/okai_local_gateway.py \
+            local_gateway_agent/okai_local_gateway_v2.py \
+            local_gateway/routes.py \
+            bot/local_gateway_structural_exit_patch.py \
+            main.py
+
+      - name: Validate risk and structural logic
+        run: |
+          PYTHONPATH="$PWD:$PWD/local_gateway_agent" python - <<'PY'
+          import sqlite3
+          import tempfile
+          from pathlib import Path
+
+          import local_gateway_agent.okai_local_gateway_v2 as risk
+          from bot import local_gateway_structural_exit_patch as structural
+
+          # Charges + 2% must be above raw 2% and rounded to an option tick.
+          be, charges = risk.cost_safe_breakeven(100.0, 75, "NFO")
+          assert charges > 40.0, (be, charges)
+          assert be > 102.0, (be, charges)
+          assert round(be / 0.05) * 0.05 == be
+
+          # R-stage progression and cost-safe first locked stop.
+          initial = risk.dynamic_profit_lock(100, 80, 115, be)
+          first = risk.dynamic_profit_lock(100, 80, 116, be)
+          second = risk.dynamic_profit_lock(100, 80, 124, be)
+          third = risk.dynamic_profit_lock(100, 80, 136, be)
+          assert initial["stage"] == "INITIAL_ATR_SL"
+          assert first["stage"] == "COST_SAFE_BE_PLUS_2PCT"
+          assert first["sl_price"] >= be
+          assert second["stage"] == "LOCK_0_5R"
+          assert third["stage"] == "DYNAMIC_TRAIL_0_8R"
+
+          # SQLite migration is repeatable and persists all trail fields.
+          temp = Path(tempfile.mkdtemp()) / "gateway.db"
+          def fake_db():
+              conn = sqlite3.connect(temp)
+              conn.row_factory = sqlite3.Row
+              conn.execute("""
+                  CREATE TABLE IF NOT EXISTS local_positions (
+                      trade_id INTEGER PRIMARY KEY,
+                      symbol TEXT NOT NULL,
+                      symboltoken TEXT NOT NULL,
+                      exchange TEXT NOT NULL,
+                      option_type TEXT,
+                      quantity INTEGER NOT NULL,
+                      entry_order_id TEXT,
+                      entry_price REAL NOT NULL,
+                      sl_price REAL NOT NULL,
+                      target_price REAL NOT NULL,
+                      force_exit_at TEXT NOT NULL,
+                      status TEXT NOT NULL DEFAULT 'open',
+                      last_ltp REAL,
+                      opened_at TEXT,
+                      closed_at TEXT,
+                      exit_order_id TEXT,
+                      exit_price REAL,
+                      exit_reason TEXT
+                  )
+              """)
+              conn.commit()
+              return conn
+          risk._original_state_db = fake_db
+          for _ in range(2):
+              conn = risk.migrated_state_db()
+              columns = {row[1] for row in conn.execute(
+                  "PRAGMA table_info(local_positions)"
+              ).fetchall()}
+              conn.close()
+          assert {
+              "initial_sl_price", "peak_ltp", "breakeven_price",
+              "trail_stage", "estimated_round_trip_charges"
+          }.issubset(columns)
+
+          # The local hard cap must replace any requested multi-lot quantity.
+          original_execute = risk.base.GatewayRunner.execute_entry
+          try:
+              risk.base.GatewayRunner.execute_entry = (
+                  lambda self, command: command["payload"]["quantity"]
+              )
+              runner = risk.RiskV2GatewayRunner.__new__(risk.RiskV2GatewayRunner)
+              command = {"payload": {"quantity": 450, "lot_size": 75}}
+              assert runner.execute_entry(command) == 75
+              assert command["payload"]["lots"] == 1
+          finally:
+              risk.base.GatewayRunner.execute_entry = original_execute
+
+          # CE and PE require all three opposite structural confirmations.
+          ce = structural._structure("CE", {
+              "price": 99, "vwap": 100, "ema9": 98, "ema21": 99,
+              "supertrend_dir": "DOWN",
+          })
+          pe = structural._structure("PE", {
+              "price": 101, "vwap": 100, "ema9": 102, "ema21": 101,
+              "supertrend_dir": "UP",
+          })
+          assert ce["all_three_flipped"] and ce["opposite_count"] == 3
+          assert pe["all_three_flipped"] and pe["opposite_count"] == 3
+
+          # Doctor wrapper must call the saved original, not recursively itself.
+          assert risk._original_command_doctor is not risk.command_doctor_v2
+          print("LOCAL_GATEWAY_RISK_V2_VALIDATION_OK")
+          PY
