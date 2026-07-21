@@ -37,6 +37,10 @@ jobs:
           else
             python scripts/patch_personal_static_ip_gateway_v1.py > /tmp/gateway-patch.log 2>&1
             status=$?
+            if [ "$status" -ne 0 ] && grep -q 'paper manager live branch marker not found' /tmp/gateway-patch.log; then
+              python scripts/fix_gateway_live_branch_marker.py >> /tmp/gateway-patch.log 2>&1
+              status=$?
+            fi
           fi
           set -e
           cat /tmp/gateway-patch.log
@@ -147,6 +151,7 @@ jobs:
       - name: Commit production integration
         run: |
           rm -f scripts/patch_personal_static_ip_gateway_v1.py
+          rm -f scripts/fix_gateway_live_branch_marker.py
           rm -f .github/workflows/apply-personal-static-ip-gateway-v1.yml
           rm -f diagnostics/personal-static-ip-gateway-patch-error.txt
           git config user.name "okai-static-ip-gateway-bot"
