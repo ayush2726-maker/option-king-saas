@@ -1,0 +1,3 @@
+Deploy marker: Angel One historical chart cache, throttle, retry, and friendly non-JSON/rate-limit handling.
+Release: angel-history-rate-fix-v2
+Date: 2026-07-21
