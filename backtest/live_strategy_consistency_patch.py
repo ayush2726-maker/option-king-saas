@@ -1,15 +1,17 @@
 """Keep every backtest on the same active strategy as the live bot.
 
-V2 removes the request-middleware dependency.  Monthly backtests execute in a
+V2 removes the request-middleware dependency. Monthly backtests execute in a
 background thread, so ContextVar state created by HTTP middleware is not
-available there.  The active profile is now loaded inside the real Daily and
-Monthly execution functions.  The legacy extra 4-of-5 backtest gate is also
+available there. The active profile is now loaded inside the real Daily and
+Monthly execution functions. The legacy extra 4-of-5 backtest gate is also
 disabled because the final live signal pipeline already enforces score 82 plus
 mandatory VWAP, Supertrend and EMA trend alignment.
 """
 
 from contextvars import ContextVar
 import traceback
+
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from backtest import routes as backtest_routes
 from bot import strategy as live_strategy
@@ -21,6 +23,13 @@ _active_backtest_profile = ContextVar(
     "okai_active_backtest_profile_v2",
     default=None,
 )
+
+
+class BacktestActiveStrategyMiddleware(BaseHTTPMiddleware):
+    """Compatibility pass-through; V2 loads profiles inside execution functions."""
+
+    async def dispatch(self, request, call_next):
+        return await call_next(request)
 
 
 def _load_profile(authorization):
@@ -53,7 +62,9 @@ def _decorate_result(result, profile=None):
     result["strategy_profile"] = metadata
     result["strategy_consistency"] = {
         "same_signal_pipeline_as_live": True,
-        "profile_loaded_from_active_strategy": bool(profile or _active_backtest_profile.get()),
+        "profile_loaded_from_active_strategy": bool(
+            profile or _active_backtest_profile.get()
+        ),
         "mode": "LIVE_BACKTEST_PARITY_V2",
     }
     result["entry_quality_gate"] = {
@@ -114,8 +125,7 @@ def apply_backtest_live_strategy_patch():
                 profile=selected_profile,
             )
         except Exception as exc:
-            # Do not crash an entire day/month because one signal snapshot is bad.
-            # The fallback keeps the test running and records a visible diagnostic.
+            # One malformed snapshot must not abort an entire day/month.
             fallback = original_signal(
                 market_data,
                 consecutive_losses=consecutive_losses,
@@ -185,8 +195,7 @@ def apply_backtest_live_strategy_patch():
     if hasattr(backtest_routes, "_OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST"):
         backtest_routes._OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST = consistent_day_backtest
 
-    # The final live signal already enforces the three mandatory structure gates.
-    # Keeping the old additional 4-of-5 gate caused backtest/live disagreement.
+    # Live mandatory structure already replaces the old extra 4-of-5 rule.
     backtest_routes._OKAI_NORMAL_MIN_CORE_CONFIRMATIONS = 0
 
     _replace_router_endpoint("/backtest/run", daily_endpoint)
