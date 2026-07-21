@@ -32,6 +32,24 @@ jobs:
             bot/local_gateway_structural_exit_patch.py \
             main.py
 
+      - name: Import FastAPI application
+        run: |
+          PYTHONPATH="$PWD" python - <<'PY'
+          import main
+          assert main.app is not None
+          assert main.RELEASE_VERSION == "local-gateway-risk-v2-startup-guard"
+          assert main.LOCAL_GATEWAY_STRUCTURAL_EXIT_STATUS.startswith(
+              ("ACTIVE", "DISABLED:")
+          )
+          paths = {route.path for route in main.app.routes}
+          assert "/" in paths and "/health" in paths
+          print(
+              "FASTAPI_IMPORT_OK",
+              main.RELEASE_VERSION,
+              main.LOCAL_GATEWAY_STRUCTURAL_EXIT_STATUS,
+          )
+          PY
+
       - name: Validate risk and structural logic
         run: |
           PYTHONPATH="$PWD:$PWD/local_gateway_agent" python - <<'PY'
