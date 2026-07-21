@@ -22,6 +22,9 @@ from backtest.live_strategy_consistency_patch import (
     BacktestActiveStrategyMiddleware,
     apply_backtest_live_strategy_patch,
 )
+from backtest.live_frequency_portfolio_patch import (
+    apply_live_frequency_portfolio_patch,
+)
 from bot.score_history_patch import apply_score_history_patch
 from bot.upstox_live_candle_patch import apply_upstox_live_candle_patch
 from bot.live_scan_history_fallback_patch import apply_live_scan_history_fallback_patch
@@ -53,8 +56,9 @@ apply_expiry_hardlock_one_second_monitor_patch()
 apply_hero_zero_guard_patch()
 apply_manual_exit_patch()
 apply_backtest_live_strategy_patch()
+apply_live_frequency_portfolio_patch()
 
-RELEASE_VERSION = "live-backtest-strategy-parity-v1"
+RELEASE_VERSION = "backtest-one-minute-max2-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
