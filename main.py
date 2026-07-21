@@ -25,6 +25,7 @@ from backtest.live_strategy_consistency_patch import (
 from backtest.live_frequency_portfolio_patch import (
     apply_live_frequency_portfolio_patch,
 )
+from backtest.realism_costs_patch import apply_backtest_realism_costs_patch
 from bot.score_history_patch import apply_score_history_patch
 from bot.upstox_live_candle_patch import apply_upstox_live_candle_patch
 from bot.live_scan_history_fallback_patch import apply_live_scan_history_fallback_patch
@@ -36,6 +37,8 @@ from bot.fresh_entry_guard_patch import apply_fresh_entry_guard_patch
 from bot.expiry_entry_diagnostics_patch import apply_expiry_entry_diagnostics_patch
 from bot.feed_safety_consistency_patch import apply_feed_safety_consistency_patch
 from bot.mandatory_trend_structure_patch import apply_mandatory_trend_structure_patch
+from bot.entry_quality_v2_patch import apply_entry_quality_v2_patch
+from bot.structural_exit_v2_patch import apply_structural_exit_v2_patch
 from bot.expiry_hardlock_one_second_monitor_patch import (
     apply_expiry_hardlock_one_second_monitor_patch,
 )
@@ -52,13 +55,16 @@ apply_fresh_entry_guard_patch()
 apply_expiry_entry_diagnostics_patch()
 apply_feed_safety_consistency_patch()
 apply_mandatory_trend_structure_patch()
+apply_entry_quality_v2_patch()
+apply_structural_exit_v2_patch()
 apply_expiry_hardlock_one_second_monitor_patch()
 apply_hero_zero_guard_patch()
 apply_manual_exit_patch()
 apply_backtest_live_strategy_patch()
 apply_live_frequency_portfolio_patch()
+apply_backtest_realism_costs_patch()
 
-RELEASE_VERSION = "backtest-one-minute-max2-v1"
+RELEASE_VERSION = "entry-exit-realism-costs-v2"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
