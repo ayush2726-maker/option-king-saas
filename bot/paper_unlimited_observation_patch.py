@@ -181,11 +181,18 @@ def apply_paper_unlimited_observation_patch():
             conn.commit()
         return trade_id
 
-    def state_update(state, scans, selected, settings, rows):
+    def state_update_with_observation(state, scans, selected, settings, rows):
         original_state_update(state, scans, selected, settings, rows)
         mode = _mode_from_settings(settings)
-        day_rows = _today_rows(state_update._conn, state_update._user_id, mode)
-        stats = _bucket_stats(day_rows)
+        user_id = int(state.get("user_id") or 0)
+        conn = runtime.get_db()
+        try:
+            _ensure_observation_schema(conn)
+            day_rows = _today_rows(conn, user_id, mode)
+            stats = _bucket_stats(day_rows)
+        finally:
+            conn.close()
+
         state["daily_trade_observation"] = {
             "mode": mode.upper(),
             "total_entries": len(day_rows),
@@ -198,22 +205,8 @@ def apply_paper_unlimited_observation_patch():
             **stats,
         }
 
-    # Keep the original state-update call signature while making conn/user
-    # available to the wrapper without changing the runtime loop.
-    def state_update_with_context(state, scans, selected, settings, rows):
-        # The runtime passes no conn/user here, so infer user from the open rows
-        # or state. The active loop always stores user_id in state.
-        user_id = int(state.get("user_id") or 0)
-        conn = runtime.get_db()
-        try:
-            state_update._conn = conn
-            state_update._user_id = user_id
-            state_update(state, scans, selected, settings, rows)
-        finally:
-            conn.close()
-
     runtime._ensure_schema = ensure_schema
     runtime._insert = tagged_insert
     runtime._can_enter = _can_enter_observation
-    runtime._state_update = state_update_with_context
+    runtime._state_update = state_update_with_observation
     runtime._okai_paper_unlimited_observation_v1 = True
