@@ -1,10 +1,12 @@
 """
-Persist AUTO portfolio score snapshots per instrument.
+Persist AUTO portfolio score snapshots per instrument and expose the latest
+live score on today's chart candles.
 
-The chart endpoint can show broker historical/live candles independently of the
-single top-level display scan. This patch records every completed AUTO scan
-(NIFTY, BANKNIFTY, SENSEX) once per candle, so /bot/signal-history returns the
-score series for whichever chart instrument the user selects.
+AUTO scans NIFTY, BANKNIFTY and SENSEX independently. The normal bot state only
+keeps one display scan, so this patch stores every completed scan once per
+candle. It also attaches the current display scan score to the newest live
+candle, which gives the Today graph an immediate fallback even before saved
+history has accumulated.
 """
 
 from datetime import datetime, timezone
@@ -126,15 +128,44 @@ def _persist_scan_scores(state, scans):
         conn.close()
 
 
+def _attach_current_score_to_live_chart(state):
+    """Attach the latest computed score to the newest live candle.
+
+    The live chart candle builder contains OHLC/indicators but not strategy
+    score. The mobile Today view can therefore show candles while reporting
+    zero score points. Adding only the newest completed candle keeps the value
+    honest and gives an immediate graph/tag fallback; normal per-candle history
+    continues to come from signal_history.
+    """
+    candles = state.get("chart_candles")
+    if not isinstance(candles, list) or not candles:
+        return
+
+    updated = list(candles)
+    latest = dict(updated[-1] or {})
+    latest["score"] = _safe_int(state.get("score"), 0)
+    latest["signal"] = str(
+        state.get("candidate_signal")
+        or state.get("signal")
+        or "WAIT"
+    )
+    latest["trade_allowed"] = bool(state.get("trade_allowed", False))
+    latest["min_score"] = _safe_int(state.get("min_score"), 82)
+    latest["score_source"] = "LIVE_CURRENT"
+    updated[-1] = latest
+    state["chart_candles"] = updated
+
+
 def apply_score_history_patch():
     """Patch AUTO runtime once without changing strategy or entry rules."""
-    if getattr(runtime, "_okai_score_history_patch_v1", False):
+    if getattr(runtime, "_okai_score_history_patch_v2", False):
         return
 
     original_state_update = runtime._state_update
 
     def patched_state_update(state, scans, selected, settings, rows):
         original_state_update(state, scans, selected, settings, rows)
+        _attach_current_score_to_live_chart(state)
         try:
             _persist_scan_scores(state, scans)
             state.pop("score_history_warning", None)
@@ -142,4 +173,4 @@ def apply_score_history_patch():
             state["score_history_warning"] = str(exc)[:160]
 
     runtime._state_update = patched_state_update
-    runtime._okai_score_history_patch_v1 = True
+    runtime._okai_score_history_patch_v2 = True
