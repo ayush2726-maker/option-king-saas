@@ -90,7 +90,7 @@ def _auto_result():
     }
 
 
-def test_all_in_risk_cap_reduces_eight_sensex_lots_to_one():
+def test_premium_stop_cap_preserves_all_eight_sensex_lots():
     apply_all_in_risk_cap_patch()
     capped = true_be._risk_capped_trade(
         _oversized_sensex_trade("PURE_ATR_SL", 375.0),
@@ -100,12 +100,12 @@ def test_all_in_risk_cap_reduces_eight_sensex_lots_to_one():
     )
 
     assert not capped.get("risk_cap_skipped", False)
-    assert capped["lots"] == 1
-    assert capped["qty"] == 20
+    assert capped["lots"] == 8
+    assert capped["qty"] == 160
+    assert capped["quantity_preserved"] is True
+    assert capped["quantity_risk_cap_enabled"] is False
     assert math.isclose(capped["exit_price"], 460.0, abs_tol=0.01)
-    assert capped["expected_max_loss_after_all_costs"] <= 1000.0
-    assert capped["max_loss_rupees"] == 1000.0
-    assert capped["pnl"] >= -1000.0
+    assert capped["expected_stop_loss_after_all_costs"] > 1000.0
 
 
 def test_hard_stop_precedes_reversal_or_day_end_below_stop():
@@ -118,15 +118,15 @@ def test_hard_stop_precedes_reversal_or_day_end_below_stop():
     )
 
     assert not capped.get("risk_cap_skipped", False)
-    assert capped["reason"] == "HARD_RISK_CAP_SL"
+    assert capped["reason"] == "HARD_PREMIUM_RISK_CAP_SL"
     assert capped["hard_stop_precedence_applied"] is True
+    assert capped["lots"] == 8
+    assert capped["qty"] == 160
     assert math.isclose(capped["exit_price"], 460.0, abs_tol=0.01)
-    assert capped["expected_max_loss_after_all_costs"] <= 1000.0
-    assert capped["pnl"] >= -1000.0
 
 
-def test_activation_replaces_route_trail_and_enables_all_in_cap():
+def test_activation_replaces_route_trail_and_preserves_quantity():
     apply_cost_idempotence_patch()
     assert routes.update_option_profit_lock is true_be._cost_safe_profit_lock
     assert getattr(routes, "_okai_cost_safe_be_risk_v1", False) is True
-    assert getattr(true_be, "_okai_all_in_risk_cap_v1", False) is True
+    assert getattr(true_be, "_okai_all_in_risk_cap_v2", False) is True
