@@ -19,14 +19,16 @@ from backtest.routes import router as backtest_router
 from bot.score_history_patch import apply_score_history_patch
 from bot.upstox_live_candle_patch import apply_upstox_live_candle_patch
 from bot.live_scan_history_fallback_patch import apply_live_scan_history_fallback_patch
+from bot.fresh_entry_guard_patch import apply_fresh_entry_guard_patch
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
 import os
 
 apply_score_history_patch()
 apply_upstox_live_candle_patch()
 apply_live_scan_history_fallback_patch()
+apply_fresh_entry_guard_patch()
 
-RELEASE_VERSION = "replay-first-auto-score-v5"
+RELEASE_VERSION = "fresh-entry-volume-normalize-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
