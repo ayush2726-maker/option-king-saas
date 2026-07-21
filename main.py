@@ -24,6 +24,7 @@ from bot.default_strategy_patch import (
     migrate_default_strategy_profiles,
 )
 from bot.fresh_entry_guard_patch import apply_fresh_entry_guard_patch
+from bot.expiry_entry_diagnostics_patch import apply_expiry_entry_diagnostics_patch
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
 import os
 
@@ -32,8 +33,9 @@ apply_upstox_live_candle_patch()
 apply_live_scan_history_fallback_patch()
 apply_default_strategy_patch()
 apply_fresh_entry_guard_patch()
+apply_expiry_entry_diagnostics_patch()
 
-RELEASE_VERSION = "balanced-default-82-v1"
+RELEASE_VERSION = "same-day-expiry-entry-diagnostics-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
