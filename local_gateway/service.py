@@ -274,14 +274,39 @@ def set_gateway_armed(user_id, armed):
             (int(bool(armed)), _iso(), int(user_id)),
         )
         if not armed:
+            pending_trade_rows = conn.execute(
+                """
+                SELECT DISTINCT trade_id
+                FROM local_order_commands
+                WHERE user_id=? AND action='PLACE_ENTRY'
+                  AND status IN ('pending','leased')
+                  AND trade_id IS NOT NULL
+                """,
+                (int(user_id),),
+            ).fetchall()
             conn.execute(
                 """
                 UPDATE local_order_commands
-                SET status='cancelled', error='Gateway disarmed', updated_at=?
-                WHERE user_id=? AND action='PLACE_ENTRY' AND status='pending'
+                SET status='cancelled', error='Gateway disarmed',
+                    lease_token_hash=NULL, lease_expires_at=NULL,
+                    updated_at=?
+                WHERE user_id=? AND action='PLACE_ENTRY'
+                  AND status IN ('pending','leased')
                 """,
                 (_iso(), int(user_id)),
             )
+            trade_ids = [int(row["trade_id"]) for row in pending_trade_rows]
+            if trade_ids:
+                placeholders = ",".join("?" for _ in trade_ids)
+                conn.execute(
+                    f"""
+                    UPDATE trades
+                    SET status='cancelled', exit_reason='Gateway disarmed before entry'
+                    WHERE user_id=? AND status='pending'
+                      AND id IN ({placeholders})
+                    """,
+                    (int(user_id), *trade_ids),
+                )
         conn.commit()
     finally:
         conn.close()
@@ -554,7 +579,7 @@ def queue_exit(user_id, trade_id, reason="MANUAL EXIT"):
         conn.close()
 
 
-def lease_commands(gateway, limit=5):
+def lease_commands(gateway, limit=5, allow_entries=True):
     ensure_local_gateway_schema()
     limit = max(1, min(int(limit or 5), 10))
     now = _utcnow()
@@ -566,14 +591,16 @@ def lease_commands(gateway, limit=5):
         rows = conn.execute(
             """
             SELECT * FROM local_order_commands
-            WHERE user_id=? AND (
+            WHERE user_id=?
+              AND (?=1 OR action<>'PLACE_ENTRY')
+              AND (
                 status='pending'
                 OR (status='leased' AND datetime(lease_expires_at) <= datetime(?))
-            )
+              )
             ORDER BY CASE action WHEN 'EXIT_POSITION' THEN 0 ELSE 1 END, id ASC
             LIMIT ?
             """,
-            (gateway["user_id"], now_iso, limit),
+            (gateway["user_id"], int(bool(allow_entries)), now_iso, limit),
         ).fetchall()
         for row in rows:
             lease_token = secrets.token_urlsafe(24)

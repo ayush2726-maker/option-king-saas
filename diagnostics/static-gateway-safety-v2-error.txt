@@ -1,4 +1,0 @@
-  File "/home/runner/work/option-king-saas/option-king-saas/scripts/patch_static_gateway_safety_v2.py", line 38
-    """,
-    ^^^^
-SyntaxError: invalid syntax. Perhaps you forgot a comma?
