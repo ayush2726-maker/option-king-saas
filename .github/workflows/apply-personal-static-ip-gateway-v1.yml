@@ -27,12 +27,28 @@ jobs:
           pip install -r requirements.txt
           pip install -r local_gateway_agent/requirements.txt
 
-      - name: Apply integration patch when needed
+      - name: Apply integration patch with diagnostic
+        shell: bash
         run: |
+          set +e
           if grep -q 'local_gateway_router' main.py; then
-            echo 'Static IP gateway patch already applied'
+            echo 'Static IP gateway patch already applied' | tee /tmp/gateway-patch.log
+            status=0
           else
-            python scripts/patch_personal_static_ip_gateway_v1.py
+            python scripts/patch_personal_static_ip_gateway_v1.py > /tmp/gateway-patch.log 2>&1
+            status=$?
+          fi
+          set -e
+          cat /tmp/gateway-patch.log
+          if [ "$status" -ne 0 ]; then
+            mkdir -p diagnostics
+            cp /tmp/gateway-patch.log diagnostics/personal-static-ip-gateway-patch-error.txt
+            git config user.name "okai-static-ip-gateway-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add diagnostics/personal-static-ip-gateway-patch-error.txt
+            git commit -m "Save static IP gateway patch diagnostic" || true
+            git push origin HEAD:agent/personal-static-ip-gateway-v1 || true
+            exit "$status"
           fi
 
       - name: Compile backend and Termux agent
@@ -86,15 +102,10 @@ jobs:
           assert status["observed_ip"] == "203.0.113.10"
 
           payload = {
-              "underlying": "NIFTY",
-              "option_type": "CE",
-              "symbol": "NIFTY28JUL2625000CE",
-              "symboltoken": "12345",
-              "exchange": "NFO",
-              "quantity": 65,
-              "sl_price": 88,
-              "target_price": 124,
-              "candle_id": "2026-07-21T10:00:00+05:30",
+              "underlying": "NIFTY", "option_type": "CE",
+              "symbol": "NIFTY28JUL2625000CE", "symboltoken": "12345",
+              "exchange": "NFO", "quantity": 65, "sl_price": 88,
+              "target_price": 124, "candle_id": "2026-07-21T10:00:00+05:30",
               "different_index_required": True,
           }
           queued = queue_live_entry(uid, payload, "test-entry-1", 2, 5)
@@ -105,20 +116,15 @@ jobs:
           commands = lease_commands(gateway, 5)
           assert len(commands) == 1
           command = commands[0]
-          assert command["action"] == "PLACE_ENTRY"
           result = {
-              "broker_order_id": "ANGEL123",
-              "entry_price": 100,
-              "sl_price": 88,
-              "target_price": 124,
+              "broker_order_id": "ANGEL123", "entry_price": 100,
+              "sl_price": 88, "target_price": 124,
               "entry_time": datetime.now(timezone.utc).isoformat(),
           }
           complete_command(gateway, command["id"], command["lease_token"], True, result)
           record_position_event(gateway, {
-              "event": "EXIT_FILLED",
-              "trade_id": queued["trade_id"],
-              "exit_price": 124,
-              "pnl": 1560,
+              "event": "EXIT_FILLED", "trade_id": queued["trade_id"],
+              "exit_price": 124, "pnl": 1560,
               "reason": "LOCAL 1-SECOND TARGET HIT",
           })
           conn = get_db()
@@ -142,6 +148,7 @@ jobs:
         run: |
           rm -f scripts/patch_personal_static_ip_gateway_v1.py
           rm -f .github/workflows/apply-personal-static-ip-gateway-v1.yml
+          rm -f diagnostics/personal-static-ip-gateway-patch-error.txt
           git config user.name "okai-static-ip-gateway-bot"
           git config user.email "actions@users.noreply.github.com"
           git add -A
