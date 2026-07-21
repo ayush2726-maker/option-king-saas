@@ -1,15 +1,28 @@
 """Align backtest sampling and AUTO portfolio capacity with the live bot.
 
 The live engine scores ONE_MINUTE candles after 28 candles and allows up to two
-simultaneous positions in different indices using 50% / 40% capital slots.  The
+simultaneous positions in different indices using 50% / 40% capital slots. The
 legacy backtest fetched FIVE_MINUTE Angel candles and merged AUTO results with
 one open trade only, which suppressed most morning and overlapping setups.
+
+V2 also serializes Angel historical requests with retry/backoff. The previous
+0.45-second spacing was below the practical historical API limit, so NIFTY and
+BANKNIFTY could fail while the later SENSEX request succeeded.
 """
 
 from copy import deepcopy
 from datetime import datetime
+import threading
+import time
 
 from backtest import routes
+
+
+ANGEL_HISTORY_MIN_GAP_SECONDS = 1.25
+ANGEL_HISTORY_RETRY_DELAYS = (0.0, 1.5, 3.0)
+_ANGEL_HISTORY_LOCK = threading.Lock()
+_ANGEL_LAST_HISTORY_REQUEST = 0.0
+_FETCH_DIAGNOSTICS = {}
 
 
 def _parse_time(value):
@@ -17,6 +30,88 @@ def _parse_time(value):
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except Exception:
         return datetime.min
+
+
+def _diag_key(broker_name, instrument, date_str):
+    return (
+        str(broker_name or "").lower(),
+        str(instrument or "").upper(),
+        str(date_str or ""),
+    )
+
+
+def _save_fetch_diagnostic(
+    broker_name,
+    instrument,
+    date_str,
+    status,
+    candle_count=0,
+    attempts=0,
+    error=None,
+    source="BROKER",
+):
+    _FETCH_DIAGNOSTICS[_diag_key(broker_name, instrument, date_str)] = {
+        "status": str(status or "UNKNOWN"),
+        "candle_count": int(candle_count or 0),
+        "attempts": int(attempts or 0),
+        "error": str(error)[:240] if error else None,
+        "source": str(source or "BROKER"),
+    }
+
+
+def _get_fetch_diagnostic(broker_name, instrument, date_str):
+    return dict(
+        _FETCH_DIAGNOSTICS.get(
+            _diag_key(broker_name, instrument, date_str),
+            {
+                "status": "NOT_RECORDED",
+                "candle_count": 0,
+                "attempts": 0,
+                "error": None,
+                "source": None,
+            },
+        )
+    )
+
+
+def _angel_historical_rows(obj, params):
+    """Serialize and retry Angel historical requests to avoid burst limiting."""
+    global _ANGEL_LAST_HISTORY_REQUEST
+
+    last_error = "Angel historical data unavailable"
+    for attempt, delay in enumerate(ANGEL_HISTORY_RETRY_DELAYS, start=1):
+        if delay > 0:
+            time.sleep(delay)
+
+        with _ANGEL_HISTORY_LOCK:
+            elapsed = time.monotonic() - _ANGEL_LAST_HISTORY_REQUEST
+            wait_for = ANGEL_HISTORY_MIN_GAP_SECONDS - elapsed
+            if wait_for > 0:
+                time.sleep(wait_for)
+
+            try:
+                response = obj.getCandleData(params)
+            except Exception as exc:
+                response = None
+                last_error = f"{exc.__class__.__name__}: {str(exc)[:180]}"
+            finally:
+                _ANGEL_LAST_HISTORY_REQUEST = time.monotonic()
+
+        if isinstance(response, dict):
+            rows = response.get("data") or []
+            if response.get("status") is not False and rows:
+                return rows, attempt
+            last_error = str(
+                response.get("message")
+                or response.get("errorcode")
+                or response
+            )[:240]
+        elif response is not None:
+            last_error = str(response)[:240]
+
+    raise RuntimeError(
+        "ANGEL_HISTORY_RETRY_EXHAUSTED: " + str(last_error)[:200]
+    )
 
 
 def _fetch_backtest_candles_one_minute(
@@ -34,93 +129,136 @@ def _fetch_backtest_candles_one_minute(
         date_str,
     )
     if cached is not None:
+        _save_fetch_diagnostic(
+            broker_name,
+            instrument,
+            date_str,
+            status="OK",
+            candle_count=len(cached),
+            attempts=0,
+            source="CACHE",
+        )
         return cached
 
     day = datetime.strptime(date_str, "%Y-%m-%d")
     from_dt = day.replace(hour=9, minute=15, second=0, microsecond=0)
     to_dt = day.replace(hour=15, minute=30, second=0, microsecond=0)
+    attempts = 1
 
-    if broker_name == "angelone":
-        token = routes.INDEX_TOKENS.get(instrument, "26000")
-        exchange = routes.INDEX_EXCHANGE.get(instrument, "NSE")
-        response = obj.getCandleData({
-            "exchange": exchange,
-            "symboltoken": token,
-            "interval": "ONE_MINUTE",
-            "fromdate": from_dt.strftime("%Y-%m-%d %H:%M"),
-            "todate": to_dt.strftime("%Y-%m-%d %H:%M"),
-        })
-        rows = response.get("data", []) if isinstance(response, dict) else []
-        df = pd.DataFrame(
-            rows,
-            columns=["time", "open", "high", "low", "close", "volume"],
-        )
-
-    elif broker_name == "zerodha":
-        token = routes.ZERODHA_INDEX_TOKENS.get(instrument)
-        response = obj.get_candles(
-            symbol=token,
-            interval="minute",
-            from_date=from_dt.strftime("%Y-%m-%d %H:%M:%S"),
-            to_date=to_dt.strftime("%Y-%m-%d %H:%M:%S"),
-        )
-        rows = response.get("candles", []) if response.get("success") else []
-        df = pd.DataFrame(rows)
-        if not df.empty:
-            df = df.rename(columns={"date": "time"})[
-                ["time", "open", "high", "low", "close", "volume"]
-            ]
-
-    elif broker_name == "upstox":
-        key = routes.UPSTOX_INDEX_KEYS.get(instrument)
-        response = obj.get_candles(
-            symbol=key,
-            interval="1m",
-            from_date=date_str,
-            to_date=date_str,
-        )
-        rows = response.get("candles", []) if response.get("success") else []
-        df = (
-            pd.DataFrame(
-                rows,
-                columns=[
-                    "time", "open", "high", "low", "close", "volume", "oi"
-                ],
+    try:
+        if broker_name == "angelone":
+            token = routes.INDEX_TOKENS.get(instrument, "26000")
+            exchange = routes.INDEX_EXCHANGE.get(instrument, "NSE")
+            rows, attempts = _angel_historical_rows(
+                obj,
+                {
+                    "exchange": exchange,
+                    "symboltoken": token,
+                    "interval": "ONE_MINUTE",
+                    "fromdate": from_dt.strftime("%Y-%m-%d %H:%M"),
+                    "todate": to_dt.strftime("%Y-%m-%d %H:%M"),
+                },
             )
-            if rows
-            else pd.DataFrame()
+            df = pd.DataFrame(
+                rows,
+                columns=["time", "open", "high", "low", "close", "volume"],
+            )
+
+        elif broker_name == "zerodha":
+            token = routes.ZERODHA_INDEX_TOKENS.get(instrument)
+            response = obj.get_candles(
+                symbol=token,
+                interval="minute",
+                from_date=from_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                to_date=to_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            if not response.get("success"):
+                raise RuntimeError(
+                    response.get("message") or "Zerodha historical data failed"
+                )
+            rows = response.get("candles", [])
+            df = pd.DataFrame(rows)
+            if not df.empty:
+                df = df.rename(columns={"date": "time"})[
+                    ["time", "open", "high", "low", "close", "volume"]
+                ]
+
+        elif broker_name == "upstox":
+            key = routes.UPSTOX_INDEX_KEYS.get(instrument)
+            response = obj.get_candles(
+                symbol=key,
+                interval="1m",
+                from_date=date_str,
+                to_date=date_str,
+            )
+            if not response.get("success"):
+                raise RuntimeError(
+                    response.get("message") or "Upstox historical data failed"
+                )
+            rows = response.get("candles", [])
+            df = (
+                pd.DataFrame(
+                    rows,
+                    columns=[
+                        "time", "open", "high", "low", "close", "volume", "oi"
+                    ],
+                )
+                if rows
+                else pd.DataFrame()
+            )
+            if not df.empty:
+                df = df[["time", "open", "high", "low", "close", "volume"]]
+
+        else:
+            raise RuntimeError(f"Unsupported historical broker: {broker_name}")
+
+        if df.empty:
+            raise RuntimeError("Broker returned zero historical candles")
+
+        for column in ["open", "high", "low", "close", "volume"]:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+
+        df["_sort_time"] = pd.to_datetime(df["time"], errors="coerce", utc=True)
+        clean = (
+            df.dropna(subset=["open", "high", "low", "close", "_sort_time"])
+            .sort_values("_sort_time")
+            .drop(columns=["_sort_time"])
+            .drop_duplicates(subset=["time"], keep="last")
+            .reset_index(drop=True)
         )
-        if not df.empty:
-            df = df[["time", "open", "high", "low", "close", "volume"]]
 
-    else:
-        df = pd.DataFrame()
+        if clean.empty:
+            raise RuntimeError("Historical candles became empty after validation")
 
-    if df.empty:
-        return None
+        routes._okai_store_cached_candles(
+            broker_name,
+            instrument,
+            date_str,
+            clean,
+        )
+        _save_fetch_diagnostic(
+            broker_name,
+            instrument,
+            date_str,
+            status="OK",
+            candle_count=len(clean),
+            attempts=attempts,
+            source="BROKER",
+        )
+        return clean.copy(deep=True)
 
-    for column in ["open", "high", "low", "close", "volume"]:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
-
-    df["_sort_time"] = pd.to_datetime(df["time"], errors="coerce", utc=True)
-    clean = (
-        df.dropna(subset=["open", "high", "low", "close", "_sort_time"])
-        .sort_values("_sort_time")
-        .drop(columns=["_sort_time"])
-        .drop_duplicates(subset=["time"], keep="last")
-        .reset_index(drop=True)
-    )
-
-    if clean.empty:
-        return None
-
-    routes._okai_store_cached_candles(
-        broker_name,
-        instrument,
-        date_str,
-        clean,
-    )
-    return clean.copy(deep=True)
+    except Exception as exc:
+        _save_fetch_diagnostic(
+            broker_name,
+            instrument,
+            date_str,
+            status="ERROR",
+            candle_count=0,
+            attempts=attempts,
+            error=f"{exc.__class__.__name__}: {str(exc)[:200]}",
+            source="BROKER",
+        )
+        raise
 
 
 def _recalculate_auto_result(raw_auto, starting_capital, selected):
@@ -168,11 +306,7 @@ def _run_auto_two_slot(
     candidates = []
     debug_candidates = []
 
-    for index, instrument in enumerate(routes._OKAI_AUTO_INSTRUMENTS):
-        if index:
-            import time
-            time.sleep(0.45)
-
+    for instrument in routes._OKAI_AUTO_INSTRUMENTS:
         result = routes._OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST(
             broker_name,
             obj,
@@ -266,6 +400,38 @@ def _run_auto_two_slot(
     for position in sorted(active, key=lambda row: _parse_time(row.get("exit_time"))):
         current_equity += float(position.get("pnl") or 0)
 
+    per_instrument = {}
+    data_warnings = []
+    for instrument, result in single_results.items():
+        diagnostic = _get_fetch_diagnostic(
+            broker_name,
+            instrument,
+            date_str,
+        )
+        success = bool(isinstance(result, dict) and result.get("success"))
+        per_instrument[instrument] = {
+            "success": success,
+            "message": result.get("message") if isinstance(result, dict) else None,
+            "trades": result.get("total_trades", 0)
+            if isinstance(result, dict)
+            else 0,
+            "one_lot_pnl": result.get("total_pnl", 0)
+            if isinstance(result, dict)
+            else 0,
+            "max_score": result.get("debug_max_score")
+            if isinstance(result, dict)
+            else None,
+            "fetch_status": diagnostic["status"],
+            "candle_count": diagnostic["candle_count"],
+            "fetch_attempts": diagnostic["attempts"],
+            "fetch_source": diagnostic["source"],
+            "fetch_error": diagnostic["error"],
+        }
+        if diagnostic["status"] != "OK":
+            data_warnings.append(
+                f"{instrument}: {diagnostic['error'] or diagnostic['status']}"
+            )
+
     raw_auto = {
         "success": True,
         "instrument": "AUTO",
@@ -301,7 +467,7 @@ def _run_auto_two_slot(
             "slot_1_percent": 50,
             "slot_2_percent": 40,
             "reserve_percent": 10,
-            "model": "LIVE_MAX2_PORTFOLIO_V1",
+            "model": "LIVE_MAX2_PORTFOLIO_V2_RATE_SAFE",
         },
         "position_sizing": {
             "mode": "LIVE_SLOT_50_40_RESERVE_10",
@@ -314,25 +480,12 @@ def _run_auto_two_slot(
             "warmup_candles": 28,
             "first_possible_check": "09:43 IST",
             "matches_live_signal_feed": True,
+            "angel_historical_min_gap_seconds": ANGEL_HISTORY_MIN_GAP_SECONDS,
+            "angel_retry_delays_seconds": list(ANGEL_HISTORY_RETRY_DELAYS),
         },
-        "per_instrument": {
-            instrument: {
-                "success": bool(
-                    isinstance(result, dict) and result.get("success")
-                ),
-                "message": result.get("message") if isinstance(result, dict) else None,
-                "trades": result.get("total_trades", 0)
-                if isinstance(result, dict)
-                else 0,
-                "one_lot_pnl": result.get("total_pnl", 0)
-                if isinstance(result, dict)
-                else 0,
-                "max_score": result.get("debug_max_score")
-                if isinstance(result, dict)
-                else None,
-            }
-            for instrument, result in single_results.items()
-        },
+        "per_instrument": per_instrument,
+        "all_indices_data_ready": not data_warnings,
+        "data_warnings": data_warnings,
         "summary": {
             "capital": float(capital),
             "note": "AUTO live-parity MAX2 portfolio with one-minute candles.",
@@ -340,7 +493,7 @@ def _run_auto_two_slot(
         "note": (
             "Signal timing uses one-minute historical index candles. AUTO allows "
             "two simultaneous positions only in different indices using 50% and "
-            "40% slots. Option premium remains an ATR estimate."
+            "40% slots. Angel historical requests are rate-safe and retried."
         ),
     }
 
@@ -359,11 +512,12 @@ def _run_auto_two_slot(
 
 
 def apply_live_frequency_portfolio_patch():
-    if getattr(routes, "_okai_live_frequency_portfolio_v1", False):
+    if getattr(routes, "_okai_live_frequency_portfolio_v2", False):
         return
 
-    # Old in-memory cache could contain five-minute data under the same key.
+    # Old in-memory cache could contain five-minute or incomplete data.
     routes._OKAI_BACKTEST_CANDLE_CACHE.clear()
     routes.fetch_backtest_candles = _fetch_backtest_candles_one_minute
     routes._okai_run_auto_index_backtest = _run_auto_two_slot
     routes._okai_live_frequency_portfolio_v1 = True
+    routes._okai_live_frequency_portfolio_v2 = True
