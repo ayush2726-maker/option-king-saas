@@ -19,6 +19,10 @@ from backtest.routes import router as backtest_router
 from bot.score_history_patch import apply_score_history_patch
 from bot.upstox_live_candle_patch import apply_upstox_live_candle_patch
 from bot.live_scan_history_fallback_patch import apply_live_scan_history_fallback_patch
+from bot.default_strategy_patch import (
+    apply_default_strategy_patch,
+    migrate_default_strategy_profiles,
+)
 from bot.fresh_entry_guard_patch import apply_fresh_entry_guard_patch
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
 import os
@@ -26,9 +30,10 @@ import os
 apply_score_history_patch()
 apply_upstox_live_candle_patch()
 apply_live_scan_history_fallback_patch()
+apply_default_strategy_patch()
 apply_fresh_entry_guard_patch()
 
-RELEASE_VERSION = "fresh-entry-volume-normalize-v1"
+RELEASE_VERSION = "balanced-default-82-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
@@ -56,6 +61,7 @@ def startup():
 
     from database import init_bot_status_table
     init_bot_status_table()
+    migrate_default_strategy_profiles()
 
     admin_email = os.getenv("ADMIN_EMAIL")
     admin_password = os.getenv("ADMIN_PASSWORD")
@@ -101,6 +107,10 @@ def startup():
             conn.commit()
             print(f"Admin created: {admin_email}")
         conn.close()
+
+    # Run once more after the admin row is guaranteed to exist, so the owner's
+    # generated editable default copy receives the balanced weights immediately.
+    migrate_default_strategy_profiles()
 
     print(f"Option King AI SaaS Server started | {RELEASE_VERSION}")
 
