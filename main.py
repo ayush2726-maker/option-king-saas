@@ -25,6 +25,7 @@ from bot.default_strategy_patch import (
 )
 from bot.fresh_entry_guard_patch import apply_fresh_entry_guard_patch
 from bot.expiry_entry_diagnostics_patch import apply_expiry_entry_diagnostics_patch
+from bot.feed_safety_consistency_patch import apply_feed_safety_consistency_patch
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
 import os
 
@@ -34,8 +35,9 @@ apply_live_scan_history_fallback_patch()
 apply_default_strategy_patch()
 apply_fresh_entry_guard_patch()
 apply_expiry_entry_diagnostics_patch()
+apply_feed_safety_consistency_patch()
 
-RELEASE_VERSION = "same-day-expiry-entry-diagnostics-v1"
+RELEASE_VERSION = "feed-safety-consistency-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
