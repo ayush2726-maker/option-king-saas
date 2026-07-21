@@ -1,0 +1,37 @@
+============================= test session starts ==============================
+platform linux -- Python 3.11.15, pytest-9.1.1, pluggy-1.6.0 -- /opt/hostedtoolcache/Python/3.11.15/x64/bin/python
+cachedir: .pytest_cache
+rootdir: /home/runner/work/option-king-saas/option-king-saas
+plugins: anyio-4.14.2
+collecting ... collected 0 items / 1 error
+
+==================================== ERRORS ====================================
+___________ ERROR collecting tests/test_cost_safe_breakeven_risk.py ____________
+ImportError while importing test module '/home/runner/work/option-king-saas/option-king-saas/tests/test_cost_safe_breakeven_risk.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/_pytest/python.py:508: in importtestmodule
+    mod = import_path(
+/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/_pytest/pathlib.py:596: in import_path
+    importlib.import_module(module_name)
+/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap>:1204: in _gcd_import
+    ???
+<frozen importlib._bootstrap>:1176: in _find_and_load
+    ???
+<frozen importlib._bootstrap>:1147: in _find_and_load_unlocked
+    ???
+<frozen importlib._bootstrap>:690: in _load_unlocked
+    ???
+/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/site-packages/_pytest/assertion/rewrite.py:188: in exec_module
+    exec(co, module.__dict__)
+tests/test_cost_safe_breakeven_risk.py:3: in <module>
+    from backtest import routes
+E   ModuleNotFoundError: No module named 'backtest'
+=========================== short test summary info ============================
+ERROR tests/test_cost_safe_breakeven_risk.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+=============================== 1 error in 0.18s ===============================
+EXIT_STATUS=2
