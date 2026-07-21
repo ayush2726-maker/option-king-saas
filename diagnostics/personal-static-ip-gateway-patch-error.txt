@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/home/runner/work/option-king-saas/option-king-saas/scripts/patch_personal_static_ip_gateway_v1.py", line 229, in <module>
+    replace_once(
+  File "/home/runner/work/option-king-saas/option-king-saas/scripts/patch_personal_static_ip_gateway_v1.py", line 8, in replace_once
+    raise RuntimeError(f"{label} marker not found in {path}")
+RuntimeError: paper manager live branch marker not found in bot/angel_fetcher.py
