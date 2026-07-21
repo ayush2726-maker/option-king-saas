@@ -26,6 +26,7 @@ from bot.default_strategy_patch import (
 from bot.fresh_entry_guard_patch import apply_fresh_entry_guard_patch
 from bot.expiry_entry_diagnostics_patch import apply_expiry_entry_diagnostics_patch
 from bot.feed_safety_consistency_patch import apply_feed_safety_consistency_patch
+from bot.mandatory_trend_structure_patch import apply_mandatory_trend_structure_patch
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
 import os
 
@@ -36,8 +37,9 @@ apply_default_strategy_patch()
 apply_fresh_entry_guard_patch()
 apply_expiry_entry_diagnostics_patch()
 apply_feed_safety_consistency_patch()
+apply_mandatory_trend_structure_patch()
 
-RELEASE_VERSION = "core-confirmation-consistency-v2"
+RELEASE_VERSION = "mandatory-vwap-st-ema-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
