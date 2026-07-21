@@ -32,6 +32,8 @@ from bot.mandatory_trend_structure_patch import apply_mandatory_trend_structure_
 from bot.expiry_hardlock_one_second_monitor_patch import (
     apply_expiry_hardlock_one_second_monitor_patch,
 )
+from bot.hero_zero_guard_patch import apply_hero_zero_guard_patch
+from bot.manual_exit_patch import apply_manual_exit_patch
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
 import os
 
@@ -44,8 +46,10 @@ apply_expiry_entry_diagnostics_patch()
 apply_feed_safety_consistency_patch()
 apply_mandatory_trend_structure_patch()
 apply_expiry_hardlock_one_second_monitor_patch()
+apply_hero_zero_guard_patch()
+apply_manual_exit_patch()
 
-RELEASE_VERSION = "expiry-hardlock-one-second-monitor-v1"
+RELEASE_VERSION = "hero-zero-manual-exit-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
