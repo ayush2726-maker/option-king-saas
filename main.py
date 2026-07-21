@@ -19,13 +19,14 @@ from backtest.routes import router as backtest_router
 from bot.score_history_patch import apply_score_history_patch
 from bot.upstox_live_candle_patch import apply_upstox_live_candle_patch
 from bot.live_scan_history_fallback_patch import apply_live_scan_history_fallback_patch
+from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
 import os
 
 apply_score_history_patch()
 apply_upstox_live_candle_patch()
 apply_live_scan_history_fallback_patch()
 
-RELEASE_VERSION = "editable-strategy-live-scan-v2"
+RELEASE_VERSION = "strict-index-score-live-candles-v3"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
@@ -35,6 +36,7 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+app.add_middleware(StrictSignalHistoryMiddleware)
 app.add_middleware(SafeRegistrationEmailVerificationMiddleware)
 app.add_middleware(
     CORSMiddleware,
