@@ -41,9 +41,6 @@ from bot.feed_safety_consistency_patch import apply_feed_safety_consistency_patc
 from bot.mandatory_trend_structure_patch import apply_mandatory_trend_structure_patch
 from bot.entry_quality_v2_patch import apply_entry_quality_v2_patch
 from bot.structural_exit_v2_patch import apply_structural_exit_v2_patch
-from bot.local_gateway_structural_exit_patch import (
-    apply_local_gateway_structural_exit_patch,
-)
 from bot.expiry_hardlock_one_second_monitor_patch import (
     apply_expiry_hardlock_one_second_monitor_patch,
 )
@@ -51,6 +48,30 @@ from bot.hero_zero_guard_patch import apply_hero_zero_guard_patch
 from bot.manual_exit_patch import apply_manual_exit_patch
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
 import os
+
+
+LOCAL_GATEWAY_STRUCTURAL_EXIT_STATUS = "NOT_ATTEMPTED"
+
+
+def _apply_optional_local_gateway_structural_exit_patch():
+    """Never let an optional live-exit adapter prevent the API from booting."""
+    global LOCAL_GATEWAY_STRUCTURAL_EXIT_STATUS
+    try:
+        from bot.local_gateway_structural_exit_patch import (
+            apply_local_gateway_structural_exit_patch,
+        )
+
+        apply_local_gateway_structural_exit_patch()
+        LOCAL_GATEWAY_STRUCTURAL_EXIT_STATUS = "ACTIVE"
+    except Exception as exc:
+        LOCAL_GATEWAY_STRUCTURAL_EXIT_STATUS = (
+            f"DISABLED:{exc.__class__.__name__}:{str(exc)[:160]}"
+        )
+        print(
+            "WARNING | Local gateway structural exit patch disabled | "
+            f"{LOCAL_GATEWAY_STRUCTURAL_EXIT_STATUS}"
+        )
+
 
 apply_score_history_patch()
 apply_upstox_live_candle_patch()
@@ -62,7 +83,7 @@ apply_feed_safety_consistency_patch()
 apply_mandatory_trend_structure_patch()
 apply_entry_quality_v2_patch()
 apply_structural_exit_v2_patch()
-apply_local_gateway_structural_exit_patch()
+_apply_optional_local_gateway_structural_exit_patch()
 apply_expiry_hardlock_one_second_monitor_patch()
 apply_hero_zero_guard_patch()
 apply_manual_exit_patch()
@@ -72,7 +93,7 @@ apply_backtest_realism_costs_patch()
 apply_cost_idempotence_patch()
 apply_monthly_job_start_patch()
 
-RELEASE_VERSION = "local-gateway-risk-v2-structural-exit"
+RELEASE_VERSION = "local-gateway-risk-v2-startup-guard"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
@@ -92,6 +113,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/")
+def root_health():
+    return {
+        "success": True,
+        "service": "option-king-saas",
+        "release": RELEASE_VERSION,
+        "gateway_structural_exit": LOCAL_GATEWAY_STRUCTURAL_EXIT_STATUS,
+    }
+
+
+@app.get("/health")
+def health():
+    return {
+        "success": True,
+        "status": "ok",
+        "release": RELEASE_VERSION,
+        "gateway_structural_exit": LOCAL_GATEWAY_STRUCTURAL_EXIT_STATUS,
+    }
 
 
 @app.on_event("startup")
