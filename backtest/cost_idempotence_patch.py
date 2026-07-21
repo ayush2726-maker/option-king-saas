@@ -22,7 +22,6 @@ from backtest.angel_historical_index_patch import (
 
 def _activate_final_parity_patches():
     from bot.balanced_exit_v2_patch import (
-        apply_balanced_backtest_exit_patch,
         apply_balanced_risk_profit_patch,
     )
     from backtest.cost_safe_breakeven_risk_patch import (
@@ -38,10 +37,9 @@ def _activate_final_parity_patches():
         apply_daily_trade_limit_patch,
     )
 
-    # Source-level Backtest logic must be installed before cost/risk wrappers
-    # capture the one-index function. Final runtime/ladder functions are installed
-    # last so no older patch can overwrite the balanced settings.
-    apply_balanced_backtest_exit_patch()
+    # Structural Exit V5 has already installed the captured Backtest source in
+    # main.py. Final runtime/ladder functions are installed last so no older
+    # patch can overwrite the balanced settings.
     apply_cost_safe_breakeven_risk_patch()
     apply_all_in_risk_cap_patch()
     apply_live_net_pnl_breakeven_patch()
