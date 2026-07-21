@@ -32,6 +32,7 @@ jobs:
             echo 'AUTO volume-neutral fix already applied'
             exit 0
           fi
+          python scripts/repair_auto_patch_counter.py
           set +e
           python scripts/patch_auto_only_sensex_v1.py > /tmp/auto-fix.log 2>&1
           status=$?
@@ -136,6 +137,7 @@ jobs:
       - name: Commit validated fix
         run: |
           rm -f scripts/patch_auto_only_sensex_v1.py
+          rm -f scripts/repair_auto_patch_counter.py
           rm -f .github/workflows/validate-auto-only-sensex-fix.yml
           rm -f diagnostics/auto-only-sensex-fix-error.txt
           rmdir diagnostics 2>/dev/null || true
