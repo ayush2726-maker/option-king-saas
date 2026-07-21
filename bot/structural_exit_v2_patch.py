@@ -1,13 +1,15 @@
-"""Structural Exit V2.
+"""Adaptive Structural Exit V3.
 
-Entry momentum is not an exit rule.  An open bought-option position exits through:
-- real option-premium ATR stop / dynamic profit lock (checked every runtime loop),
-- one completed index candle where VWAP, Supertrend and EMA9/EMA21 all flip
-  opposite to the position,
-- or the existing 15:25 EOD exit.
+This module fixes the real captured single-index backtest function rather than
+patching the public AUTO wrapper. Bought-option exits use:
 
-A partial one/two-indicator deterioration does not force an exit.  When the
-position is already profitable it tightens the stop to at least breakeven.
+- option-premium ATR stop and dynamic profit lock on every runtime loop,
+- VWAP + Supertrend + EMA9/EMA21 all flipping opposite on completed index candles,
+- adaptive confirmation: immediate at -0.35R or worse, otherwise two completed
+  structural-flip candles,
+- and the existing 15:25 EOD exit.
+
+Two-candle colour momentum is an ENTRY trigger only and is never an exit rule.
 """
 
 import inspect
@@ -15,6 +17,10 @@ import inspect
 from backtest import routes as backtest_routes
 from bot import auto_portfolio_runtime as runtime
 from bot import dynamic_exit
+
+
+STRUCTURAL_LOSS_FAST_EXIT_R = -0.35
+STRUCTURAL_NORMAL_CONFIRM_CANDLES = 2
 
 
 def _f(value, default=0.0):
@@ -66,7 +72,7 @@ def structural_flip(position_side, market_data):
     }
 
 
-def _detect_structural_reversal_v2(
+def _detect_structural_reversal_v3(
     position_side,
     price,
     vwap,
@@ -100,16 +106,18 @@ def _detect_structural_reversal_v2(
         "opposite_signal": str(opposite_signal or "WAIT").upper(),
         "opposite_score": round(_f(opposite_score), 2),
         "min_score": round(_f(min_score, 82), 2),
-        "exit_rule": "VWAP_SUPERTREND_EMA_TRIPLE_FLIP",
+        "exit_rule": "VWAP_SUPERTREND_EMA_ADAPTIVE_V3",
         **state,
     }
 
 
-def _runtime_evaluate_exit_v2(trade, ltp, market_data, candle_id):
+def _runtime_evaluate_exit_v3(trade, ltp, market_data, candle_id):
     entry = _f(trade["entry_price"])
     old_sl = _f(runtime._v(trade, "sl_price", max(0.05, entry - 0.05)))
-    risk = _f(runtime._v(trade, "initial_risk", max(0.05, entry - old_sl)))
-    risk = max(0.05, risk)
+    risk = max(
+        0.05,
+        _f(runtime._v(trade, "initial_risk", max(0.05, entry - old_sl))),
+    )
     peak = _f(runtime._v(trade, "peak_price", entry))
     updates = runtime._i(runtime._v(trade, "trail_updates", 0))
 
@@ -120,13 +128,37 @@ def _runtime_evaluate_exit_v2(trade, ltp, market_data, candle_id):
         updates += 1
 
     structure = structural_flip(runtime._v(trade, "side", ""), market_data)
+    current_r = (ltp - entry) / risk
 
-    # Do not exit on one noisy indicator. If two indicators deteriorate while
-    # the option is profitable, prevent a winner from becoming a loser.
+    previous_count = runtime._i(runtime._v(trade, "reversal_count", 0))
+    previous_candle = str(runtime._v(trade, "reversal_last_candle", "") or "")
+    current_candle = str(candle_id or "")
+
+    # The runtime checks option LTP every second. Count structural confirmation
+    # only once per completed index candle, never once per one-second tick.
+    if current_candle and current_candle != previous_candle:
+        reversal_count = previous_count + 1 if structure["all_three_flipped"] else 0
+        reversal_last_candle = current_candle
+    else:
+        reversal_count = previous_count
+        reversal_last_candle = previous_candle or current_candle
+
+    required = (
+        1
+        if current_r <= STRUCTURAL_LOSS_FAST_EXIT_R
+        else STRUCTURAL_NORMAL_CONFIRM_CANDLES
+    )
+    structural_exit = bool(
+        structure["all_three_flipped"] and reversal_count >= required
+    )
+
+    # Two-of-three weakness is not an exit. Protect an existing winner instead.
     if structure["opposite_count"] >= 2 and ltp >= entry:
         tightened = max(_f(trail["sl_price"]), entry)
         if tightened > _f(trail["sl_price"]):
-            trail["sl_price"] = round(min(tightened, max(0.05, ltp - 0.05)), 2)
+            trail["sl_price"] = round(
+                min(tightened, max(0.05, ltp - 0.05)), 2
+            )
             trail["stage"] = "STRUCTURE_BREAKEVEN_TIGHTEN"
             trail["updated"] = True
             updates += 1
@@ -141,8 +173,12 @@ def _runtime_evaluate_exit_v2(trade, ltp, market_data, candle_id):
         )
     elif hit:
         reason = "PURE ATR SL HIT"
-    elif structure["all_three_flipped"]:
-        reason = "VWAP + SUPERTREND + EMA STRUCTURAL EXIT"
+    elif structural_exit:
+        reason = (
+            "VWAP + SUPERTREND + EMA STRUCTURAL EXIT"
+            f" | confirmations={reversal_count}/{required}"
+            f" | current_r={current_r:.2f}"
+        )
     elif eod:
         reason = "EOD EXIT 15:25 IST"
     else:
@@ -153,54 +189,91 @@ def _runtime_evaluate_exit_v2(trade, ltp, market_data, candle_id):
         "risk": risk,
         "updates": updates,
         "reversal": {
-            "exit": bool(structure["all_three_flipped"]),
-            "count": 1 if structure["all_three_flipped"] else 0,
-            "last_candle": candle_id,
-            "mode": "VWAP_ST_EMA_TRIPLE_FLIP_V2",
+            "exit": structural_exit,
+            "count": reversal_count,
+            "last_candle": reversal_last_candle,
+            "required": required,
+            "current_r": round(current_r, 2),
+            "mode": "VWAP_ST_EMA_ADAPTIVE_V3",
             **structure,
         },
         "reason": reason,
     }
 
 
-def _patch_backtest_one_candle_exit():
-    """Change only the caller confirmation count/reason, keeping its engine intact."""
+def _patch_captured_single_index_backtest():
+    """Compile and install the actual captured single-index backtest function."""
+    target = getattr(
+        backtest_routes,
+        "_OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST",
+        None,
+    )
+    if target is None:
+        return False, "CAPTURED_SINGLE_INDEX_FUNCTION_MISSING"
+
     try:
-        source = inspect.getsource(backtest_routes.run_realistic_day_backtest)
-        changed = source.replace(
+        source = inspect.getsource(target)
+        changed = source
+
+        # Avoid overwriting the public AUTO/single wrapper when executing source.
+        changed = changed.replace(
+            "def run_realistic_day_backtest(",
+            "def _okai_single_index_adaptive_exit_v3(",
+            1,
+        )
+        changed = changed.replace(
             "reversal_required_candles = 2",
-            "reversal_required_candles = 1",
-        ).replace(
+            "reversal_required_candles = (\n"
+            "                1 if current_r <= -0.35 else 2\n"
+            "            )",
+        )
+        changed = changed.replace(
             '"TWO_CANDLE_REVERSAL_EXIT"',
             '"VWAP_ST_EMA_STRUCTURAL_EXIT"',
-        ).replace(
-            '"mode": "CONFIRMED_TWO_CANDLE"',
-            '"mode": "VWAP_ST_EMA_TRIPLE_FLIP"',
-        ).replace(
-            '"confirmation_candles": 2',
-            '"confirmation_candles": 1',
         )
-        if changed != source:
-            exec(compile(changed, backtest_routes.__file__, "exec"), backtest_routes.__dict__)
-            # AUTO portfolio calls the captured single-index function directly.
-            # Repoint it so Daily, AUTO and Monthly all use the same exit engine.
-            backtest_routes._OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST = (
-                backtest_routes.run_realistic_day_backtest
-            )
-            return True
-    except Exception:
-        pass
-    return False
+        changed = changed.replace(
+            '"mode": "CONFIRMED_TWO_CANDLE"',
+            '"mode": "VWAP_ST_EMA_ADAPTIVE_V3"',
+        )
+        changed = changed.replace(
+            '"confirmation_candles": 2',
+            '"confirmation_candles": "1_AT_MINUS_0.35R_ELSE_2"',
+        )
+
+        if changed == source:
+            return False, "SOURCE_TRANSFORM_NO_MATCH"
+
+        exec(
+            compile(changed, backtest_routes.__file__, "exec"),
+            backtest_routes.__dict__,
+        )
+        patched = backtest_routes.__dict__.get(
+            "_okai_single_index_adaptive_exit_v3"
+        )
+        if not callable(patched):
+            return False, "PATCHED_FUNCTION_NOT_CREATED"
+
+        backtest_routes._OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST = patched
+        try:
+            backtest_routes._OKAI_BACKTEST_CANDLE_CACHE.clear()
+        except Exception:
+            pass
+        return True, "OK"
+    except Exception as exc:
+        return False, f"{exc.__class__.__name__}:{str(exc)[:180]}"
 
 
 def apply_structural_exit_v2_patch():
-    if getattr(runtime, "_okai_structural_exit_v2", False):
+    # Preserve old import/function name used by main.py, but install V3 once.
+    if getattr(runtime, "_okai_structural_exit_v3", False):
         return
 
-    dynamic_exit.detect_structural_reversal = _detect_structural_reversal_v2
-    backtest_routes.detect_structural_reversal = _detect_structural_reversal_v2
-    runtime._evaluate_exit = _runtime_evaluate_exit_v2
-    patched_backtest = _patch_backtest_one_candle_exit()
+    dynamic_exit.detect_structural_reversal = _detect_structural_reversal_v3
+    backtest_routes.detect_structural_reversal = _detect_structural_reversal_v3
+    runtime._evaluate_exit = _runtime_evaluate_exit_v3
 
+    patched, diagnostic = _patch_captured_single_index_backtest()
     runtime._okai_structural_exit_v2 = True
-    runtime._okai_structural_exit_backtest_patched = bool(patched_backtest)
+    runtime._okai_structural_exit_v3 = True
+    runtime._okai_structural_exit_backtest_patched = bool(patched)
+    runtime._okai_structural_exit_backtest_diagnostic = diagnostic
