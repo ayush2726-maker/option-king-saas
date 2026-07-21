@@ -5,8 +5,8 @@ AUTO portfolio wrapper. Without this guard, slippage/brokerage/statutory charges
 can be deducted twice from the same already-costed result.
 
 After the single cost pass is installed, activate the true cost-safe break-even
-and hard risk-cap patch.  This order is important because true break-even uses
-the final brokerage/statutory/slippage model.
+and all-in hard risk-cap patches. This order is important because both controls
+use the final brokerage/statutory/slippage model.
 """
 
 from copy import deepcopy
@@ -14,14 +14,23 @@ from copy import deepcopy
 from backtest import realism_costs_patch as costs
 
 
+def _activate_true_be_and_risk_caps():
+    from backtest.cost_safe_breakeven_risk_patch import (
+        apply_cost_safe_breakeven_risk_patch,
+    )
+    from backtest.all_in_risk_cap_patch import (
+        apply_all_in_risk_cap_patch,
+    )
+
+    apply_cost_safe_breakeven_risk_patch()
+    apply_all_in_risk_cap_patch()
+
+
 def apply_cost_idempotence_patch():
     if getattr(costs, "_okai_cost_idempotence_v1", False):
-        # Idempotence may already be active in a warm worker while the newer
-        # risk patch has not yet been installed.
-        from backtest.cost_safe_breakeven_risk_patch import (
-            apply_cost_safe_breakeven_risk_patch,
-        )
-        apply_cost_safe_breakeven_risk_patch()
+        # A warm worker may already have cost idempotence while the newer risk
+        # and true-break-even controls have not yet been installed.
+        _activate_true_be_and_risk_caps()
         return
 
     original = costs._apply_costs_to_result
@@ -47,8 +56,4 @@ def apply_cost_idempotence_patch():
 
     costs._apply_costs_to_result = idempotent_costs
     costs._okai_cost_idempotence_v1 = True
-
-    from backtest.cost_safe_breakeven_risk_patch import (
-        apply_cost_safe_breakeven_risk_patch,
-    )
-    apply_cost_safe_breakeven_risk_patch()
+    _activate_true_be_and_risk_caps()
