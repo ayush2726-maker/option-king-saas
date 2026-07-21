@@ -26,6 +26,8 @@ DEFAULT_SETTINGS = {
     "expiry_gamma_mode": True,
     "trading_mode": "paper",
     "paper_capital": 100000,
+    "live_lots": 1,
+    "local_gateway_required": True,
     "primary_instrument": "NIFTY",
     "enabled_instruments": ["NIFTY", "BANKNIFTY", "SENSEX"],
     "auto_scan": True,
@@ -102,6 +104,8 @@ def normalize_settings(body: dict):
     base["expiry_gamma_mode"] = bool(body.get("expiry_gamma_mode", base["expiry_gamma_mode"]))
     base["trading_mode"] = "live" if str(body.get("trading_mode", base.get("trading_mode", "paper"))).lower() == "live" else "paper"
     base["paper_capital"] = clamp_num(body.get("paper_capital", base.get("paper_capital", 100000)), 1000, 10000000, base.get("paper_capital", 100000))
+    base["live_lots"] = int(clamp_num(body.get("live_lots", base.get("live_lots", 1)), 1, 10, 1))
+    base["local_gateway_required"] = True
 
     primary = str(body.get("primary_instrument", base.get("primary_instrument", "NIFTY"))).upper()
     if primary not in ALLOWED_INSTRUMENTS:

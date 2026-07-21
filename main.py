@@ -4,6 +4,8 @@ from database import init_db
 from auth.routes import router as auth_router
 from auth.recovery_routes import router as recovery_router, ensure_recovery_schema
 from auth.registration_email_middleware import SafeRegistrationEmailVerificationMiddleware
+from local_gateway.routes import router as local_gateway_router
+from local_gateway.service import ensure_local_gateway_schema
 from broker.routes import router as broker_router
 from subscription.routes import router as subscription_router
 from admin.routes import router as admin_router
@@ -68,6 +70,7 @@ app.add_middleware(
 def startup():
     init_db()
     ensure_recovery_schema()
+    ensure_local_gateway_schema()
 
     from database import init_bot_status_table
     init_bot_status_table()
@@ -127,6 +130,7 @@ def startup():
 
 app.include_router(auth_router)
 app.include_router(recovery_router)
+app.include_router(local_gateway_router)
 app.include_router(broker_router)
 app.include_router(subscription_router)
 app.include_router(admin_router)
