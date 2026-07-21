@@ -16,9 +16,12 @@ from strategy.profile_routes import router as strategy_profile_router
 from bot.market_routes import router as market_router
 from bot.ai_routes import router as ai_router
 from backtest.routes import router as backtest_router
+from bot.score_history_patch import apply_score_history_patch
 import os
 
-RELEASE_VERSION = "angel-history-rate-fix-v2"
+apply_score_history_patch()
+
+RELEASE_VERSION = "per-index-score-history-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
