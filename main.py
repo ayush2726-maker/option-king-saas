@@ -18,6 +18,8 @@ from bot.ai_routes import router as ai_router
 from backtest.routes import router as backtest_router
 import os
 
+RELEASE_VERSION = "angel-history-rate-fix-v2"
+
 app = FastAPI(
     title="Option King AI — SaaS API",
     description="Multi-user F&O trading bot platform",
@@ -51,7 +53,6 @@ def startup():
     if admin_email and admin_password:
         from auth.utils import hash_password
         from database import get_db
-        from datetime import datetime, timedelta
 
         conn = get_db()
         existing = conn.execute(
@@ -90,7 +91,7 @@ def startup():
             print(f"Admin created: {admin_email}")
         conn.close()
 
-    print("Option King AI SaaS Server started")
+    print(f"Option King AI SaaS Server started | {RELEASE_VERSION}")
 
 
 app.include_router(auth_router)
@@ -114,6 +115,7 @@ def root():
     return {
         "app": "Option King AI SaaS",
         "version": "1.0.0",
+        "release": RELEASE_VERSION,
         "status": "running",
         "docs": "/docs",
     }
@@ -133,12 +135,12 @@ def health():
     return {
         "status": "healthy",
         "database": db_status,
+        "release": RELEASE_VERSION,
     }
 
 
 from fastapi.responses import FileResponse, HTMLResponse
 from html import escape
-
 
 
 @app.get("/upstox/callback", response_class=HTMLResponse)
