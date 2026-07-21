@@ -3,6 +3,7 @@ from database import get_db
 from auth.routes import get_current_user
 from auth.utils import decrypt_credential
 from bot.strategy import is_hero_window_active
+from bot.history_provider import get_historical_rows
 from bot.option_chain import resolve_option
 from telegram.routes import notify_user
 from datetime import datetime, timezone, timedelta
@@ -1445,54 +1446,17 @@ def _historical_indicator_candles(rows):
     return output
 
 
-def _fetch_angel_historical_candles(user_id, instrument, days):
-    instrument = str(instrument or "NIFTY").upper()
-    if instrument not in INDEX_TOKENS:
-        return [], "UNSUPPORTED_INSTRUMENT", None
-
-    conn = get_db()
-    try:
-        broker = conn.execute(
-            """
-            SELECT * FROM broker_credentials
-            WHERE user_id=? AND is_active=1
-            ORDER BY last_connected DESC LIMIT 1
-            """,
-            (user_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    if not broker:
-        return [], "BROKER_NOT_CONNECTED", None
-    if str(broker["broker_name"] or "").lower() != "angelone":
-        return [], "HISTORICAL_RANGE_CURRENTLY_REQUIRES_ANGELONE", None
-
-    creds = {
-        "api_key": decrypt_credential(broker["api_key"]),
-        "client_id": broker["client_id"],
-        "password": decrypt_credential(broker["api_secret"]),
-        "totp_secret": decrypt_credential(broker["totp_secret"]) if broker["totp_secret"] else None,
-    }
-    obj = angel_login(creds)
-
-    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-    from_day = (now_ist - timedelta(days=max(days - 1, 0))).replace(
-        hour=9, minute=15, second=0, microsecond=0
+def _fetch_broker_historical_candles(user_id, instrument, days):
+    rows, reason, broker_name, cached = get_historical_rows(
+        user_id,
+        instrument,
+        days,
     )
-    interval = "ONE_MINUTE" if days == 1 else "FIFTEEN_MINUTE" if days == 7 else "ONE_HOUR"
-    params = {
-        "exchange": INDEX_EXCHANGE[instrument],
-        "symboltoken": INDEX_TOKENS[instrument],
-        "interval": interval,
-        "fromdate": from_day.strftime("%Y-%m-%d %H:%M"),
-        "todate": now_ist.strftime("%Y-%m-%d %H:%M"),
-    }
-    response = obj.getCandleData(params)
-    if not isinstance(response, dict) or response.get("status") is False:
-        return [], "BROKER_HISTORY_ERROR", interval
-    rows = response.get("data") or []
-    return _historical_indicator_candles(rows), None, interval
+    interval = "ONE_MINUTE" if int(days) == 1 else "FIFTEEN_MINUTE" if int(days) == 7 else "ONE_HOUR"
+    candles = _historical_indicator_candles(rows)
+    if rows and not candles:
+        reason = "Broker candles mili, lekin chart format prepare nahi hua."
+    return candles, reason, interval, broker_name, cached
 
 
 @router.get("/chart-data")
@@ -1508,6 +1472,8 @@ def get_chart_data(
     state = get_user_bot_state(user["id"])
     auto_restarted = False
     recovery_reason = None
+    history_broker = None
+    history_cached = False
 
     state_instrument = str(
         state.get("chart_instrument") or state.get("underlying") or "NIFTY"
@@ -1522,14 +1488,18 @@ def get_chart_data(
     else:
         candles = []
         interval = None
-        source = "ANGELONE_HISTORICAL"
+        source = "BROKER_HISTORICAL"
         history_reason = None
         try:
-            candles, history_reason, interval = _fetch_angel_historical_candles(
+            candles, history_reason, interval, history_broker, history_cached = _fetch_broker_historical_candles(
                 user["id"], requested_instrument, requested_days
             )
-        except Exception as exc:
-            history_reason = "HISTORY_FETCH_FAILED: " + str(exc)[:140]
+            if history_broker:
+                source = f"{history_broker.upper()}_HISTORICAL"
+            if history_cached:
+                source += "_CACHE"
+        except Exception:
+            history_reason = "Historical graph load nahi hua. 45 seconds baad pull-down refresh karein."
 
         if not candles and requested_days == 1:
             if not state.get("running"):
@@ -1578,6 +1548,8 @@ def get_chart_data(
         "interval": interval or "ONE_MINUTE",
         "range_days": requested_days,
         "source": source,
+        "broker": history_broker,
+        "cached": history_cached,
         "count": len(candles),
         "candles": candles,
         "updated_at": state.get("updated_at") or datetime.utcnow().isoformat(),

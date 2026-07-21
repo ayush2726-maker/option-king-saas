@@ -1,8 +1,11 @@
 import requests
+from urllib.parse import quote
 from .base import BaseBroker
+
 
 class UpstoxBroker(BaseBroker):
     BASE_URL = "https://api.upstox.com/v2"
+    V3_URL = "https://api.upstox.com/v3"
 
     @classmethod
     def broker_name(cls): return "upstox"
@@ -58,51 +61,95 @@ class UpstoxBroker(BaseBroker):
         }
 
     def _h(self):
-        return {"Authorization":f"Bearer {self.api_secret}","Content-Type":"application/json","Accept":"application/json"}
+        return {
+            "Authorization": f"Bearer {self.api_secret}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
 
     def login(self):
         try:
             r = requests.get(f"{self.BASE_URL}/user/profile", headers=self._h(), timeout=10)
             if r.status_code == 200:
                 self.is_logged_in = True
-                return {"success":True,"message":"Upstox session valid","token":self.api_secret}
-            return {"success":False,"message":f"Invalid token: {r.text}"}
+                return {"success": True, "message": "Upstox session valid", "token": self.api_secret}
+            return {"success": False, "message": f"Invalid token: {r.text}"}
         except Exception as e:
-            return {"success":False,"message":str(e)}
+            return {"success": False, "message": str(e)}
 
     def logout(self):
         self.is_logged_in = False
-        return {"success":True}
+        return {"success": True}
 
     def get_ltp(self, symbol, exchange="NFO"):
         try:
             inst = symbol if "|" in symbol else f"NSE_FO|{symbol}"
-            r = requests.get(f"{self.BASE_URL}/market-quote/ltp", params={"instrument_key":inst}, headers=self._h(), timeout=10)
+            r = requests.get(
+                f"{self.BASE_URL}/market-quote/ltp",
+                params={"instrument_key": inst},
+                headers=self._h(),
+                timeout=10,
+            )
             data = r.json().get("data", {})
             key_variant = inst.replace("|", ":")
             entry = data.get(inst) or data.get(key_variant)
             if not entry:
                 entry = next(iter(data.values()), None)
             if not entry:
-                return {"success":False,"message":f"No LTP data: {r.text[:200]}"}
-            return {"success":True,"ltp":entry["last_price"],"symbol":symbol}
+                return {"success": False, "message": f"No LTP data: {r.text[:200]}"}
+            return {"success": True, "ltp": entry["last_price"], "symbol": symbol}
         except Exception as e:
-            return {"success":False,"message":str(e)}
+            return {"success": False, "message": str(e)}
 
     def get_candles(self, symbol, interval, from_date, to_date, exchange="NFO"):
+        """Fetch candles through Upstox V3 for index/equity/derivative keys.
+
+        symbol must be an Upstox instrument key such as NSE_INDEX|Nifty 50.
+        from_date/to_date may be dates or datetimes; only YYYY-MM-DD is used.
+        """
         try:
-            from datetime import datetime
-            m = {"1m":"1minute","5m":"5minute","15m":"15minute","1h":"60minute","1d":"1day"}
-            inst = symbol if "|" in symbol else f"NSE_FO|{symbol}"
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            if to_date == today_str or from_date == today_str:
-                r = requests.get(f"{self.BASE_URL}/historical-candle/intraday/{inst}/{m.get(interval,'5minute')}", headers=self._h(), timeout=15)
+            interval_map = {
+                "1m": ("minutes", 1),
+                "3m": ("minutes", 3),
+                "5m": ("minutes", 5),
+                "15m": ("minutes", 15),
+                "30m": ("minutes", 30),
+                "1h": ("hours", 1),
+                "1d": ("days", 1),
+            }
+            unit, number = interval_map.get(str(interval).lower(), ("minutes", 5))
+            instrument_key = symbol if "|" in str(symbol) else f"NSE_FO|{symbol}"
+            encoded_key = quote(str(instrument_key), safe="")
+            from_day = str(from_date)[:10]
+            to_day = str(to_date)[:10]
+
+            if from_day == to_day:
+                url = (
+                    f"{self.V3_URL}/historical-candle/intraday/"
+                    f"{encoded_key}/{unit}/{number}"
+                )
             else:
-                r = requests.get(f"{self.BASE_URL}/historical-candle/{inst}/{m.get(interval,'5minute')}/{to_date}/{from_date}", headers=self._h(), timeout=15)
-            data = r.json()
-            return {"success":True,"candles":data.get("data",{}).get("candles",[]),"raw_status":data.get("status")}
+                url = (
+                    f"{self.V3_URL}/historical-candle/{encoded_key}/"
+                    f"{unit}/{number}/{to_day}/{from_day}"
+                )
+
+            response = requests.get(url, headers=self._h(), timeout=20)
+            payload = response.json()
+            if response.status_code != 200 or payload.get("status") != "success":
+                return {
+                    "success": False,
+                    "message": str(payload.get("errors") or payload.get("message") or payload)[:300],
+                }
+            candles = payload.get("data", {}).get("candles", []) or []
+            candles.sort(key=lambda row: str(row[0]) if row else "")
+            return {
+                "success": True,
+                "candles": candles,
+                "raw_status": payload.get("status"),
+            }
         except Exception as e:
-            return {"success":False,"message":str(e)}
+            return {"success": False, "message": str(e)}
 
     def search_option(self, underlying, expiry, strike, option_type):
         try:
@@ -126,7 +173,7 @@ class UpstoxBroker(BaseBroker):
             )
             payload = r.json()
             if r.status_code != 200:
-                return {"success":False,"message":str(payload)[:250]}
+                return {"success": False, "message": str(payload)[:250]}
             found = []
             for row in payload.get("data") or []:
                 if str(row.get("instrument_type") or "").upper() != ot:
@@ -134,21 +181,21 @@ class UpstoxBroker(BaseBroker):
                 if str(row.get("underlying_symbol") or "").upper() != u:
                     continue
                 rs = float(row.get("strike_price") or 0)
-                found.append((str(row.get("expiry") or ""), abs(rs-float(strike)), row))
+                found.append((str(row.get("expiry") or ""), abs(rs - float(strike)), row))
             if not found:
-                return {"success":False,"message":"Upstox option not found"}
+                return {"success": False, "message": "Upstox option not found"}
             _, _, best = min(found, key=lambda x: (x[0], x[1]))
             return {
                 "success": True,
                 "symbol": best["trading_symbol"],
                 "token": best["instrument_key"],
-                "exchange": best.get("segment") or ("BSE_FO" if u=="SENSEX" else "NSE_FO"),
+                "exchange": best.get("segment") or ("BSE_FO" if u == "SENSEX" else "NSE_FO"),
                 "expiry": str(best.get("expiry") or ""),
                 "strike": float(best.get("strike_price") or 0),
                 "lot_size": int(best.get("lot_size") or 0),
             }
         except Exception as e:
-            return {"success":False,"message":str(e)}
+            return {"success": False, "message": str(e)}
 
     def place_order(self, symbol, token, transaction_type, quantity, order_type="MARKET", price=0, exchange="NFO"):
         try:
@@ -156,43 +203,78 @@ class UpstoxBroker(BaseBroker):
             if "|" in raw_token:
                 instrument_token = raw_token
             else:
-                segment = (
-                    "BSE_FO"
-                    if str(exchange).upper().startswith("BSE")
-                    else "NSE_FO"
-                )
+                segment = "BSE_FO" if str(exchange).upper().startswith("BSE") else "NSE_FO"
                 instrument_token = f"{segment}|{symbol}"
-            r = requests.post(f"{self.BASE_URL}/order/place", json={"quantity":quantity,"product":"I","validity":"DAY","price":price,"instrument_token":instrument_token,"order_type":order_type,"transaction_type":transaction_type,"disclosed_quantity":0,"trigger_price":0,"is_amo":False}, headers=self._h(), timeout=10)
+            r = requests.post(
+                f"{self.BASE_URL}/order/place",
+                json={
+                    "quantity": quantity,
+                    "product": "I",
+                    "validity": "DAY",
+                    "price": price,
+                    "instrument_token": instrument_token,
+                    "order_type": order_type,
+                    "transaction_type": transaction_type,
+                    "disclosed_quantity": 0,
+                    "trigger_price": 0,
+                    "is_amo": False,
+                },
+                headers=self._h(),
+                timeout=10,
+            )
             data = r.json()
             if data.get("status") == "success":
                 oid = data["data"]["order_id"]
-                return {"success":True,"order_id":oid,"message":f"Upstox order: {oid}"}
-            return {"success":False,"message":str(data.get("errors",data))}
+                return {"success": True, "order_id": oid, "message": f"Upstox order: {oid}"}
+            return {"success": False, "message": str(data.get("errors", data))}
         except Exception as e:
-            return {"success":False,"message":str(e)}
+            return {"success": False, "message": str(e)}
 
     def get_order_status(self, order_id):
         try:
-            r = requests.get(f"{self.BASE_URL}/order/details", params={"order_id":order_id}, headers=self._h(), timeout=10)
-            d = r.json().get("data",{})
-            return {"success":True,"status":d.get("status",""),"filled_qty":d.get("filled_quantity",0),"avg_price":d.get("average_price",0)}
+            r = requests.get(
+                f"{self.BASE_URL}/order/details",
+                params={"order_id": order_id},
+                headers=self._h(),
+                timeout=10,
+            )
+            d = r.json().get("data", {})
+            return {
+                "success": True,
+                "status": d.get("status", ""),
+                "filled_qty": d.get("filled_quantity", 0),
+                "avg_price": d.get("average_price", 0),
+            }
         except Exception as e:
-            return {"success":False,"message":str(e)}
+            return {"success": False, "message": str(e)}
 
     def get_positions(self):
         try:
-            r = requests.get(f"{self.BASE_URL}/portfolio/short-term-positions", headers=self._h(), timeout=10)
-            return {"success":True,"positions":r.json().get("data",[])}
+            r = requests.get(
+                f"{self.BASE_URL}/portfolio/short-term-positions",
+                headers=self._h(),
+                timeout=10,
+            )
+            return {"success": True, "positions": r.json().get("data", [])}
         except Exception as e:
-            return {"success":False,"message":str(e)}
+            return {"success": False, "message": str(e)}
 
     def close_position(self, symbol, token, quantity, exchange="NFO"):
         return self.place_order(symbol, token, "SELL", quantity)
 
     def get_funds(self):
         try:
-            r = requests.get(f"{self.BASE_URL}/user/get-funds-and-margin", params={"segment":"SEC"}, headers=self._h(), timeout=10)
-            eq = r.json().get("data",{}).get("equity",{})
-            return {"success":True,"available_cash":eq.get("available_margin",0),"used_margin":eq.get("used_margin",0)}
+            r = requests.get(
+                f"{self.BASE_URL}/user/get-funds-and-margin",
+                params={"segment": "SEC"},
+                headers=self._h(),
+                timeout=10,
+            )
+            eq = r.json().get("data", {}).get("equity", {})
+            return {
+                "success": True,
+                "available_cash": eq.get("available_margin", 0),
+                "used_margin": eq.get("used_margin", 0),
+            }
         except Exception as e:
-            return {"success":False,"message":str(e)}
+            return {"success": False, "message": str(e)}
