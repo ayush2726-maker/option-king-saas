@@ -1,12 +1,10 @@
 """
-Persist AUTO portfolio score snapshots per instrument and expose the latest
-live score on today's chart candles.
+Persist valid AUTO portfolio score snapshots per instrument and expose the
+latest calculated score on today's live chart candle.
 
-AUTO scans NIFTY, BANKNIFTY and SENSEX independently. The normal bot state only
-keeps one display scan, so this patch stores every completed scan once per
-candle. It also attaches the current display scan score to the newest live
-candle, which gives the Today graph an immediate fallback even before saved
-history has accumulated.
+Invalid legacy rows with score/price zero or no instrument are removed. They
+represented engine warm-up/no-data states and made the mobile Today graph choose
+a flat 0 LIVE SAVED series instead of the available historical replay scores.
 """
 
 from datetime import datetime, timezone
@@ -54,6 +52,25 @@ def _ensure_signal_history(conn):
     )
 
 
+def _cleanup_invalid_history(conn, user_id):
+    """Remove warm-up/no-data rows that are not real strategy scores."""
+    conn.execute(
+        """
+        DELETE FROM signal_history
+        WHERE user_id=?
+          AND (
+                score IS NULL
+                OR CAST(score AS REAL) <= 0
+                OR price IS NULL
+                OR CAST(price AS REAL) <= 0
+                OR instrument IS NULL
+                OR TRIM(instrument)=''
+              )
+        """,
+        (user_id,),
+    )
+
+
 def _persist_scan_scores(state, scans):
     user_id = _safe_int(state.get("user_id"), 0)
     if user_id <= 0:
@@ -62,6 +79,7 @@ def _persist_scan_scores(state, scans):
     conn = get_db()
     try:
         _ensure_signal_history(conn)
+        _cleanup_invalid_history(conn, user_id)
 
         for scan in scans or []:
             if scan.get("status") != "OK":
@@ -74,7 +92,12 @@ def _persist_scan_scores(state, scans):
             signal_data = scan.get("signal_data") or {}
             market_data = scan.get("market_data") or {}
             candle_id = str(scan.get("candle_id") or "").strip()
-            if not candle_id:
+            score = _safe_int(signal_data.get("score"), 0)
+            price = _safe_float(market_data.get("price"), 0)
+
+            # Score zero means no completed strategy calculation/no useful
+            # setup point. Do not let it override historical replay in mobile.
+            if not candle_id or score <= 0 or price <= 0:
                 continue
 
             snapshot_key = f"AUTO:{instrument}:{candle_id}"
@@ -105,8 +128,8 @@ def _persist_scan_scores(state, scans):
                 (
                     user_id,
                     instrument,
-                    _safe_float(market_data.get("price"), 0),
-                    _safe_int(signal_data.get("score"), 0),
+                    price,
+                    score,
                     str(display_signal or "WAIT"),
                     _safe_float(market_data.get("adx"), 0),
                     _safe_float(market_data.get("volume_ratio"), 0),
@@ -129,21 +152,22 @@ def _persist_scan_scores(state, scans):
 
 
 def _attach_current_score_to_live_chart(state):
-    """Attach the latest computed score to the newest live candle.
-
-    The live chart candle builder contains OHLC/indicators but not strategy
-    score. The mobile Today view can therefore show candles while reporting
-    zero score points. Adding only the newest completed candle keeps the value
-    honest and gives an immediate graph/tag fallback; normal per-candle history
-    continues to come from signal_history.
-    """
+    """Attach only a real positive score to the newest completed live candle."""
     candles = state.get("chart_candles")
-    if not isinstance(candles, list) or not candles:
+    score = _safe_int(state.get("score"), 0)
+    price = _safe_float(state.get("price"), 0)
+
+    if (
+        not isinstance(candles, list)
+        or not candles
+        or score <= 0
+        or price <= 0
+    ):
         return
 
     updated = list(candles)
     latest = dict(updated[-1] or {})
-    latest["score"] = _safe_int(state.get("score"), 0)
+    latest["score"] = score
     latest["signal"] = str(
         state.get("candidate_signal")
         or state.get("signal")
@@ -158,7 +182,7 @@ def _attach_current_score_to_live_chart(state):
 
 def apply_score_history_patch():
     """Patch AUTO runtime once without changing strategy or entry rules."""
-    if getattr(runtime, "_okai_score_history_patch_v2", False):
+    if getattr(runtime, "_okai_score_history_patch_v3", False):
         return
 
     original_state_update = runtime._state_update
@@ -173,4 +197,4 @@ def apply_score_history_patch():
             state["score_history_warning"] = str(exc)[:160]
 
     runtime._state_update = patched_state_update
-    runtime._okai_score_history_patch_v2 = True
+    runtime._okai_score_history_patch_v3 = True
