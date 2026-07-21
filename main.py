@@ -17,11 +17,13 @@ from bot.market_routes import router as market_router
 from bot.ai_routes import router as ai_router
 from backtest.routes import router as backtest_router
 from bot.score_history_patch import apply_score_history_patch
+from bot.upstox_live_candle_patch import apply_upstox_live_candle_patch
 import os
 
 apply_score_history_patch()
+apply_upstox_live_candle_patch()
 
-RELEASE_VERSION = "per-index-score-history-v1"
+RELEASE_VERSION = "today-score-upstox-live-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
