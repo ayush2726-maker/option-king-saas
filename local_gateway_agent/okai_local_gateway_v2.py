@@ -6,7 +6,7 @@ This wrapper keeps the battle-tested gateway command/Angel order flow and adds:
 - use of the server-provided ATR stop instead of recalculating a fixed stop;
 - first profit lock at entry + estimated round-trip charges + 2% profit;
 - R-based dynamic profit trailing checked against option LTP every second;
-- fixed target disabled; structural exits continue to arrive as remote exit commands;
+- fixed target disabled; remote structural exit depends on the active Railway release;
 - local SQLite migration, so open-position trail state survives restarts.
 """
 
@@ -16,7 +16,7 @@ from datetime import datetime
 import okai_local_gateway as base
 
 
-RISK_ENGINE_VERSION = "1.1.0-RISK-V2"
+RISK_ENGINE_VERSION = "1.1.1-RISK-V2"
 
 # Conservative Angel One equity-option charge model. Rates are decimals.
 # Brokerage is charged per executed order. Slight over-estimation is intentional:
@@ -286,7 +286,7 @@ def command_doctor_v2():
     print("First lock: ENTRY + ROUND-TRIP CHARGES + 2% ✅")
     print("Dynamic trail: 0.8R / 1.2R / 1.8R stages ✅")
     print("Fixed target: DISABLED ✅")
-    print("Structural exit: SERVER REMOTE EXIT COMMAND ✅")
+    print("Structural exit: SERVER RELEASE DEPENDENT ⚠️")
 
 
 def install_patches():
