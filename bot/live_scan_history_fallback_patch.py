@@ -1,15 +1,9 @@
-"""Reliable candle recovery for AUTO NIFTY/BANKNIFTY/SENSEX scans.
+"""Reliable candle and scoring recovery for AUTO portfolio scans.
 
-The AUTO engine must not show a false 0 score merely because one Upstox
-intraday request is temporarily empty.  This patch tries, in order:
-
-1. the normal live broker request,
-2. the shared one-day historical provider/cache used by the chart endpoint,
-3. Upstox's date-range historical endpoint,
-4. the last recent successful frame for that user/instrument.
-
-Every result also carries candle_count/data_source/error diagnostics so the app
-can report the real reason instead of an unexplained WAITING_CANDLES status.
+The chart replay path is already able to calculate stable scores from broker
+candles. AUTO live scans should use the same sanitised calculation whenever the
+legacy live builder raises, returns incomplete indicators, or receives a
+transiently short broker response.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -21,7 +15,7 @@ from bot import history_provider
 
 
 _LAST_GOOD_FRAMES = {}
-LAST_GOOD_SECONDS = 180
+LAST_GOOD_SECONDS = 240
 MIN_CANDLES = 28
 
 
@@ -76,8 +70,6 @@ def _frame_from_rows(rows):
         .reset_index(drop=True)
     )
 
-    # Do not use DataFrame.applymap here.  Some Railway pandas builds remove or
-    # deprecate it.  A simple row loop is compatible with all supported builds.
     valid_indexes = []
     for index, row in frame.iterrows():
         try:
@@ -92,6 +84,22 @@ def _frame_from_rows(rows):
 
     frame = frame.loc[valid_indexes].reset_index(drop=True)
     return frame if not frame.empty else None
+
+
+def _rows_from_frame(frame):
+    if frame is None:
+        return []
+    rows = []
+    for _, row in frame.iterrows():
+        rows.append([
+            row.get("time"),
+            row.get("open"),
+            row.get("high"),
+            row.get("low"),
+            row.get("close"),
+            row.get("volume", 0),
+        ])
+    return rows
 
 
 def _provider_frame(user_id, underlying):
@@ -114,9 +122,6 @@ def _provider_frame(user_id, underlying):
     except Exception as exc:
         notes.append("provider_error=" + str(exc)[:140])
 
-    # Read the already-populated chart cache directly.  This bypasses a short
-    # error-cache window when the chart has valid candles but an earlier live
-    # request recorded a transient failure.
     try:
         cache_key = (int(user_id), str(underlying).upper(), 1)
         cached_item = getattr(history_provider, "_CACHE", {}).get(cache_key) or {}
@@ -132,15 +137,22 @@ def _provider_frame(user_id, underlying):
 
 
 def _upstox_range_frame(broker_obj, underlying):
-    """Force the date-range endpoint instead of same-day intraday endpoint."""
     try:
         from bot.angel_fetcher import UPSTOX_INDEX_KEYS
+
+        key = UPSTOX_INDEX_KEYS[str(underlying).upper()]
+        try:
+            resolved = broker_obj.resolve_index_key(underlying)
+            if isinstance(resolved, dict) and resolved.get("success"):
+                key = resolved.get("instrument_key") or key
+        except Exception:
+            pass
 
         now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
         today = now_ist.strftime("%Y-%m-%d")
         yesterday = (now_ist - timedelta(days=1)).strftime("%Y-%m-%d")
         result = broker_obj.get_candles(
-            symbol=UPSTOX_INDEX_KEYS[str(underlying).upper()],
+            symbol=key,
             interval="1m",
             from_date=yesterday,
             to_date=today,
@@ -153,16 +165,13 @@ def _upstox_range_frame(broker_obj, underlying):
         if frame is None:
             return None, f"range rows unusable={len(rows)}"
 
-        # Keep the current IST trading day when possible.  If timestamp
-        # conversion differs by broker, retaining the latest rows is safer than
-        # returning no score at all.
         today_rows = frame[
             frame["time"].dt.tz_convert("Asia/Kolkata").dt.strftime("%Y-%m-%d") == today
         ].reset_index(drop=True)
         if len(today_rows) >= MIN_CANDLES:
             frame = today_rows
 
-        return frame, f"range_rows={len(frame)}"
+        return frame, f"range_rows={len(frame)} key={key}"
     except Exception as exc:
         return None, str(exc)[:160]
 
@@ -185,9 +194,106 @@ def _remember_frame(user_id, underlying, frame):
     _LAST_GOOD_FRAMES[key] = (time.monotonic(), _copy_frame(frame))
 
 
+def _safe_number(value, default=0.0):
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else float(default)
+    except Exception:
+        return float(default)
+
+
+def _replay_aligned_scan(user_id, underlying, frame, profile, source, notes):
+    """Build a live scan from the exact sanitised replay calculation."""
+    from bot.routes import _historical_indicator_candles
+
+    chart_candles = _historical_indicator_candles(
+        _rows_from_frame(frame),
+        profile=profile,
+    )
+    scored = [
+        candle
+        for candle in chart_candles
+        if candle.get("score") is not None
+    ]
+    if not scored:
+        raise RuntimeError("Replay scoring produced no completed score candle")
+
+    # Prefer the last completed candle.  The newest row can still be forming.
+    latest = scored[-2] if len(scored) >= 2 else scored[-1]
+    latest_index = chart_candles.index(latest)
+    previous = chart_candles[max(0, latest_index - 1)]
+
+    candidate = str(latest.get("signal") or "WAIT").upper()
+    allowed = bool(latest.get("trade_allowed", False))
+    final_signal = candidate if allowed and candidate in ("CE", "PE") else "WAIT"
+    ema9 = _safe_number(latest.get("ema9"), latest.get("close"))
+    ema21 = _safe_number(latest.get("ema21"), latest.get("close"))
+    trend = "UPTREND" if ema9 > ema21 else "DOWNTREND" if ema9 < ema21 else "SIDEWAYS"
+
+    signal_data = {
+        "signal": final_signal,
+        "candidate_signal": candidate,
+        "score": int(_safe_number(latest.get("score"), 0)),
+        "min_score": int(_safe_number(latest.get("min_score"), profile.get("entry_threshold", 82))),
+        "trade_allowed": allowed,
+        "adx": _safe_number(latest.get("adx"), 0),
+        "volume_ratio": _safe_number(latest.get("volume_ratio"), 0),
+        "mtf_confirmed": trend != "SIDEWAYS",
+        "warnings": ["LIVE_REPLAY_ALIGNED_FALLBACK"],
+        "strategy": "CUSTOM_PROFILE_V1" if profile.get("profile_key") != "okai_default_82" else "TQU_ENHANCED",
+        "strategy_profile_key": profile.get("profile_key", "okai_default_82"),
+        "strategy_profile_name": profile.get("profile_name", "OKAI Default 82"),
+    }
+
+    market_data = {
+        "price": _safe_number(latest.get("close"), 0),
+        "vwap": _safe_number(latest.get("vwap"), latest.get("close")),
+        "ema9": ema9,
+        "ema21": ema21,
+        "adx": _safe_number(latest.get("adx"), 0),
+        "volume_ratio": _safe_number(latest.get("volume_ratio"), 0),
+        "vwap_fallback_used": False,
+        "supertrend_dir": str(latest.get("supertrend_dir") or "NEUTRAL"),
+        "trend": trend,
+        "mtf_confirmed": trend != "SIDEWAYS",
+        "c1_bullish": _safe_number(previous.get("close")) > _safe_number(previous.get("open")),
+        "c2_bullish": _safe_number(latest.get("close")) > _safe_number(latest.get("open")),
+        "gap_day": False,
+        "orb_high": 0.0,
+        "orb_low": 0.0,
+        "atr": _safe_number(latest.get("atr"), 0),
+        "signal": final_signal,
+        "signal_score": signal_data["score"],
+        "signal_min_score": signal_data["min_score"],
+    }
+
+    return {
+        "underlying": underlying,
+        "status": "OK",
+        "market_data": market_data,
+        "signal_data": signal_data,
+        "chart_candles": chart_candles[-390:],
+        "candle_id": str(latest.get("time")),
+        "candle_count": len(frame),
+        "data_source": source or "REPLAY_ALIGNED",
+        "data_note": " | ".join(notes)[:500],
+        "replay_aligned": True,
+    }
+
+
 def apply_live_scan_history_fallback_patch():
-    if getattr(runtime, "_okai_live_history_fallback_v3", False):
+    if getattr(runtime, "_okai_live_history_fallback_v4", False):
         return
+
+    original_summary = runtime._summary
+
+    def patched_summary(scan):
+        summary = original_summary(scan)
+        summary["candle_count"] = int(scan.get("candle_count") or 0)
+        summary["data_source"] = scan.get("data_source")
+        summary["data_note"] = scan.get("data_note")
+        summary["replay_aligned"] = bool(scan.get("replay_aligned", False))
+        return summary
 
     def patched_scan_multi(user_id, broker_name, obj, settings, profile, streak):
         scans = []
@@ -244,7 +350,7 @@ def apply_live_scan_history_fallback_patch():
                     "underlying": underlying,
                     "status": "WAITING_CANDLES",
                     "signal": "WAIT",
-                    "candidate_signal": "WAIT",
+                    "candidate_signal": f"{candle_count} CANDLES",
                     "score": 0,
                     "min_score": int(profile.get("entry_threshold", 82) or 82),
                     "trade_allowed": False,
@@ -255,8 +361,9 @@ def apply_live_scan_history_fallback_patch():
                 })
                 continue
 
+            _remember_frame(user_id, underlying, frame)
+
             try:
-                _remember_frame(user_id, underlying, frame)
                 scan = runtime._build_scan(
                     user_id,
                     underlying,
@@ -264,26 +371,46 @@ def apply_live_scan_history_fallback_patch():
                     profile,
                     streak,
                 )
+                if scan.get("status") != "OK":
+                    raise RuntimeError(f"legacy build status={scan.get('status')}")
                 scan["candle_count"] = candle_count
                 scan["data_source"] = source or "LIVE_BROKER"
                 if notes:
                     scan["data_note"] = " | ".join(notes)[:500]
                 scans.append(scan)
             except Exception as exc:
-                scans.append({
-                    "underlying": underlying,
-                    "status": "ERROR",
-                    "signal": "WAIT",
-                    "candidate_signal": "WAIT",
-                    "score": 0,
-                    "min_score": int(profile.get("entry_threshold", 82) or 82),
-                    "trade_allowed": False,
-                    "candle_count": candle_count,
-                    "data_source": source or "UNKNOWN",
-                    "error": str(exc)[:500],
-                })
+                notes.append("legacy_build_error=" + str(exc)[:180])
+                try:
+                    scans.append(
+                        _replay_aligned_scan(
+                            user_id,
+                            underlying,
+                            frame,
+                            profile,
+                            source,
+                            notes,
+                        )
+                    )
+                except Exception as replay_exc:
+                    scans.append({
+                        "underlying": underlying,
+                        "status": "ERROR",
+                        "signal": "WAIT",
+                        "candidate_signal": "REPLAY ERROR",
+                        "score": 0,
+                        "min_score": int(profile.get("entry_threshold", 82) or 82),
+                        "trade_allowed": False,
+                        "candle_count": candle_count,
+                        "data_source": source or "UNKNOWN",
+                        "error": (
+                            " | ".join(notes)
+                            + " | replay_error="
+                            + str(replay_exc)[:180]
+                        )[:500],
+                    })
 
         return scans
 
+    runtime._summary = patched_summary
     runtime._scan_multi = patched_scan_multi
-    runtime._okai_live_history_fallback_v3 = True
+    runtime._okai_live_history_fallback_v4 = True
