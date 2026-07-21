@@ -9,6 +9,7 @@ IPv4 and monitors open option positions every second for SL/target/EOD exit.
 import argparse
 import getpass
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -192,20 +193,54 @@ class AngelSession:
                     raise
                 time.sleep(1)
 
-    def place_market(self, exchange, symbol, token, transaction, quantity):
+    @staticmethod
+    def protected_limit_price(reference_price, transaction, slippage_percent):
+        reference = float(reference_price or 0)
+        if reference <= 0:
+            raise RuntimeError("Valid reference price is required for LIMIT order")
+        side = str(transaction or "").upper()
+        slippage = max(0.25, min(float(slippage_percent or 0), 10.0))
+        raw_price = (
+            reference * (1 + slippage / 100)
+            if side == "BUY"
+            else reference * (1 - slippage / 100)
+        )
+        ticks = raw_price / 0.05
+        rounded_ticks = math.ceil(ticks) if side == "BUY" else math.floor(ticks)
+        return round(max(0.05, rounded_ticks * 0.05), 2)
+
+    def place_protected_limit(
+        self,
+        exchange,
+        symbol,
+        token,
+        transaction,
+        quantity,
+        reference_price,
+        slippage_percent,
+    ):
+        side = str(transaction).upper()
+        if side not in {"BUY", "SELL"}:
+            raise RuntimeError("Transaction must be BUY or SELL")
+        limit_price = self.protected_limit_price(
+            reference_price,
+            side,
+            slippage_percent,
+        )
         params = {
             "variety": "NORMAL",
             "tradingsymbol": str(symbol),
             "symboltoken": str(token),
-            "transactiontype": str(transaction).upper(),
+            "transactiontype": side,
             "exchange": str(exchange).upper(),
-            "ordertype": "MARKET",
+            "ordertype": "LIMIT",
             "producttype": "INTRADAY",
             "duration": "DAY",
-            "price": "0",
+            "price": f"{limit_price:.2f}",
             "squareoff": "0",
             "stoploss": "0",
             "quantity": str(int(quantity)),
+            "ordertag": "OKAI_STATIC_IP"[:20],
         }
         last_error = None
         for attempt in range(2):
@@ -219,13 +254,19 @@ class AngelSession:
                     order_id = result
                 if not order_id:
                     raise RuntimeError(f"Angel order ID missing: {result}")
-                return str(order_id)
+                return {
+                    "order_id": str(order_id),
+                    "limit_price": limit_price,
+                    "reference_price": round(float(reference_price), 2),
+                    "slippage_percent": float(slippage_percent),
+                    "order_type": "LIMIT",
+                }
             except Exception as exc:
                 last_error = exc
                 self.obj = None
                 if attempt == 0:
                     time.sleep(1)
-        raise RuntimeError(f"Angel placeOrder failed: {last_error}")
+        raise RuntimeError(f"Angel LIMIT placeOrder failed: {last_error}")
 
     def confirm_order(self, order_id, fallback_price=0.0, timeout_seconds=30):
         deadline = time.time() + timeout_seconds
@@ -420,10 +461,14 @@ class GatewayRunner:
             raise RuntimeError("Invalid entry quantity")
 
         expected = float(payload.get("expected_entry_price") or 0)
-        order_id = self.angel.place_market(
-            payload["exchange"], payload["symbol"], payload["symboltoken"],
-            "BUY", quantity,
+        local_ltp = self.angel.ltp(
+            payload["exchange"], payload["symbol"], payload["symboltoken"]
         )
+        submission = self.angel.place_protected_limit(
+            payload["exchange"], payload["symbol"], payload["symboltoken"],
+            "BUY", quantity, local_ltp, 3.0,
+        )
+        order_id = submission["order_id"]
         self.remember_command(
             command["id"],
             command["action"],
@@ -431,10 +476,12 @@ class GatewayRunner:
             {
                 "broker_order_id": order_id,
                 "payload": payload,
-                "fallback_price": expected,
+                "fallback_price": local_ltp or expected,
+                "limit_price": submission["limit_price"],
+                "order_type": "LIMIT",
             },
         )
-        fill = self.angel.confirm_order(order_id, expected)
+        fill = self.angel.confirm_order(order_id, local_ltp or expected)
         if not fill.get("filled"):
             status = str(fill.get("status") or "").lower()
             if status in {"rejected", "cancelled", "canceled"}:
@@ -461,10 +508,14 @@ class GatewayRunner:
         if position["status"] == "exit_submitted" and position["exit_order_id"]:
             order_id = str(position["exit_order_id"])
         else:
-            order_id = self.angel.place_market(
-                position["exchange"], position["symbol"], position["symboltoken"],
-                "SELL", position["quantity"],
+            local_ltp = self.angel.ltp(
+                position["exchange"], position["symbol"], position["symboltoken"]
             )
+            submission = self.angel.place_protected_limit(
+                position["exchange"], position["symbol"], position["symboltoken"],
+                "SELL", position["quantity"], local_ltp, 5.0,
+            )
+            order_id = submission["order_id"]
             self.db.execute(
                 """
                 UPDATE local_positions
@@ -487,6 +538,12 @@ class GatewayRunner:
                     "fallback_price": float(
                         position["last_ltp"] or position["entry_price"]
                     ),
+                    "limit_price": (
+                        submission.get("limit_price")
+                        if "submission" in locals()
+                        else None
+                    ),
+                    "order_type": "LIMIT",
                 },
             )
 
