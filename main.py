@@ -46,6 +46,9 @@ from bot.expiry_hardlock_one_second_monitor_patch import (
 )
 from bot.hero_zero_guard_patch import apply_hero_zero_guard_patch
 from bot.manual_exit_patch import apply_manual_exit_patch
+from bot.paper_unlimited_observation_patch import (
+    apply_paper_unlimited_observation_patch,
+)
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
 import os
 
@@ -62,13 +65,14 @@ apply_structural_exit_v2_patch()
 apply_expiry_hardlock_one_second_monitor_patch()
 apply_hero_zero_guard_patch()
 apply_manual_exit_patch()
+apply_paper_unlimited_observation_patch()
 apply_backtest_live_strategy_patch()
 apply_live_frequency_portfolio_patch()
 apply_backtest_realism_costs_patch()
 apply_cost_idempotence_patch()
 apply_monthly_job_start_patch()
 
-RELEASE_VERSION = "monthly-job-start-background-task-v2"
+RELEASE_VERSION = "paper-unlimited-observation-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
@@ -259,16 +263,4 @@ def signup_page():
 def join_page():
     return FileResponse(
         os.path.join(os.path.dirname(__file__), "signup.html")
-    )
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    port = int(os.getenv("PORT", 8001))
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=False,
     )
