@@ -26,6 +26,7 @@ from backtest.live_frequency_portfolio_patch import (
     apply_live_frequency_portfolio_patch,
 )
 from backtest.realism_costs_patch import apply_backtest_realism_costs_patch
+from backtest.cost_idempotence_patch import apply_cost_idempotence_patch
 from bot.score_history_patch import apply_score_history_patch
 from bot.upstox_live_candle_patch import apply_upstox_live_candle_patch
 from bot.live_scan_history_fallback_patch import apply_live_scan_history_fallback_patch
@@ -63,8 +64,9 @@ apply_manual_exit_patch()
 apply_backtest_live_strategy_patch()
 apply_live_frequency_portfolio_patch()
 apply_backtest_realism_costs_patch()
+apply_cost_idempotence_patch()
 
-RELEASE_VERSION = "entry-exit-realism-costs-v2"
+RELEASE_VERSION = "premium-point-path-cost-idempotence-v4"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
