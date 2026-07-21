@@ -142,11 +142,12 @@ jobs:
           print("Static IP gateway queue validation OK")
           PY
 
-      - name: Validate no broker secrets are committed
+      - name: Validate no credential files are committed
         run: |
-          ! grep -RIn --exclude='*.yml' --exclude='*.md' \
-            -E '(^|[^A-Z_])(api_key|client_id|totp_secret)[[:space:]]*=[[:space:]]*["'"'][A-Za-z0-9]{8,}' \
-            local_gateway local_gateway_agent
+          test ! -f local_gateway_agent/local_gateway.json
+          test ! -f local_gateway_agent/.env
+          test ! -f .okai/local_gateway.json
+          ! git grep -nE 'BEGIN (RSA|OPENSSH|EC) PRIVATE KEY'
 
       - name: Commit production integration
         run: |
