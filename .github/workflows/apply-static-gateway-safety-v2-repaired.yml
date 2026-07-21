@@ -1,0 +1,161 @@
+name: Validate Static Gateway Safety V2 Repaired
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/personal-static-ip-gateway-v1
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r local_gateway_agent/requirements.txt
+
+      - name: Repair and apply safety patch
+        run: |
+          python scripts/repair_static_gateway_safety_patch.py
+          python -m py_compile scripts/patch_static_gateway_safety_v2.py
+          python scripts/patch_static_gateway_safety_v2.py
+
+      - name: Compile gateway code
+        run: |
+          python -m py_compile \
+            main.py bot/angel_fetcher.py strategy/routes.py \
+            local_gateway/service.py local_gateway/routes.py \
+            local_gateway_agent/okai_local_gateway.py
+          bash -n local_gateway_agent/install_termux.sh
+
+      - name: Test disarm and IP lease protection
+        env:
+          DB_PATH: /tmp/okai-gateway-safety-v2.db
+          LOCAL_GATEWAY_ADMIN_ONLY: "true"
+        run: |
+          rm -f /tmp/okai-gateway-safety-v2.db
+          python - <<'PY'
+          from database import init_db, get_db
+          from auth.utils import hash_password
+          from local_gateway.service import (
+              authenticate_gateway, ensure_local_gateway_schema,
+              heartbeat_gateway, lease_commands, pair_gateway,
+              queue_live_entry, set_gateway_armed,
+          )
+
+          init_db(); ensure_local_gateway_schema()
+          conn = get_db()
+          conn.execute(
+              "INSERT INTO users(name,email,password_hash,is_admin,subscription_status) VALUES (?,?,?,?,?)",
+              ("Ayush", "owner-safety@example.com", hash_password("secret1"), 1, "active"),
+          )
+          uid = conn.execute("SELECT id FROM users WHERE email=?", ("owner-safety@example.com",)).fetchone()["id"]
+          conn.commit(); conn.close()
+
+          token = pair_gateway(uid, "Safety Phone", "203.0.113.10")
+          gateway = authenticate_gateway(token)
+          heartbeat_gateway(gateway, "203.0.113.10", "safety-test")
+          set_gateway_armed(uid, True)
+          payload = {
+              "underlying": "NIFTY", "option_type": "CE",
+              "symbol": "NIFTY28JUL2625000CE", "symboltoken": "12345",
+              "exchange": "NFO", "quantity": 65,
+              "candle_id": "2026-07-21T11:00:00+05:30",
+              "different_index_required": True,
+          }
+          first = queue_live_entry(uid, payload, "safety-entry-1", 2, 5)
+          leased = lease_commands(gateway, 5, allow_entries=True)
+          assert first["queued"] and len(leased) == 1
+          set_gateway_armed(uid, False)
+          conn = get_db()
+          state = conn.execute("SELECT status FROM local_order_commands WHERE id=?", (leased[0]["id"],)).fetchone()["status"]
+          conn.close()
+          assert state == "cancelled", state
+
+          set_gateway_armed(uid, True)
+          payload["candle_id"] = "2026-07-21T11:01:00+05:30"
+          second = queue_live_entry(uid, payload, "safety-entry-2", 2, 5)
+          assert second["queued"]
+          assert lease_commands(gateway, 5, allow_entries=False) == []
+          allowed = lease_commands(gateway, 5, allow_entries=True)
+          assert len(allowed) == 1 and allowed[0]["id"] == second["command_id"]
+          print("Disarm and IP lease protection OK")
+          PY
+
+      - name: Test acknowledgement retry cannot duplicate execution
+        env:
+          HOME: /tmp/okai-agent-test-home
+        run: |
+          rm -rf /tmp/okai-agent-test-home && mkdir -p /tmp/okai-agent-test-home
+          python - <<'PY'
+          import json
+          from local_gateway_agent.okai_local_gateway import GatewayRunner
+
+          class Row(dict):
+              def __getitem__(self, key):
+                  return dict.__getitem__(self, key)
+
+          class FakeRunner:
+              process_command = GatewayRunner.process_command
+              def __init__(self):
+                  self.cache = {}; self.execution_count = 0; self.ack_count = 0
+              def processed(self, command_id):
+                  row = self.cache.get(command_id)
+                  return Row(row) if row else None
+              def remember_command(self, command_id, action, status, result):
+                  self.cache[command_id] = {"status": status, "result_json": json.dumps(result or {})}
+              def execute_entry(self, command):
+                  self.execution_count += 1
+                  return {"broker_order_id": "ANGEL-ONE", "entry_price": 100}
+              def execute_exit(self, *args, **kwargs):
+                  raise AssertionError("exit not expected")
+              def acknowledge(self, command, success, result=None, error=""):
+                  self.ack_count += 1
+                  return False
+              def reconcile_submitted(self, command, cached):
+                  raise AssertionError("submitted not expected")
+
+          runner = FakeRunner()
+          command = {"id": 501, "trade_id": 91, "action": "PLACE_ENTRY", "payload": {"trade_id": 91}}
+          runner.process_command(command)
+          runner.process_command(command)
+          assert runner.execution_count == 1
+          assert runner.cache[501]["status"] == "succeeded"
+          assert runner.ack_count == 2
+          print("Duplicate execution prevention OK")
+          PY
+
+      - name: Verify reconciliation and fresh permission checks
+        run: |
+          grep -q 'def reconcile_submitted' local_gateway_agent/okai_local_gateway.py
+          grep -q 'def monitor_pending_exits' local_gateway_agent/okai_local_gateway.py
+          grep -q 'def fresh_entry_permission' local_gateway_agent/okai_local_gateway.py
+          grep -q 'allow_entries=allow_entries' local_gateway/routes.py
+          grep -q "status IN ('pending','leased')" local_gateway/service.py
+
+      - name: Commit hardened gateway
+        run: |
+          rm -f scripts/patch_static_gateway_safety_v2.py
+          rm -f scripts/repair_static_gateway_safety_patch.py
+          rm -f .github/workflows/apply-static-gateway-safety-v2.yml
+          rm -f .github/workflows/apply-static-gateway-safety-v2-repaired.yml
+          rm -f .github/workflows/diagnose-static-gateway-safety-v2.yml
+          rm -f diagnostics/static-gateway-safety-v2-error.txt
+          git config user.name "okai-static-ip-gateway-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "Harden static IP gateway against duplicate and disarm races"
+          git push origin HEAD:agent/personal-static-ip-gateway-v1
