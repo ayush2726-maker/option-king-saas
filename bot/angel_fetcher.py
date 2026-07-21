@@ -632,9 +632,13 @@ def calculate_indicators(df):
         df["VOL_MA"] > 0
     )
 
+    df["VOLUME_AVAILABLE"] = cumulative_volume > 0
     df["VOL_RATIO"] = (
         safe_volume / valid_volume_ma
-    ).fillna(0.0)
+    ).where(
+        df["VOLUME_AVAILABLE"],
+        1.0,
+    ).fillna(1.0)
 
     df["UPPER"] = df["TP"] + (2.0 * df["ATR"])
     df["LOWER"] = df["TP"] - (2.0 * df["ATR"])
