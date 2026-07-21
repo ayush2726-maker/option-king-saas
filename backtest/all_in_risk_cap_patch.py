@@ -1,6 +1,6 @@
 """All-in refinement for the backtest 1% risk cap.
 
-The base risk patch caps the premium move.  This refinement also includes
+The base risk patch caps the premium move. This refinement also includes
 conservative slippage, brokerage and statutory charges when deciding how many
 lots fit inside 1% of current equity.
 """
@@ -9,8 +9,11 @@ from backtest import cost_safe_breakeven_risk_patch as base
 from backtest.realism_costs_patch import calculate_option_round_trip_costs
 
 
+_ORIGINAL_RISK_CAPPED_TRADE = base._risk_capped_trade
+
+
 def _all_in_risk_capped_trade(trade, result, broker_name, equity):
-    output = base._risk_capped_trade(
+    output = _ORIGINAL_RISK_CAPPED_TRADE(
         trade,
         result,
         broker_name,
@@ -21,12 +24,18 @@ def _all_in_risk_capped_trade(trade, result, broker_name, equity):
 
     instrument = str(output.get("instrument") or "NIFTY").upper()
     lot_size = max(1, base._i(output.get("lot_size"), 1))
-    entry = max(base.TICK_SIZE, base._f(output.get("entry_price"), base.TICK_SIZE))
+    entry = max(
+        base.TICK_SIZE,
+        base._f(output.get("entry_price"), base.TICK_SIZE),
+    )
     hard_sl = max(
         base.TICK_SIZE,
         base._f(output.get("initial_sl_price"), entry),
     )
-    max_loss = max(0.0, base._f(equity) * base.MAX_EQUITY_RISK_PERCENT / 100.0)
+    max_loss = max(
+        0.0,
+        base._f(equity) * base.MAX_EQUITY_RISK_PERCENT / 100.0,
+    )
 
     one_lot = calculate_option_round_trip_costs(
         broker_name,
