@@ -1,8 +1,10 @@
 import ipaddress
+import json
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from auth.routes import get_current_user
+from database import get_db
 from local_gateway.service import (
     authenticate_gateway,
     complete_command,
@@ -39,17 +41,11 @@ def _valid_ipv4(value):
 
 
 def _observed_client_ip(request: Request):
-    """Return the real public IPv4 added by Railway's trusted edge proxy.
-
-    request.client.host is the Railway internal proxy address (often 100.64/10),
-    not the phone's public static IP. Railway documents X-Real-IP as the original
-    remote-client address for public HTTP traffic.
-    """
+    """Return the real public IPv4 added by Railway's trusted edge proxy."""
     railway_ip = _valid_ipv4(request.headers.get("x-real-ip"))
     if railway_ip:
         return railway_ip
 
-    # Defensive fallbacks for other trusted reverse proxies/custom domains.
     forwarded = str(request.headers.get("x-forwarded-for") or "")
     for value in forwarded.split(","):
         candidate = _valid_ipv4(value)
@@ -57,6 +53,56 @@ def _observed_client_ip(request: Request):
             return candidate
 
     return _valid_ipv4(request.client.host if request.client else "")
+
+
+def _persist_risk_heartbeat(gateway, body):
+    if str(body.get("event") or "").upper() != "POSITION_HEARTBEAT":
+        return
+    trade_id = int(body.get("trade_id") or 0)
+    if trade_id <= 0:
+        return
+
+    allowed = (
+        "ltp",
+        "peak_ltp",
+        "active_sl",
+        "initial_sl",
+        "cost_safe_breakeven",
+        "trail_stage",
+        "peak_r",
+        "risk_engine",
+        "local_status",
+    )
+    conn = get_db()
+    try:
+        trade = conn.execute(
+            "SELECT metadata_json FROM trades WHERE id=? AND user_id=?",
+            (trade_id, gateway["user_id"]),
+        ).fetchone()
+        if not trade:
+            return
+        try:
+            metadata = json.loads(trade["metadata_json"] or "{}")
+            if not isinstance(metadata, dict):
+                metadata = {}
+        except Exception:
+            metadata = {}
+        gateway_position = dict(metadata.get("gateway_position") or {})
+        for key in allowed:
+            if key in body:
+                gateway_position[key] = body.get(key)
+        metadata["gateway_position"] = gateway_position
+        conn.execute(
+            "UPDATE trades SET metadata_json=?, sl_price=COALESCE(?, sl_price) WHERE id=?",
+            (
+                json.dumps(metadata, separators=(",", ":")),
+                float(body.get("active_sl") or 0) or None,
+                trade_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @router.post("/pair")
@@ -202,7 +248,9 @@ def gateway_command_result(
 @router.post("/position-event")
 def gateway_position_event(body: dict, x_gateway_token: str = Header(None)):
     gateway = authenticate_gateway(_gateway_token(x_gateway_token))
-    return {"success": True, **record_position_event(gateway, body)}
+    result = record_position_event(gateway, body)
+    _persist_risk_heartbeat(gateway, body)
+    return {"success": True, **result}
 
 
 @router.post("/exit-now")
