@@ -548,6 +548,12 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
                 "volume_ratio": float(
                     last["VOL_RATIO"]
                 ),
+
+                "volume_available": bool(
+
+                    last.get("VOLUME_AVAILABLE", True)
+
+                ),
                 "vwap_fallback_used": bool(
                     last["VWAP_FALLBACK_USED"]
                 ),
@@ -791,6 +797,12 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             "ema21": float(last["EMA21"]),
             "adx": float(last["ADX"]),
             "volume_ratio": float(last["VOL_RATIO"]),
+
+            "volume_available": bool(
+
+                last.get("VOLUME_AVAILABLE", True)
+
+            ),
             "vwap_fallback_used": bool(
                 last["VWAP_FALLBACK_USED"]
             ),
@@ -855,6 +867,9 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
             "volume_ratio": round(
                 signal_data.get("volume_ratio", 0),
                 2,
+            ),
+            "volume_available": bool(
+                signal_data.get("volume_available", True)
             ),
             "volume_bonus": signal_data.get("volume_bonus", 0),
             "mtf_bonus": signal_data.get("mtf_bonus", 0),
@@ -979,6 +994,17 @@ def run_realistic_day_backtest(broker_name, obj, instrument, date_str, capital, 
         "debug_max_score": max(_score_log) if _score_log else None,
         "debug_avg_score": round(sum(_score_log)/len(_score_log), 1) if _score_log else None,
         "debug_score_count": len(_score_log),
+        "debug_candle_count": len(df),
+        "debug_volume_available": bool(
+            full_indicator_df["VOLUME_AVAILABLE"].any()
+            if "VOLUME_AVAILABLE" in full_indicator_df.columns
+            else True
+        ),
+        "debug_volume_neutral_count": sum(
+            1
+            for row in _score_detail_log
+            if not row.get("volume_available", True)
+        ),
         "debug_scores_over_60": sum(
             1 for s in _score_log if s >= 60
         ),
@@ -1556,6 +1582,14 @@ def _okai_run_auto_index_backtest(
         selected.append(trade)
         busy_until = exit_time
 
+    selected_counts = {
+        symbol: sum(
+            1 for trade in selected
+            if trade.get("instrument") == symbol
+        )
+        for symbol in _OKAI_AUTO_INSTRUMENTS
+    }
+
     raw_auto = {
         "success": True,
         "instrument": "AUTO",
@@ -1669,6 +1703,22 @@ def _okai_run_auto_index_backtest(
                     if isinstance(result, dict)
                     else None
                 ),
+                "candles": (
+                    result.get("debug_candle_count", 0)
+                    if isinstance(result, dict)
+                    else 0
+                ),
+                "volume_available": (
+                    result.get("debug_volume_available")
+                    if isinstance(result, dict)
+                    else None
+                ),
+                "volume_neutral_count": (
+                    result.get("debug_volume_neutral_count", 0)
+                    if isinstance(result, dict)
+                    else 0
+                ),
+                "selected_trades": selected_counts.get(instrument, 0),
             }
             for instrument, result
             in single_results.items()
@@ -3011,6 +3061,12 @@ def _okai_run_hero_zero_single(
             "adx": float(last["ADX"]),
             "volume_ratio": float(
                 last["VOL_RATIO"]
+            ),
+
+            "volume_available": bool(
+
+                last.get("VOLUME_AVAILABLE", True)
+
             ),
             "vwap_fallback_used": bool(
                 last["VWAP_FALLBACK_USED"]

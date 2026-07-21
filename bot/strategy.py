@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 WEIGHTED_MIN_ENTRY_SCORE = 82      # NEVER CHANGE
 ADX_THRESHOLD = 25.0
 VOLUME_RATIO_THRESHOLD = 1.2
+VOLUME_NEUTRAL_BONUS = 7  # half-weight when index volume is unavailable
 SIDEWAYS_THRESHOLD = 70
 LOSS_COOLDOWN_SECONDS = 15 * 60   # 15 min
 HERO_CAPITAL_CAP = 2000
@@ -25,6 +26,7 @@ def calculate_tqu_score(
     mtf_confirmed: bool,
     is_sideways: bool,
     gap_day: bool = False,
+    volume_available: bool = True,
 ) -> dict:
     """
     Trade Quality Upgrade (TQU) system
@@ -51,8 +53,14 @@ def calculate_tqu_score(
         else:
             warnings.append(f"ADX_WEAK:{adx:.1f}<{ADX_THRESHOLD}")
 
-    # Volume confirmation
-    if volume_ratio > 0:
+    # Volume confirmation. NSE index candles may legitimately have no
+    # volume. Treat missing volume as neutral half-weight rather than a hard
+    # scoring disadvantage; never invent a high volume ratio.
+    if not volume_available:
+        volume_bonus = VOLUME_NEUTRAL_BONUS
+        score += volume_bonus
+        warnings.append("VOLUME_UNAVAILABLE_NEUTRAL")
+    elif volume_ratio > 0:
         if volume_ratio >= VOLUME_RATIO_THRESHOLD:
             volume_bonus = min(15, int((volume_ratio - 1.0) * 10))
             score += volume_bonus
@@ -78,6 +86,7 @@ def calculate_tqu_score(
         "base_score": int(base_score),
         "adx_bonus": adx_bonus,
         "volume_bonus": volume_bonus,
+        "volume_available": bool(volume_available),
         "mtf_bonus": mtf_bonus,
         "regime_score": max(0, regime_score),
         "warnings": warnings,
@@ -319,6 +328,12 @@ def _custom_profile_signal(
     volume_ratio = float(
         market_data.get("volume_ratio", 0)
     )
+    volume_available = bool(
+        market_data.get(
+            "volume_available",
+            volume_ratio > 0,
+        )
+    )
     supertrend = str(
         market_data.get(
             "supertrend_dir",
@@ -465,7 +480,14 @@ def _custom_profile_signal(
                 1.2,
             )
         )
-        if (
+        if not volume_available:
+            volume_bonus = max(
+                0,
+                int(round(float(weights.get("volume", 0)) * 0.5)),
+            )
+            score += volume_bonus
+            warnings.append("VOLUME_UNAVAILABLE_NEUTRAL")
+        elif (
             volume_ratio > 0
             and volume_ratio >= volume_threshold
         ):
@@ -606,6 +628,7 @@ def _custom_profile_signal(
         "adx": adx,
         "adx_bonus": adx_bonus,
         "volume_ratio": volume_ratio,
+        "volume_available": bool(volume_available),
         "volume_bonus": volume_bonus,
         "mtf_confirmed": mtf_ok,
         "mtf_bonus": mtf_bonus,
@@ -711,6 +734,12 @@ def get_full_signal(
     ema21        = float(market_data.get("ema21", price))
     adx          = float(market_data.get("adx", 0))
     volume_ratio = float(market_data.get("volume_ratio", 1.0))
+    volume_available = bool(
+        market_data.get(
+            "volume_available",
+            volume_ratio > 0,
+        )
+    )
     supertrend   = str(market_data.get("supertrend_dir", "NEUTRAL"))
     trend        = str(market_data.get("trend", "SIDEWAYS"))
     mtf_ok       = bool(market_data.get("mtf_confirmed", False))
@@ -742,6 +771,7 @@ def get_full_signal(
     tqu = calculate_tqu_score(
         base["base_score"], adx, volume_ratio,
         mtf_ok, is_sideways, gap_day,
+        volume_available=volume_available,
     )
 
     # Step 3: Anti-chase gate
@@ -818,6 +848,7 @@ def get_full_signal(
         "adx": adx,
         "adx_bonus": tqu["adx_bonus"],
         "volume_ratio": volume_ratio,
+        "volume_available": bool(volume_available),
         "volume_bonus": tqu["volume_bonus"],
         "mtf_confirmed": mtf_ok,
         "mtf_bonus": tqu["mtf_bonus"],

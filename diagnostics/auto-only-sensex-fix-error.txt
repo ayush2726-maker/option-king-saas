@@ -1,4 +1,0 @@
-Traceback (most recent call last):
-  File "/home/runner/work/option-king-saas/option-king-saas/scripts/patch_auto_only_sensex_v1.py", line 243, in <module>
-    raise RuntimeError(f"expected at least 3 market_data volume blocks, found {count}")
-RuntimeError: expected at least 3 market_data volume blocks, found 2
