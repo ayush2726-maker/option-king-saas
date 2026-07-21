@@ -3,14 +3,24 @@
 AUTO runs through both the public run_realistic_day_backtest wrapper and the
 AUTO portfolio wrapper. Without this guard, slippage/brokerage/statutory charges
 can be deducted twice from the same already-costed result.
+
+The same startup hook also activates the Angel historical index-token patch
+after the live-frequency backtest wrapper is installed.
 """
 
 from copy import deepcopy
 
 from backtest import realism_costs_patch as costs
+from backtest.angel_historical_index_patch import (
+    apply_angel_historical_index_patch,
+)
 
 
 def apply_cost_idempotence_patch():
+    # main.py calls this after apply_live_frequency_portfolio_patch(), so this
+    # is a safe place to replace only the historical candle helper.
+    apply_angel_historical_index_patch()
+
     if getattr(costs, "_okai_cost_idempotence_v1", False):
         return
 
