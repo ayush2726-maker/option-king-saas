@@ -76,7 +76,7 @@ def _persist_risk_heartbeat(gateway, body):
     conn = get_db()
     try:
         trade = conn.execute(
-            "SELECT metadata_json FROM trades WHERE id=? AND user_id=?",
+            "SELECT metadata_json, sl_price FROM trades WHERE id=? AND user_id=?",
             (trade_id, gateway["user_id"]),
         ).fetchone()
         if not trade:
@@ -88,6 +88,8 @@ def _persist_risk_heartbeat(gateway, body):
         except Exception:
             metadata = {}
         gateway_position = dict(metadata.get("gateway_position") or {})
+        if not gateway_position.get("initial_sl"):
+            gateway_position["initial_sl"] = body.get("initial_sl") or trade["sl_price"]
         for key in allowed:
             if key in body:
                 gateway_position[key] = body.get(key)
