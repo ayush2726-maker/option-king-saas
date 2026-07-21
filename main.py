@@ -26,7 +26,7 @@ apply_score_history_patch()
 apply_upstox_live_candle_patch()
 apply_live_scan_history_fallback_patch()
 
-RELEASE_VERSION = "strict-index-score-live-candles-v3"
+RELEASE_VERSION = "replay-aligned-auto-score-v4"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
