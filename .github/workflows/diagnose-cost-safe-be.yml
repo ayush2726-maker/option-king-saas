@@ -1,0 +1,44 @@
+name: Diagnose Cost-Safe BE Test
+
+on:
+  push:
+    branches:
+      - fix/cost-safe-breakeven-risk-cap-v1
+    paths:
+      - ".github/workflows/diagnose-cost-safe-be.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/cost-safe-breakeven-risk-cap-v1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Save full pytest diagnostic
+        shell: bash
+        run: |
+          mkdir -p diagnostics
+          set +e
+          pytest -vv tests/test_cost_safe_breakeven_risk.py > diagnostics/cost-safe-be-test.txt 2>&1
+          status=$?
+          set -e
+          echo "EXIT_STATUS=$status" >> diagnostics/cost-safe-be-test.txt
+          git config user.name "okai-test-diagnostic"
+          git config user.email "actions@users.noreply.github.com"
+          git add diagnostics/cost-safe-be-test.txt
+          git commit -m "Save cost-safe BE test diagnostic" || true
+          git push origin HEAD:fix/cost-safe-breakeven-risk-cap-v1
