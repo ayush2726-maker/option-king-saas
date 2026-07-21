@@ -121,7 +121,7 @@ def _runtime_evaluate_exit_v2(trade, ltp, market_data, candle_id):
 
     structure = structural_flip(runtime._v(trade, "side", ""), market_data)
 
-    # Do not exit on one noisy indicator.  If two indicators deteriorate while
+    # Do not exit on one noisy indicator. If two indicators deteriorate while
     # the option is profitable, prevent a winner from becoming a loser.
     if structure["opposite_count"] >= 2 and ltp >= entry:
         tightened = max(_f(trail["sl_price"]), entry)
@@ -182,6 +182,11 @@ def _patch_backtest_one_candle_exit():
         )
         if changed != source:
             exec(compile(changed, backtest_routes.__file__, "exec"), backtest_routes.__dict__)
+            # AUTO portfolio calls the captured single-index function directly.
+            # Repoint it so Daily, AUTO and Monthly all use the same exit engine.
+            backtest_routes._OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST = (
+                backtest_routes.run_realistic_day_backtest
+            )
             return True
     except Exception:
         pass
