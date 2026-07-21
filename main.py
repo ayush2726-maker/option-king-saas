@@ -18,6 +18,10 @@ from strategy.profile_routes import router as strategy_profile_router
 from bot.market_routes import router as market_router
 from bot.ai_routes import router as ai_router
 from backtest.routes import router as backtest_router
+from backtest.live_strategy_consistency_patch import (
+    BacktestActiveStrategyMiddleware,
+    apply_backtest_live_strategy_patch,
+)
 from bot.score_history_patch import apply_score_history_patch
 from bot.upstox_live_candle_patch import apply_upstox_live_candle_patch
 from bot.live_scan_history_fallback_patch import apply_live_scan_history_fallback_patch
@@ -48,8 +52,9 @@ apply_mandatory_trend_structure_patch()
 apply_expiry_hardlock_one_second_monitor_patch()
 apply_hero_zero_guard_patch()
 apply_manual_exit_patch()
+apply_backtest_live_strategy_patch()
 
-RELEASE_VERSION = "hero-zero-manual-exit-v1"
+RELEASE_VERSION = "live-backtest-strategy-parity-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
@@ -59,6 +64,7 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+app.add_middleware(BacktestActiveStrategyMiddleware)
 app.add_middleware(StrictSignalHistoryMiddleware)
 app.add_middleware(SafeRegistrationEmailVerificationMiddleware)
 app.add_middleware(
