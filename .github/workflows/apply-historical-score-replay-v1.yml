@@ -1,0 +1,113 @@
+name: Validate Historical Score Replay Backend V1
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/historical-score-replay-v1
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        run: pip install -r requirements.txt
+
+      - name: Apply score replay patch when needed
+        run: |
+          if grep -q 'HISTORICAL_REPLAY' bot/routes.py; then
+            echo 'Historical score replay already applied'
+          else
+            python scripts/patch_historical_score_replay_v1.py
+          fi
+
+      - name: Compile and validate historical scores
+        env:
+          DB_PATH: /tmp/okai-score-replay-test.db
+        run: |
+          python -m py_compile bot/routes.py bot/strategy.py strategy/profile_engine.py
+          rm -f /tmp/okai-score-replay-test.db
+          python - <<'PY'
+          from datetime import datetime, timedelta, timezone
+
+          from database import init_db, get_db
+          from bot.routes import (
+              _historical_indicator_candles,
+              ensure_tables,
+              log_signal_snapshot,
+          )
+
+          ist = timezone(timedelta(hours=5, minutes=30))
+          start = datetime(2026, 7, 20, 9, 15, tzinfo=ist)
+          rows = []
+          price = 24500.0
+          for index in range(72):
+              timestamp = start + timedelta(minutes=5 * index)
+              drift = 4.0 if index < 45 else -2.0
+              open_price = price
+              close_price = price + drift
+              high = max(open_price, close_price) + 2.0
+              low = min(open_price, close_price) - 2.0
+              volume = 1000 + index * 25
+              rows.append([
+                  timestamp.isoformat(),
+                  open_price,
+                  high,
+                  low,
+                  close_price,
+                  volume,
+              ])
+              price = close_price
+
+          candles = _historical_indicator_candles(rows)
+          score_candles = [c for c in candles if c.get("score") is not None]
+          assert len(candles) >= 60
+          assert len(score_candles) >= 35
+          assert all(0 <= int(c["score"]) <= 100 for c in score_candles)
+          assert all(c.get("score_source") == "HISTORICAL_REPLAY" for c in score_candles)
+          assert any(c.get("signal") in {"CE", "PE", "WAIT"} for c in score_candles)
+
+          init_db()
+          conn = get_db()
+          ensure_tables(conn)
+          state = {
+              "updated_at": "2026-07-20T10:15:00+00:00",
+              "scan_results": [
+                  {"underlying": "NIFTY", "price": 24550, "score": 84, "candidate_signal": "CE", "adx": 28, "volume_ratio": 1.3},
+                  {"underlying": "BANKNIFTY", "price": 57900, "score": 77, "candidate_signal": "PE", "adx": 24, "volume_ratio": 1.1},
+                  {"underlying": "SENSEX", "price": 82500, "score": 69, "candidate_signal": "WAIT", "adx": 20, "volume_ratio": 0.9},
+              ],
+          }
+          log_signal_snapshot(conn, 1, state)
+          log_signal_snapshot(conn, 1, state)
+          saved = conn.execute(
+              "SELECT instrument, score FROM signal_history WHERE user_id=1 ORDER BY instrument"
+          ).fetchall()
+          conn.close()
+          assert len(saved) == 3
+          assert {row["instrument"] for row in saved} == {"NIFTY", "BANKNIFTY", "SENSEX"}
+          assert {int(row["score"]) for row in saved} == {84, 77, 69}
+          print("Historical score replay backend validation OK")
+          PY
+
+      - name: Commit production backend patch
+        run: |
+          rm -f scripts/patch_historical_score_replay_v1.py
+          rm -f .github/workflows/apply-historical-score-replay-v1.yml
+          git config user.name "okai-score-replay-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "Add historical score replay and per-index score history"
+          git push origin HEAD:agent/historical-score-replay-v1
