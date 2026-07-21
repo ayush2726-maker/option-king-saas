@@ -2,7 +2,8 @@
 
 The base risk patch caps the premium move. This refinement also includes
 conservative slippage, brokerage and statutory charges when deciding how many
-lots fit inside 1% of current equity.
+lots fit inside 1% of current equity. A hard stop always executes before a
+later reversal or day-end exit that is modeled below that stop.
 """
 
 from backtest import cost_safe_breakeven_risk_patch as base
@@ -36,6 +37,25 @@ def _all_in_risk_capped_trade(trade, result, broker_name, equity):
         0.0,
         base._f(equity) * base.MAX_EQUITY_RISK_PERCENT / 100.0,
     )
+
+    modeled_exit = max(
+        base.TICK_SIZE,
+        base._f(output.get("exit_price"), base.TICK_SIZE),
+    )
+    if modeled_exit + 1e-9 < hard_sl:
+        output["original_exit_price_before_hard_stop"] = round(
+            modeled_exit,
+            2,
+        )
+        output["original_reason_before_hard_stop"] = output.get(
+            "reason"
+        )
+        output["exit_price"] = round(hard_sl, 2)
+        output["reason"] = "HARD_RISK_CAP_SL"
+        output["hard_stop_precedence_applied"] = True
+        output["stop_execution_model"] = (
+            "HARD_STOP_PRECEDES_REVERSAL_OR_EOD"
+        )
 
     one_lot = calculate_option_round_trip_costs(
         broker_name,
@@ -111,6 +131,7 @@ def _all_in_risk_capped_trade(trade, result, broker_name, equity):
         "max_loss_rupees": round(max_loss, 2),
         "risk_cap_applied": bool(
             output.get("risk_cap_applied")
+            or output.get("hard_stop_precedence_applied")
             or qty < base._i(output.get("qty_before_risk_cap"), qty)
         ),
         "cost_safe_breakeven_price": true_be["price"],
