@@ -10,10 +10,7 @@ This wrapper keeps the battle-tested gateway command/Angel order flow and adds:
 - local SQLite migration, so open-position trail state survives restarts.
 """
 
-import argparse
-import json
 import math
-import sys
 from datetime import datetime
 
 import okai_local_gateway as base
@@ -21,9 +18,9 @@ import okai_local_gateway as base
 
 RISK_ENGINE_VERSION = "1.1.0-RISK-V2"
 
-# Conservative current Angel One equity-option charge model. Rates are decimals.
-# Brokerage is charged per executed order. Over-estimation is intentional because
-# the first lock must remain net-profitable after actual contract-note charges.
+# Conservative Angel One equity-option charge model. Rates are decimals.
+# Brokerage is charged per executed order. Slight over-estimation is intentional:
+# the first lock must remain net-profitable after the actual contract-note costs.
 BROKERAGE_PER_ORDER = 20.0
 NSE_OPTION_TRANSACTION_RATE = 0.000355299
 BSE_SENSEX_OPTION_TRANSACTION_RATE = 0.000325
@@ -97,6 +94,7 @@ def dynamic_profit_lock(entry_price, initial_sl, peak_ltp, cost_safe_be):
 
 
 _original_state_db = base.state_db
+_original_command_doctor = base.command_doctor
 
 
 def migrated_state_db():
@@ -165,7 +163,7 @@ class RiskV2GatewayRunner(base.GatewayRunner):
                 payload["exchange"], payload["symbol"], payload["symboltoken"]
             )
 
-        # Keep the ATR-derived server stop. Only fall back when the payload is bad.
+        # Keep the ATR-derived server stop. Only fall back when payload is invalid.
         sl_price = float(payload.get("sl_price") or 0)
         if sl_price <= 0 or sl_price >= entry_price:
             sl_percent = max(1.0, float(payload.get("sl_percent") or 12))
@@ -278,7 +276,7 @@ class RiskV2GatewayRunner(base.GatewayRunner):
 
 
 def command_doctor_v2():
-    base.command_doctor()
+    _original_command_doctor()
     conn = migrated_state_db()
     conn.close()
     print("=== LOCAL RISK ENGINE CHECK ===")
