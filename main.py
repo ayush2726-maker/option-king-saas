@@ -37,7 +37,7 @@ apply_fresh_entry_guard_patch()
 apply_expiry_entry_diagnostics_patch()
 apply_feed_safety_consistency_patch()
 
-RELEASE_VERSION = "feed-safety-consistency-v1"
+RELEASE_VERSION = "core-confirmation-consistency-v2"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
