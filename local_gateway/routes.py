@@ -1,3 +1,5 @@
+import ipaddress
+
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from auth.routes import get_current_user
@@ -23,6 +25,38 @@ def _gateway_token(value):
     if not token:
         raise HTTPException(status_code=401, detail="Missing X-Gateway-Token")
     return token
+
+
+def _valid_ipv4(value):
+    candidate = str(value or "").strip()
+    if not candidate:
+        return ""
+    try:
+        parsed = ipaddress.ip_address(candidate)
+    except ValueError:
+        return ""
+    return str(parsed) if parsed.version == 4 else ""
+
+
+def _observed_client_ip(request: Request):
+    """Return the real public IPv4 added by Railway's trusted edge proxy.
+
+    request.client.host is the Railway internal proxy address (often 100.64/10),
+    not the phone's public static IP. Railway documents X-Real-IP as the original
+    remote-client address for public HTTP traffic.
+    """
+    railway_ip = _valid_ipv4(request.headers.get("x-real-ip"))
+    if railway_ip:
+        return railway_ip
+
+    # Defensive fallbacks for other trusted reverse proxies/custom domains.
+    forwarded = str(request.headers.get("x-forwarded-for") or "")
+    for value in forwarded.split(","):
+        candidate = _valid_ipv4(value)
+        if candidate:
+            return candidate
+
+    return _valid_ipv4(request.client.host if request.client else "")
 
 
 @router.post("/pair")
@@ -104,7 +138,7 @@ def gateway_heartbeat(
     x_gateway_token: str = Header(None),
 ):
     gateway = authenticate_gateway(_gateway_token(x_gateway_token))
-    observed_ip = request.client.host if request.client else ""
+    observed_ip = _observed_client_ip(request)
     status = heartbeat_gateway(
         gateway,
         observed_ip,
@@ -120,7 +154,7 @@ def gateway_poll(
     x_gateway_token: str = Header(None),
 ):
     gateway = authenticate_gateway(_gateway_token(x_gateway_token))
-    observed_ip = request.client.host if request.client else ""
+    observed_ip = _observed_client_ip(request)
     heartbeat = heartbeat_gateway(gateway, observed_ip, "poll")
     expected_ip = str(heartbeat.get("expected_static_ip") or "").strip()
     ip_allowed = (
