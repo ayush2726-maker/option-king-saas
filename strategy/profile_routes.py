@@ -30,6 +30,64 @@ def _error(exc):
     )
 
 
+def _is_admin(user):
+    try:
+        return bool(user.get("is_admin"))
+    except Exception:
+        try:
+            return bool(user["is_admin"])
+        except Exception:
+            return False
+
+
+def _ensure_admin_editable_active(user, profiles):
+    """Keep the protected default intact while making owner controls editable.
+
+    StrategyBuilder intentionally disables a locked profile. For an admin whose
+    active profile is still the protected OKAI default, create (or reuse) a
+    normal custom copy with identical settings and activate that copy. This is
+    safe because the score/risk configuration is unchanged; only editability
+    changes.
+    """
+    if not _is_admin(user):
+        return profiles, False
+
+    active = next(
+        (profile for profile in profiles if profile.get("active")),
+        None,
+    )
+    if not active or not active.get("locked"):
+        return profiles, False
+
+    editable = next(
+        (
+            profile
+            for profile in profiles
+            if not profile.get("locked")
+            and str(profile.get("name") or "").startswith("OKAI Editable")
+        ),
+        None,
+    )
+    if editable is None:
+        editable = next(
+            (profile for profile in profiles if not profile.get("locked")),
+            None,
+        )
+
+    if editable is None:
+        editable = duplicate_strategy_profile(
+            user["id"],
+            active["profile_key"],
+            "OKAI Editable 82",
+        )
+
+    activate_strategy_profile(
+        user["id"],
+        editable["profile_key"],
+    )
+    return list_strategy_profiles(user["id"]), True
+
+
 @router.get("")
 def get_profiles(
     authorization: str = Header(None),
@@ -40,6 +98,18 @@ def get_profiles(
     profiles = list_strategy_profiles(
         user["id"]
     )
+    editable_created = False
+
+    try:
+        profiles, editable_created = _ensure_admin_editable_active(
+            user,
+            profiles,
+        )
+    except Exception:
+        # Profile listing must remain available even if the one-time editable
+        # migration cannot run. The protected default remains safe.
+        editable_created = False
+
     active = next(
         (
             profile
@@ -55,7 +125,13 @@ def get_profiles(
         "active_profile": active,
         "activation_mode": "paper",
         "live_activation_available": False,
-        "version": 1,
+        "admin_editable_ready": bool(
+            _is_admin(user)
+            and active
+            and not active.get("locked")
+        ),
+        "editable_profile_created": editable_created,
+        "version": 2,
     }
 
 
