@@ -38,12 +38,16 @@ def _runtime_capital_size(capital_base, slot, premium, lot_size):
     one_lot_cost = price * lot
     lots = int(math.floor(budget / one_lot_cost)) if one_lot_cost > 0 else 0
     qty = lots * lot
+    capital_used = round(price * qty, 2)
     return {
         "lot_size": lot,
         "lots": lots,
         "qty": qty,
         "slot_budget": round(budget, 2),
-        "capital_used": round(price * qty, 2),
+        "usable_capital": round(budget, 2),
+        "one_lot_cost": round(one_lot_cost, 2),
+        "capital_used": capital_used,
+        "capital_left_in_slot": round(max(0.0, budget - capital_used), 2),
         "allocation_percent": round(allocation * 100.0, 2),
         "risk_cap_applied": False,
         "risk_sizing_mode": "CAPITAL_BASED_ALLOCATION",
@@ -69,12 +73,19 @@ def _backtest_capital_size(capital, premium, lot_size, allocation):
         "allocation": allocation_value,
         "allocation_percent": round(allocation_value * 100.0, 2),
         "allocated_capital": round(budget, 2),
+        "usable_capital": round(budget, 2),
+        "one_lot_cost": round(one_lot_cost, 2),
         "capital_used": capital_used,
         "used_capital": capital_used,
+        "capital_left": round(max(0.0, budget - capital_used), 2),
         "capital_utilization_percent": round(
             capital_used / max(0.01, capital_value) * 100.0,
             2,
         ),
+        "slot_utilization_percent": round(
+            capital_used / max(0.01, budget) * 100.0,
+            2,
+        ) if budget > 0 else 0.0,
         "affordable": lots >= 1,
         "risk_cap_applied": False,
         "quantity_risk_cap_enabled": False,
