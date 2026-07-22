@@ -25,6 +25,9 @@ from backtest.live_strategy_consistency_patch import (
 from backtest.live_frequency_portfolio_patch import (
     apply_live_frequency_portfolio_patch,
 )
+from backtest.post_loss_reentry_cooldown_patch import (
+    apply_backtest_post_loss_reentry_cooldown_patch,
+)
 from backtest.realism_costs_patch import apply_backtest_realism_costs_patch
 from backtest.cost_idempotence_patch import apply_cost_idempotence_patch
 from backtest.monthly_job_start_patch import apply_monthly_job_start_patch
@@ -46,6 +49,9 @@ from bot.anti_chase_consistency_v3_patch import (
 )
 from bot.mandatory_trend_structure_patch import apply_mandatory_trend_structure_patch
 from bot.entry_quality_v2_patch import apply_entry_quality_v2_patch
+from bot.entry_timing_calibration_patch import (
+    apply_entry_timing_calibration_patch,
+)
 from bot.structural_exit_v2_patch import apply_structural_exit_v2_patch
 from bot.expiry_hardlock_one_second_monitor_patch import (
     apply_expiry_hardlock_one_second_monitor_patch,
@@ -54,6 +60,9 @@ from bot.hero_zero_guard_patch import apply_hero_zero_guard_patch
 from bot.manual_exit_patch import apply_manual_exit_patch
 from bot.paper_unlimited_observation_patch import (
     apply_paper_unlimited_observation_patch,
+)
+from bot.post_loss_reentry_guard_patch import (
+    apply_post_loss_reentry_guard_patch,
 )
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
 import os
@@ -68,19 +77,26 @@ apply_feed_safety_consistency_patch()
 apply_anti_chase_consistency_v3_patch()
 apply_mandatory_trend_structure_patch()
 apply_entry_quality_v2_patch()
+# Final timing gate restores the profitable fresh-distance protection after all
+# consistency/quality wrappers have built the final signal payload.
+apply_entry_timing_calibration_patch()
 apply_structural_exit_v2_patch()
 apply_expiry_hardlock_one_second_monitor_patch()
 apply_hero_zero_guard_patch()
 apply_manual_exit_patch()
 apply_paper_unlimited_observation_patch()
+# Runtime cooldown is applied last so the one-second monitor and unlimited PAPER
+# observation both respect the same stopped-index/side safety state.
+apply_post_loss_reentry_guard_patch()
 apply_backtest_live_strategy_patch()
 apply_live_frequency_portfolio_patch()
+apply_backtest_post_loss_reentry_cooldown_patch()
 apply_backtest_realism_costs_patch()
 apply_cost_idempotence_patch()
 apply_monthly_job_start_patch()
 apply_normal_entry_cutoff_1445_patch()
 
-RELEASE_VERSION = "anti-chase-consistency-v3"
+RELEASE_VERSION = "entry-timing-post-loss-calibration-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
