@@ -39,6 +39,12 @@ from backtest.monthly_job_start_patch import apply_monthly_job_start_patch
 from backtest.normal_entry_cutoff_1445_patch import (
     apply_normal_entry_cutoff_1445_patch,
 )
+from backtest.real_option_premium_patch import (
+    prepare_real_option_premium_patch,
+)
+from backtest.real_option_premium_finalize_patch import (
+    finalize_real_option_premium_patch,
+)
 from bot.score_history_patch import apply_score_history_patch
 from bot.upstox_live_candle_patch import apply_upstox_live_candle_patch
 from bot.live_scan_history_fallback_patch import apply_live_scan_history_fallback_patch
@@ -89,6 +95,9 @@ apply_entry_quality_v2_patch()
 # Final timing gate restores the profitable fresh-distance protection after all
 # consistency/quality wrappers have built the final signal payload.
 apply_entry_timing_calibration_patch()
+# Real premium must replace the Structural V5 source compiler before that patch
+# captures and compiles the single-index backtest function.
+prepare_real_option_premium_patch()
 apply_structural_exit_v2_patch()
 apply_expiry_hardlock_one_second_monitor_patch()
 apply_hero_zero_guard_patch()
@@ -111,8 +120,11 @@ apply_normal_entry_cutoff_1445_patch()
 # expectancy by cutting weak trades and allowing real winners to run.
 apply_capital_based_sizing_restore_patch()
 apply_expectancy_engine_v1_patch()
+# Annotate the final Daily/Monthly/Range dispatchers only after every other wrapper
+# is installed, and reject any path that would silently mix estimated premiums.
+finalize_real_option_premium_patch()
 
-RELEASE_VERSION = "date-range-backtest-v1"
+RELEASE_VERSION = "real-option-premium-backtest-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
