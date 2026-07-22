@@ -1,12 +1,14 @@
 """Backtest parity for post-ATR-stop re-entry cooldown.
 
-AUTO live/paper now blocks only the stopped index+side for 15 minutes after a
-PURE ATR SL. Historical single-index results are filtered with the same rule
-before AUTO MAX2 allocation and compounding are calculated.
+AUTO live/paper blocks only the stopped index+side for 15 minutes after a PURE
+ATR SL. Historical single-index results are filtered with the same rule before
+AUTO MAX2 allocation and compounding are calculated.
 
-This is intentionally applied to the raw one-lot trade stream. The AUTO merge
-then performs its normal 50%/40% sizing on the filtered candidates, so removed
-rapid re-entries do not contribute P&L or consume a portfolio slot.
+Important: this patch must preserve the AUTO-aware day dispatcher. An earlier
+version replaced ``run_realistic_day_backtest`` with the raw single-index
+function. Monthly AUTO then sent the literal instrument ``AUTO`` to the candle
+fetcher, producing UPSTOX_INDEX_KEY_NOT_CONFIGURED: AUTO and also bypassing the
+normal 50%/40% portfolio sizing path.
 """
 
 from copy import deepcopy
@@ -110,7 +112,7 @@ def _filter_result(result):
 
 
 def apply_backtest_post_loss_reentry_cooldown_patch():
-    if getattr(routes, "_okai_backtest_post_loss_cooldown_v1", False):
+    if getattr(routes, "_okai_backtest_post_loss_cooldown_v2", False):
         return
 
     original_single = routes._OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST
@@ -118,8 +120,52 @@ def apply_backtest_post_loss_reentry_cooldown_patch():
     def single_with_cooldown(*args, **kwargs):
         return _filter_result(original_single(*args, **kwargs))
 
-    # AUTO MAX2 reads this module global dynamically for each instrument.
+    def auto_aware_day_dispatcher(
+        broker_name,
+        obj,
+        instrument,
+        date_str,
+        capital,
+        entry_threshold,
+        sl_percent,
+        target_percent,
+    ):
+        selected = str(instrument or "AUTO").upper()
+
+        if selected == "AUTO":
+            # The frequency/portfolio patch owns the current AUTO model. It
+            # dynamically reads _OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST below, so
+            # every NIFTY/BANKNIFTY/SENSEX stream already includes cooldown.
+            return routes._okai_run_auto_index_backtest(
+                broker_name,
+                obj,
+                date_str,
+                capital,
+                entry_threshold,
+                sl_percent,
+                target_percent,
+            )
+
+        raw_result = single_with_cooldown(
+            broker_name,
+            obj,
+            selected,
+            date_str,
+            capital,
+            entry_threshold,
+            sl_percent,
+            target_percent,
+        )
+        # Preserve the original direct-index 90%-capital/whole-lot behaviour.
+        return routes._okai_scale_trades_to_capital(
+            raw_result,
+            capital,
+        )
+
+    # AUTO MAX2 reads this module global dynamically for each concrete index.
     routes._OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST = single_with_cooldown
-    # Direct NIFTY/BANKNIFTY/SENSEX Daily/Monthly routes use this name.
-    routes.run_realistic_day_backtest = single_with_cooldown
+    # Daily/Monthly mode calls this global. Keep AUTO routing and direct-index
+    # capital scaling intact instead of sending the literal AUTO to candle fetch.
+    routes.run_realistic_day_backtest = auto_aware_day_dispatcher
     routes._okai_backtest_post_loss_cooldown_v1 = True
+    routes._okai_backtest_post_loss_cooldown_v2 = True
