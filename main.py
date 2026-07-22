@@ -41,6 +41,9 @@ from bot.default_strategy_patch import (
 from bot.fresh_entry_guard_patch import apply_fresh_entry_guard_patch
 from bot.expiry_entry_diagnostics_patch import apply_expiry_entry_diagnostics_patch
 from bot.feed_safety_consistency_patch import apply_feed_safety_consistency_patch
+from bot.anti_chase_consistency_v3_patch import (
+    apply_anti_chase_consistency_v3_patch,
+)
 from bot.mandatory_trend_structure_patch import apply_mandatory_trend_structure_patch
 from bot.entry_quality_v2_patch import apply_entry_quality_v2_patch
 from bot.structural_exit_v2_patch import apply_structural_exit_v2_patch
@@ -62,6 +65,7 @@ apply_default_strategy_patch()
 apply_fresh_entry_guard_patch()
 apply_expiry_entry_diagnostics_patch()
 apply_feed_safety_consistency_patch()
+apply_anti_chase_consistency_v3_patch()
 apply_mandatory_trend_structure_patch()
 apply_entry_quality_v2_patch()
 apply_structural_exit_v2_patch()
@@ -76,7 +80,7 @@ apply_cost_idempotence_patch()
 apply_monthly_job_start_patch()
 apply_normal_entry_cutoff_1445_patch()
 
-RELEASE_VERSION = "backtest-normal-entry-cutoff-1445-v2"
+RELEASE_VERSION = "anti-chase-consistency-v3"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
