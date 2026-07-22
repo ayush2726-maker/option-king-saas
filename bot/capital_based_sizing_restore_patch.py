@@ -12,6 +12,7 @@ configured capital allocation:
 import math
 
 from backtest import routes as backtest_routes
+from backtest.range_capital_mode_patch import apply_range_capital_mode_patch
 from bot import auto_portfolio_runtime as runtime
 
 
@@ -146,3 +147,7 @@ def apply_capital_based_sizing_restore_patch():
 
         backtest_routes._okai_run_auto_index_backtest = capital_annotated_auto
         backtest_routes._okai_capital_sizing_result_annotation_v1 = True
+
+    # Date-range comparison uses this same capital-based lot logic.  Apply it
+    # here, after the final daily/AUTO backtest dispatcher has been installed.
+    apply_range_capital_mode_patch()
