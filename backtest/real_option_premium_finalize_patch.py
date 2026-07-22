@@ -15,6 +15,7 @@ import copy
 
 from backtest import range_routes
 from backtest import routes
+from backtest.real_option_atr_patch import apply_real_option_atr_patch
 from backtest.real_option_contract_resolution_patch import (
     apply_real_option_contract_resolution_patch,
 )
@@ -22,9 +23,9 @@ from backtest.real_option_premium_patch import REAL_PREMIUM_MODEL
 
 
 REAL_NOTE = (
-    "Signals use real one-minute index candles. Entry, SL, profit lock and exit "
-    "use the exact selected option contract's real one-minute OHLC candles. "
-    "No estimated-premium fallback is allowed."
+    "Signals use real one-minute index candles. Entry, option ATR stop, profit "
+    "lock and exit use the exact selected option contract's real one-minute "
+    "OHLC candles. No estimated-premium fallback is allowed."
 )
 
 
@@ -36,6 +37,7 @@ def _annotate(result):
     output["premium_mode"] = "REAL"
     output["premium_model"] = REAL_PREMIUM_MODEL
     output["premium_data"] = "EXACT_OPTION_CONTRACT_OHLC_1M"
+    output["option_atr_model"] = "CAUSAL_REAL_OPTION_ATR14"
     output["estimated_premium_fallback"] = False
     output["note"] = REAL_NOTE
 
@@ -44,6 +46,7 @@ def _annotate(result):
         "premium_mode": "REAL",
         "premium_model": REAL_PREMIUM_MODEL,
         "premium_data": "EXACT_OPTION_CONTRACT_OHLC_1M",
+        "option_atr_model": "CAUSAL_REAL_OPTION_ATR14",
         "estimated_premium_fallback": False,
         "note": REAL_NOTE,
     })
@@ -83,6 +86,9 @@ def finalize_real_option_premium_patch():
     # Recent completed dates may still use a currently active option contract and
     # therefore do not need the Plus-only expired endpoints. Older contracts do.
     apply_real_option_contract_resolution_patch()
+    # The compiled strategy resolves these module globals at runtime, so this
+    # final wrapper upgrades SL calculation to causal ATR14 from option OHLC.
+    apply_real_option_atr_patch()
 
     original_run_mode = routes._okai_run_backtest_mode
 
