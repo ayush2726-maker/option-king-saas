@@ -10,6 +10,7 @@ keep their stricter 14:25 Hero Zero reservation. Paper and Live are unchanged.
 """
 
 from backtest import routes
+from backtest.range_capital_mode_patch import apply_range_capital_mode_patch
 
 
 NORMAL_ENTRY_CUTOFF_MINUTES = 14 * 60 + 45
@@ -17,6 +18,9 @@ NORMAL_ENTRY_CUTOFF_MINUTES = 14 * 60 + 45
 
 def apply_normal_entry_cutoff_1445_patch():
     if getattr(routes, "_okai_normal_entry_cutoff_1445_v2", False):
+        # Range mode is independent of the entry-cutoff flag and may have been
+        # added after an older deployment already marked this patch active.
+        apply_range_capital_mode_patch()
         return
 
     # The native backtest loop reads this constant before allowing a new
@@ -25,3 +29,7 @@ def apply_normal_entry_cutoff_1445_patch():
     routes._OKAI_NORMAL_ENTRY_CUTOFF_MINUTES = NORMAL_ENTRY_CUTOFF_MINUTES
     routes._okai_normal_entry_cutoff_1445_v1 = True
     routes._okai_normal_entry_cutoff_1445_v2 = True
+
+    # Date-range backtests can now compare continuous compounding with fixed
+    # daily sizing capital without changing strategy entries, exits or lots.
+    apply_range_capital_mode_patch()
