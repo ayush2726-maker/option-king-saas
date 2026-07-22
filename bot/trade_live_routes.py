@@ -13,6 +13,10 @@ from fastapi import APIRouter, Header
 from auth.routes import get_current_user
 from database import get_db
 
+# Imported for startup side effects. It installs equity-risk sizing and stronger
+# post-loss re-entry protection before the bot/backtest patches are activated.
+import bot.risk_control_v2_bootstrap  # noqa: F401
+
 
 router = APIRouter(prefix="/bot", tags=["Bot"])
 
