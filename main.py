@@ -25,6 +25,9 @@ from backtest.live_strategy_consistency_patch import (
 from backtest.live_frequency_portfolio_patch import (
     apply_live_frequency_portfolio_patch,
 )
+from backtest.upstox_historical_key_patch import (
+    apply_upstox_historical_key_patch,
+)
 from backtest.post_loss_reentry_cooldown_patch import (
     apply_backtest_post_loss_reentry_cooldown_patch,
 )
@@ -90,13 +93,16 @@ apply_paper_unlimited_observation_patch()
 apply_post_loss_reentry_guard_patch()
 apply_backtest_live_strategy_patch()
 apply_live_frequency_portfolio_patch()
+# This must run after the frequency patch because that patch installs the final
+# historical fetch function which reads backtest.routes.UPSTOX_INDEX_KEYS.
+apply_upstox_historical_key_patch()
 apply_backtest_post_loss_reentry_cooldown_patch()
 apply_backtest_realism_costs_patch()
 apply_cost_idempotence_patch()
 apply_monthly_job_start_patch()
 apply_normal_entry_cutoff_1445_patch()
 
-RELEASE_VERSION = "entry-timing-post-loss-calibration-v1"
+RELEASE_VERSION = "upstox-historical-key-guard-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
