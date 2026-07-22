@@ -76,7 +76,7 @@ apply_cost_idempotence_patch()
 apply_monthly_job_start_patch()
 apply_normal_entry_cutoff_1445_patch()
 
-RELEASE_VERSION = "backtest-normal-entry-cutoff-1445-v1"
+RELEASE_VERSION = "backtest-normal-entry-cutoff-1445-v2"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
