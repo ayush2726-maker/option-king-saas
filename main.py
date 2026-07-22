@@ -19,6 +19,7 @@ from strategy.profile_routes import router as strategy_profile_router
 from bot.market_routes import router as market_router
 from bot.ai_routes import router as ai_router
 from backtest.routes import router as backtest_router
+from backtest.range_routes import router as backtest_range_router
 from backtest.live_strategy_consistency_patch import (
     BacktestActiveStrategyMiddleware,
     apply_backtest_live_strategy_patch,
@@ -111,7 +112,7 @@ apply_normal_entry_cutoff_1445_patch()
 apply_capital_based_sizing_restore_patch()
 apply_expectancy_engine_v1_patch()
 
-RELEASE_VERSION = "capital-sizing-expectancy-engine-v1"
+RELEASE_VERSION = "date-range-backtest-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
@@ -211,6 +212,7 @@ app.include_router(strategy_router)
 app.include_router(strategy_profile_router)
 app.include_router(market_router)
 app.include_router(backtest_router)
+app.include_router(backtest_range_router)
 
 
 @app.get("/")
