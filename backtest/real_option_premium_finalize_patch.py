@@ -15,6 +15,9 @@ import copy
 
 from backtest import range_routes
 from backtest import routes
+from backtest.real_option_contract_resolution_patch import (
+    apply_real_option_contract_resolution_patch,
+)
 from backtest.real_option_premium_patch import REAL_PREMIUM_MODEL
 
 
@@ -76,6 +79,10 @@ def _unsupported_strategy_result(strategy_mode):
 def finalize_real_option_premium_patch():
     if getattr(routes, "_okai_real_option_premium_final_v1", False):
         return
+
+    # Recent completed dates may still use a currently active option contract and
+    # therefore do not need the Plus-only expired endpoints. Older contracts do.
+    apply_real_option_contract_resolution_patch()
 
     original_run_mode = routes._okai_run_backtest_mode
 
