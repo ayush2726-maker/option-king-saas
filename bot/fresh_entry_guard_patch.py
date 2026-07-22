@@ -1,4 +1,4 @@
-"""Fresh Entry Guard V1.
+"""Fresh Entry Guard V2.
 
 Why this exists:
 - Index feeds (especially Upstox index candles) often publish zero volume.
@@ -9,6 +9,10 @@ Why this exists:
 This patch keeps the protected entry threshold at 82, treats genuinely missing
 index volume as unavailable (not weak), normalises the remaining score, and
 blocks exhausted/reversing entries using ATR-scaled freshness checks.
+
+EMA/VWAP chase protection is owned by the shared strategy anti-chase engine:
+minimum 22/35 index points with ATR-adaptive widening.  Fresh Entry Guard must
+not add a second, stricter 0.95/2.20 ATR gate on top of that shared decision.
 """
 
 import math
@@ -145,12 +149,12 @@ def _apply_fresh_entry_guard(result, market_data, profile):
             fresh_block_reasons.append("CORE_CONFIRMATIONS_BELOW_4")
         if not current_aligned:
             fresh_block_reasons.append("REVERSAL_CANDLE_AT_ENTRY")
-        if ema_distance_atr > 0.95:
-            fresh_block_reasons.append("EMA_EXTENSION_OVER_0.95_ATR")
+
+        # Do not duplicate EMA/VWAP anti-chase here.  The original signal
+        # already evaluated the shared point + ATR adaptive limits and exposes
+        # chase_blocked / ema_chase_blocked / vwap_chase_blocked below.
         if orb_extension_atr > 1.35:
             fresh_block_reasons.append("ORB_EXTENSION_OVER_1.35_ATR")
-        if (not vwap_fallback) and vwap_distance_atr > 2.20:
-            fresh_block_reasons.append("VWAP_EXTENSION_OVER_2.20_ATR")
         if two_candle_run and ema_distance_atr > 0.80 and orb_extension_atr > 0.90:
             fresh_block_reasons.append("LATE_TWO_CANDLE_EXHAUSTION")
 
@@ -189,7 +193,8 @@ def _apply_fresh_entry_guard(result, market_data, profile):
         "ema_distance_atr": round(ema_distance_atr, 2),
         "vwap_distance_atr": round(vwap_distance_atr, 2),
         "orb_extension_atr": round(orb_extension_atr, 2),
-        "entry_timing_mode": "FRESH_ATR_GUARD_V1",
+        "fresh_guard_uses_shared_anti_chase": True,
+        "entry_timing_mode": "FRESH_ATR_GUARD_V2_SHARED_ANTI_CHASE",
         "warnings": warnings,
     })
     return output
@@ -262,7 +267,7 @@ def _premium_entry_quality_v2(rows, current_ltp):
 
 
 def apply_fresh_entry_guard_patch():
-    if getattr(strategy, "_okai_fresh_entry_guard_v1", False):
+    if getattr(strategy, "_okai_fresh_entry_guard_v2", False):
         return
 
     original_get_full_signal = strategy.get_full_signal
@@ -280,3 +285,4 @@ def apply_fresh_entry_guard_patch():
     angel_fetcher.get_full_signal = guarded_get_full_signal
     angel_fetcher._premium_entry_quality = _premium_entry_quality_v2
     strategy._okai_fresh_entry_guard_v1 = True
+    strategy._okai_fresh_entry_guard_v2 = True
