@@ -68,6 +68,10 @@ from bot.paper_unlimited_observation_patch import (
 from bot.post_loss_reentry_guard_patch import (
     apply_post_loss_reentry_guard_patch,
 )
+from bot.capital_based_sizing_restore_patch import (
+    apply_capital_based_sizing_restore_patch,
+)
+from bot.expectancy_engine_v1_patch import apply_expectancy_engine_v1_patch
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
 import os
 
@@ -102,8 +106,12 @@ apply_backtest_realism_costs_patch()
 apply_cost_idempotence_patch()
 apply_monthly_job_start_patch()
 apply_normal_entry_cutoff_1445_patch()
+# Final overrides: quantity comes only from capital allocation; strategy improves
+# expectancy by cutting weak trades and allowing real winners to run.
+apply_capital_based_sizing_restore_patch()
+apply_expectancy_engine_v1_patch()
 
-RELEASE_VERSION = "trade-tab-live-option-price-v1"
+RELEASE_VERSION = "capital-sizing-expectancy-engine-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
