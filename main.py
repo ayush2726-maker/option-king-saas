@@ -10,6 +10,7 @@ from broker.routes import router as broker_router
 from subscription.routes import router as subscription_router
 from admin.routes import router as admin_router
 from bot.routes import router as bot_router
+from bot.trade_live_routes import router as trade_live_router
 from telegram.routes import router as telegram_router
 from user_panel.routes import router as user_panel_router
 from paper.routes import router as paper_router
@@ -102,7 +103,7 @@ apply_cost_idempotence_patch()
 apply_monthly_job_start_patch()
 apply_normal_entry_cutoff_1445_patch()
 
-RELEASE_VERSION = "upstox-historical-key-guard-v1"
+RELEASE_VERSION = "trade-tab-live-option-price-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
@@ -193,6 +194,7 @@ app.include_router(broker_router)
 app.include_router(subscription_router)
 app.include_router(admin_router)
 app.include_router(bot_router)
+app.include_router(trade_live_router)
 app.include_router(ai_router)
 app.include_router(telegram_router)
 app.include_router(user_panel_router)
