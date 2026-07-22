@@ -1,22 +1,20 @@
-"""Adaptive Structural Exit and Premium Path V4.
+"""Adaptive Structural Exit and Balanced Premium Path V5.
 
-This module fixes the captured single-index backtest function used by Daily,
-AUTO and Monthly modes. Bought-option exits use:
-
-- option-premium ATR stop and dynamic profit lock on every runtime loop,
-- VWAP + Supertrend + EMA9/EMA21 all flipping opposite on completed candles,
-- adaptive confirmation: immediate at -0.35R or worse, otherwise two completed
-  structural-flip candles,
+Bought-option exits use:
+- option-premium ATR stop and the active profit-lock helper on every loop;
+- VWAP + Supertrend + EMA9/EMA21 all flipping opposite on completed candles;
+- adaptive structural confirmation: immediate at -0.35R or worse, otherwise two
+  completed structural-flip candles;
+- a no-follow-through exit after three completed candles when the trade never
+  reached +0.30R and at least two of VWAP/Supertrend/EMA have turned opposite;
 - and the existing 15:25 EOD exit.
 
-Two-candle colour momentum is an ENTRY trigger only and is never an exit rule.
-
-The legacy backtest converted index percentage movement into premium percentage
-movement using a hardcoded x8 factor. That severely under-moved option premiums
-and prevented ATR SL/profit-lock hits. V4 uses spot POINT movement multiplied by
+The captured Daily/AUTO/Monthly backtest uses spot POINT movement multiplied by
 the same option response used by the ATR engine: 0.50 normal and 1.00 expiry.
+It also applies a ten-candle cooldown after a losing trade.
 """
 
+from datetime import datetime, timezone
 import inspect
 
 from backtest import routes as backtest_routes
@@ -28,6 +26,8 @@ STRUCTURAL_LOSS_FAST_EXIT_R = -0.35
 STRUCTURAL_NORMAL_CONFIRM_CANDLES = 2
 NORMAL_OPTION_POINT_RESPONSE = 0.50
 EXPIRY_OPTION_POINT_RESPONSE = 1.00
+NO_FOLLOW_THROUGH_CANDLES = 3
+NO_FOLLOW_THROUGH_MAX_PEAK_R = 0.30
 
 
 def _f(value, default=0.0):
@@ -35,6 +35,37 @@ def _f(value, default=0.0):
         return float(value)
     except Exception:
         return float(default)
+
+
+def _i(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _parse_dt(value):
+    if isinstance(value, datetime):
+        result = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            result = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return None
+    if result.tzinfo is None:
+        result = result.replace(tzinfo=timezone.utc)
+    return result
+
+
+def _bars_held(trade, candle_id):
+    entry_dt = _parse_dt(runtime._v(trade, "created_at", None))
+    candle_dt = _parse_dt(candle_id)
+    if entry_dt is None or candle_dt is None:
+        return 0
+    return int(max(0.0, (candle_dt - entry_dt).total_seconds()) // 60)
 
 
 def structural_flip(position_side, market_data):
@@ -79,7 +110,7 @@ def structural_flip(position_side, market_data):
     }
 
 
-def _detect_structural_reversal_v4(
+def _detect_structural_reversal_v5(
     position_side,
     price,
     vwap,
@@ -113,12 +144,12 @@ def _detect_structural_reversal_v4(
         "opposite_signal": str(opposite_signal or "WAIT").upper(),
         "opposite_score": round(_f(opposite_score), 2),
         "min_score": round(_f(min_score, 82), 2),
-        "exit_rule": "VWAP_SUPERTREND_EMA_ADAPTIVE_V4",
+        "exit_rule": "VWAP_SUPERTREND_EMA_BALANCED_V5",
         **state,
     }
 
 
-def _runtime_evaluate_exit_v4(trade, ltp, market_data, candle_id):
+def _runtime_evaluate_exit_v5(trade, ltp, market_data, candle_id):
     entry = _f(trade["entry_price"])
     old_sl = _f(runtime._v(trade, "sl_price", max(0.05, entry - 0.05)))
     risk = max(
@@ -129,19 +160,26 @@ def _runtime_evaluate_exit_v4(trade, ltp, market_data, candle_id):
     updates = runtime._i(runtime._v(trade, "trail_updates", 0))
 
     trail = runtime._legacy()._dynamic_profit_lock(
-        entry, risk, old_sl, peak, ltp
+        entry,
+        risk,
+        old_sl,
+        peak,
+        ltp,
     )
     if trail["updated"]:
         updates += 1
 
     structure = structural_flip(runtime._v(trade, "side", ""), market_data)
     current_r = (ltp - entry) / risk
+    peak_r = max(
+        _f(trail.get("peak_r"), 0),
+        (max(entry, peak, ltp) - entry) / risk,
+    )
 
     previous_count = runtime._i(runtime._v(trade, "reversal_count", 0))
     previous_candle = str(runtime._v(trade, "reversal_last_candle", "") or "")
     current_candle = str(candle_id or "")
 
-    # Runtime checks LTP every second. Count structure once per completed candle.
     if current_candle and current_candle != previous_candle:
         reversal_count = previous_count + 1 if structure["all_three_flipped"] else 0
         reversal_last_candle = current_candle
@@ -158,16 +196,12 @@ def _runtime_evaluate_exit_v4(trade, ltp, market_data, candle_id):
         structure["all_three_flipped"] and reversal_count >= required
     )
 
-    # Two-of-three weakness is not an exit. Protect a winner instead.
-    if structure["opposite_count"] >= 2 and ltp >= entry:
-        tightened = max(_f(trail["sl_price"]), entry)
-        if tightened > _f(trail["sl_price"]):
-            trail["sl_price"] = round(
-                min(tightened, max(0.05, ltp - 0.05)), 2
-            )
-            trail["stage"] = "STRUCTURE_BREAKEVEN_TIGHTEN"
-            trail["updated"] = True
-            updates += 1
+    bars_held = _bars_held(trade, candle_id)
+    no_follow_through = bool(
+        bars_held >= NO_FOLLOW_THROUGH_CANDLES
+        and peak_r < NO_FOLLOW_THROUGH_MAX_PEAK_R
+        and structure["opposite_count"] >= 2
+    )
 
     eod = runtime._now_ist().hour * 60 + runtime._now_ist().minute >= 15 * 60 + 25
     hit = ltp <= _f(trail["sl_price"])
@@ -179,6 +213,13 @@ def _runtime_evaluate_exit_v4(trade, ltp, market_data, candle_id):
         )
     elif hit:
         reason = "PURE ATR SL HIT"
+    elif no_follow_through:
+        reason = (
+            "NO FOLLOW THROUGH EXIT"
+            f" | bars={bars_held}"
+            f" | peak={peak_r:.2f}R"
+            f" | weakness={structure['opposite_count']}/3"
+        )
     elif structural_exit:
         reason = (
             "VWAP + SUPERTREND + EMA STRUCTURAL EXIT"
@@ -200,15 +241,22 @@ def _runtime_evaluate_exit_v4(trade, ltp, market_data, candle_id):
             "last_candle": reversal_last_candle,
             "required": required,
             "current_r": round(current_r, 2),
-            "mode": "VWAP_ST_EMA_ADAPTIVE_V4",
+            "mode": "VWAP_ST_EMA_ADAPTIVE_BALANCED_V5",
             **structure,
+        },
+        "no_follow_through": {
+            "exit": no_follow_through,
+            "bars_held": bars_held,
+            "peak_r": round(peak_r, 2),
+            "max_peak_r": NO_FOLLOW_THROUGH_MAX_PEAK_R,
+            "weakness_count": structure["opposite_count"],
+            "required_weakness": 2,
         },
         "reason": reason,
     }
 
 
 def _patch_captured_single_index_backtest():
-    """Compile and install the actual captured single-index backtest function."""
     target = getattr(
         backtest_routes,
         "_OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST",
@@ -220,11 +268,14 @@ def _patch_captured_single_index_backtest():
     try:
         source = inspect.getsource(target)
         changed = source
-
-        # Avoid overwriting the public AUTO/single wrapper when executing source.
         changed = changed.replace(
             "def run_realistic_day_backtest(",
+            "def _okai_single_index_balanced_exit_v5(",
+            1,
+        )
+        changed = changed.replace(
             "def _okai_single_index_premium_path_v4(",
+            "def _okai_single_index_balanced_exit_v5(",
             1,
         )
         changed = changed.replace(
@@ -239,7 +290,11 @@ def _patch_captured_single_index_backtest():
         )
         changed = changed.replace(
             '"mode": "CONFIRMED_TWO_CANDLE"',
+            '"mode": "VWAP_ST_EMA_ADAPTIVE_BALANCED_V5"',
+        )
+        changed = changed.replace(
             '"mode": "VWAP_ST_EMA_ADAPTIVE_V4"',
+            '"mode": "VWAP_ST_EMA_ADAPTIVE_BALANCED_V5"',
         )
         changed = changed.replace(
             '"confirmation_candles": 2',
@@ -259,9 +314,7 @@ def _patch_captured_single_index_backtest():
             current_premium = max(0.5, entry*(1+close_pct*response/100))
             premium_high = max(0.5, entry*(1+good_pct*response/100))
             premium_low = max(0.5, entry*(1+bad_pct*response/100))'''
-
-        new_premium_block = '''            # Synthetic option path uses spot POINT movement, not spot percentage.
-            # This matches calculate_option_atr_levels response assumptions.
+        new_premium_block = '''            # Synthetic option path uses spot POINT movement.
             if side == "CE":
                 close_points = spot_close - entry_spot
                 favorable_points = spot_high - entry_spot
@@ -275,27 +328,130 @@ def _patch_captured_single_index_backtest():
             current_premium = max(0.5, entry + close_points * response)
             premium_high = max(0.5, entry + favorable_points * response)
             premium_low = max(0.5, entry + adverse_points * response)'''
-
         changed = changed.replace(old_premium_block, new_premium_block)
+
+        if "last_loss_exit_index = None" not in changed:
+            changed = changed.replace(
+                "    consecutive_losses = 0\n",
+                "    consecutive_losses = 0\n"
+                "    last_loss_exit_index = None\n",
+                1,
+            )
+        if "last_loss_exit_index = i if pnl < 0 else None" not in changed:
+            changed = changed.replace(
+                "                consecutive_losses = consecutive_losses + 1 if pnl < 0 else 0\n",
+                "                consecutive_losses = consecutive_losses + 1 if pnl < 0 else 0\n"
+                "                last_loss_exit_index = i if pnl < 0 else None\n",
+            )
+
+        entry_gate = '''        if (
+            signal_data["trade_allowed"]
+            and signal_data["signal"] in ("CE", "PE")
+            and signal_data["score"] >= entry_threshold
+            and core_quality_ok
+        ):'''
+        balanced_entry_gate = '''        loss_cooldown_active = (
+            last_loss_exit_index is not None
+            and i - last_loss_exit_index < 10
+        )
+
+        if (
+            signal_data["trade_allowed"]
+            and signal_data["signal"] in ("CE", "PE")
+            and signal_data["score"] >= entry_threshold
+            and core_quality_ok
+            and not loss_cooldown_active
+        ):'''
+        if "loss_cooldown_active" not in changed:
+            changed = changed.replace(entry_gate, balanced_entry_gate)
+
+        if '"entry_index": i' not in changed:
+            changed = changed.replace(
+                '                "entry_time": str(last["time"]),\n',
+                '                "entry_time": str(last["time"]),\n'
+                '                "entry_index": i,\n',
+            )
+
+        structural_block = '''            structural_exit = (
+                open_trade["reversal_count"]
+                >= reversal_required_candles
+            )
+
+            if ('''
+        balanced_structural_block = '''            structural_exit = (
+                open_trade["reversal_count"]
+                >= reversal_required_candles
+            )
+            bars_held = max(
+                0,
+                i - int(open_trade.get("entry_index", i)),
+            )
+            peak_r_seen = max(
+                float(open_trade.get("peak_r", 0) or 0),
+                (premium_high - entry) / risk_points,
+            )
+            no_follow_through_exit = (
+                bars_held >= 3
+                and peak_r_seen < 0.30
+                and int(reversal.get("opposite_count", 0) or 0) >= 2
+            )
+
+            if ('''
+        if "no_follow_through_exit" not in changed:
+            changed = changed.replace(structural_block, balanced_structural_block)
+            changed = changed.replace(
+                "                hit_sl\n                or force_combined_reserve_exit",
+                "                hit_sl\n                or no_follow_through_exit\n                or force_combined_reserve_exit",
+            )
+            changed = changed.replace(
+                '''                elif force_combined_reserve_exit:
+                    exit_price = round(''',
+                '''                elif no_follow_through_exit:
+                    exit_price = round(
+                        current_premium,
+                        2,
+                    )
+                    reason = "NO_FOLLOW_THROUGH_EXIT_3C_2OF3"
+                elif force_combined_reserve_exit:
+                    exit_price = round(''',
+            )
+            changed = changed.replace(
+                '                    "fixed_target_enabled": False,',
+                '                    "no_follow_through_exit": bool(no_follow_through_exit),\n'
+                '                    "bars_held_at_exit": bars_held,\n'
+                '                    "peak_r_seen": round(peak_r_seen, 2),\n'
+                '                    "fixed_target_enabled": False,',
+            )
+
+        changed = changed.replace(
+            '"premium_model": "SPOT_POINTS_X_OPTION_RESPONSE_V4"',
+            '"premium_model": "SPOT_POINTS_X_OPTION_RESPONSE_BALANCED_V5"',
+        )
         changed = changed.replace(
             '"premium_response_factor": response,',
             '"premium_response_factor": response,\n'
-            '                    "premium_model": "SPOT_POINTS_X_OPTION_RESPONSE_V4",',
-        )
+            '                    "premium_model": "SPOT_POINTS_X_OPTION_RESPONSE_BALANCED_V5",',
+            1,
+        ) if "premium_model" not in changed else changed
 
-        if changed == source:
-            return False, "SOURCE_TRANSFORM_NO_MATCH"
+        required = (
+            "_okai_single_index_balanced_exit_v5",
+            "NO_FOLLOW_THROUGH_EXIT_3C_2OF3",
+            "loss_cooldown_active",
+            "SPOT_POINTS_X_OPTION_RESPONSE_BALANCED_V5",
+        )
+        missing = [marker for marker in required if marker not in changed]
+        if missing:
+            return False, "SOURCE_TRANSFORM_MISSING:" + ",".join(missing)
         if "response = 8.0" in changed:
             return False, "LEGACY_PERCENT_RESPONSE_STILL_PRESENT"
-        if "SPOT_POINTS_X_OPTION_RESPONSE_V4" not in changed:
-            return False, "POINT_PREMIUM_BLOCK_NOT_INSTALLED"
 
         exec(
             compile(changed, backtest_routes.__file__, "exec"),
             backtest_routes.__dict__,
         )
         patched = backtest_routes.__dict__.get(
-            "_okai_single_index_premium_path_v4"
+            "_okai_single_index_balanced_exit_v5"
         )
         if not callable(patched):
             return False, "PATCHED_FUNCTION_NOT_CREATED"
@@ -305,23 +461,24 @@ def _patch_captured_single_index_backtest():
             backtest_routes._OKAI_BACKTEST_CANDLE_CACHE.clear()
         except Exception:
             pass
-        return True, "OK_POINT_PREMIUM_AND_ADAPTIVE_EXIT_V4"
+        return True, "OK_BALANCED_NO_FOLLOW_THROUGH_V5"
     except Exception as exc:
         return False, f"{exc.__class__.__name__}:{str(exc)[:180]}"
 
 
 def apply_structural_exit_v2_patch():
-    # Preserve old import/function name used by main.py, but install V4 once.
-    if getattr(runtime, "_okai_structural_exit_v4", False):
+    # Preserve the historical import name used by main.py, but install V5 once.
+    if getattr(runtime, "_okai_structural_exit_v5", False):
         return
 
-    dynamic_exit.detect_structural_reversal = _detect_structural_reversal_v4
-    backtest_routes.detect_structural_reversal = _detect_structural_reversal_v4
-    runtime._evaluate_exit = _runtime_evaluate_exit_v4
+    dynamic_exit.detect_structural_reversal = _detect_structural_reversal_v5
+    backtest_routes.detect_structural_reversal = _detect_structural_reversal_v5
+    runtime._evaluate_exit = _runtime_evaluate_exit_v5
 
     patched, diagnostic = _patch_captured_single_index_backtest()
     runtime._okai_structural_exit_v2 = True
     runtime._okai_structural_exit_v3 = True
     runtime._okai_structural_exit_v4 = True
+    runtime._okai_structural_exit_v5 = True
     runtime._okai_structural_exit_backtest_patched = bool(patched)
     runtime._okai_structural_exit_backtest_diagnostic = diagnostic
