@@ -1,6 +1,6 @@
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Header, Query
 
@@ -48,6 +48,16 @@ _quote_cache = {}
 _quote_cache_lock = threading.Lock()
 _multi_sessions = {}
 _multi_sessions_lock = threading.Lock()
+
+
+def _market_session_state():
+    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    minute = now_ist.hour * 60 + now_ist.minute
+    market_open = (
+        now_ist.weekday() < 5
+        and 9 * 60 + 15 <= minute <= 15 * 60 + 30
+    )
+    return now_ist, market_open
 
 
 def _get_active_broker(user_id):
@@ -201,11 +211,14 @@ def market_quote(
     """
     user = get_current_user(authorization)
     symbol = str(instrument or "NIFTY").upper().strip()
+    now_ist, market_open = _market_session_state()
     if symbol not in INDEX_SYMBOLS:
         return {
             "success": False,
             "instrument": symbol,
             "message": "Unsupported index",
+            "market_open": market_open,
+            "market_time_ist": now_ist.isoformat(),
         }
 
     cache_key = (int(user["id"]), symbol)
@@ -225,6 +238,8 @@ def market_quote(
             "instrument": symbol,
             "message": "Active broker not connected",
             "as_of": datetime.now(timezone.utc).isoformat(),
+            "market_open": market_open,
+            "market_time_ist": now_ist.isoformat(),
         }
 
     try:
@@ -235,6 +250,8 @@ def market_quote(
             "ltp": round(float(ltp), 2),
             "source": broker_name,
             "as_of": datetime.now(timezone.utc).isoformat(),
+            "market_open": market_open,
+            "market_time_ist": now_ist.isoformat(),
             "display_only": True,
             "strategy_uses_completed_one_minute_candle": True,
             "cache_hit": False,
@@ -253,6 +270,8 @@ def market_quote(
             "source": broker_name,
             "message": str(exc)[:160],
             "as_of": datetime.now(timezone.utc).isoformat(),
+            "market_open": market_open,
+            "market_time_ist": now_ist.isoformat(),
         }
 
 
