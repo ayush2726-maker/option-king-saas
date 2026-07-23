@@ -15,6 +15,9 @@ import copy
 
 from backtest import range_routes
 from backtest import routes
+from backtest.auto_real_premium_integrity_patch import (
+    apply_auto_real_premium_integrity_patch,
+)
 from backtest.real_option_atr_patch import apply_real_option_atr_patch
 from backtest.real_option_contract_resolution_patch import (
     apply_real_option_contract_resolution_patch,
@@ -89,6 +92,9 @@ def finalize_real_option_premium_patch():
     # The compiled strategy resolves these module globals at runtime, so this
     # final wrapper upgrades SL calculation to causal ATR14 from option OHLC.
     apply_real_option_atr_patch()
+    # AUTO previously swallowed single-index option-data failures and returned a
+    # fake FLAT day. Install the integrity guard before final result routing.
+    apply_auto_real_premium_integrity_patch()
 
     original_run_mode = routes._okai_run_backtest_mode
 
