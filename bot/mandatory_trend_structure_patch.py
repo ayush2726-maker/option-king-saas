@@ -12,12 +12,14 @@ mandatory.  Existing reversal, ATR-extension, anti-chase, sideways and option
 premium guards remain active.
 """
 
+from backtest import routes as backtest_routes
 from bot import angel_fetcher
 from bot import auto_portfolio_runtime as runtime
 from bot import routes
 from bot import strategy
 
 MANDATORY_KEYS = ("vwap", "supertrend", "ema_trend")
+SUPERTREND_MULTIPLIER = 2.0
 
 
 def _number(value, default=0.0):
@@ -25,6 +27,128 @@ def _number(value, default=0.0):
         return float(value)
     except Exception:
         return float(default)
+
+
+def _apply_standard_supertrend(frame, multiplier=SUPERTREND_MULTIPLIER):
+    """Replace the neutral carry-forward approximation with standard Supertrend.
+
+    The existing indicator function already calculates TP and ATR. This helper
+    builds final upper/lower bands, initializes a real UP/DOWN state on the first
+    valid candle, and carries direction until price genuinely crosses the active
+    band. No completed candle is left permanently NEUTRAL.
+    """
+    if frame is None or getattr(frame, "empty", True):
+        return frame
+
+    required = {"TP", "ATR", "close"}
+    if not required.issubset(set(frame.columns)):
+        return frame
+
+    count = len(frame)
+    if count == 0:
+        return frame
+
+    basic_upper = frame["TP"] + (float(multiplier) * frame["ATR"])
+    basic_lower = frame["TP"] - (float(multiplier) * frame["ATR"])
+
+    final_upper = [_number(basic_upper.iloc[0])]
+    final_lower = [_number(basic_lower.iloc[0])]
+    first_close = _number(frame["close"].iloc[0])
+    first_tp = _number(frame["TP"].iloc[0], first_close)
+    first_direction = "UP" if first_close >= first_tp else "DOWN"
+    directions = [first_direction]
+    supertrend = [
+        final_lower[0] if first_direction == "UP" else final_upper[0]
+    ]
+
+    for index in range(1, count):
+        previous_close = _number(frame["close"].iloc[index - 1])
+        current_close = _number(frame["close"].iloc[index])
+        current_basic_upper = _number(
+            basic_upper.iloc[index],
+            final_upper[-1],
+        )
+        current_basic_lower = _number(
+            basic_lower.iloc[index],
+            final_lower[-1],
+        )
+
+        previous_final_upper = final_upper[-1]
+        previous_final_lower = final_lower[-1]
+
+        current_final_upper = (
+            current_basic_upper
+            if (
+                current_basic_upper < previous_final_upper
+                or previous_close > previous_final_upper
+            )
+            else previous_final_upper
+        )
+        current_final_lower = (
+            current_basic_lower
+            if (
+                current_basic_lower > previous_final_lower
+                or previous_close < previous_final_lower
+            )
+            else previous_final_lower
+        )
+
+        previous_direction = directions[-1]
+        if previous_direction == "DOWN":
+            if current_close > current_final_upper:
+                current_direction = "UP"
+                current_supertrend = current_final_lower
+            else:
+                current_direction = "DOWN"
+                current_supertrend = current_final_upper
+        else:
+            if current_close < current_final_lower:
+                current_direction = "DOWN"
+                current_supertrend = current_final_upper
+            else:
+                current_direction = "UP"
+                current_supertrend = current_final_lower
+
+        final_upper.append(current_final_upper)
+        final_lower.append(current_final_lower)
+        directions.append(current_direction)
+        supertrend.append(current_supertrend)
+
+    frame["BASIC_UPPER"] = basic_upper
+    frame["BASIC_LOWER"] = basic_lower
+    frame["UPPER"] = final_upper
+    frame["LOWER"] = final_lower
+    frame["SUPERTREND"] = supertrend
+    frame["ST_DIR"] = directions
+    return frame
+
+
+def _install_standard_supertrend_patch():
+    if getattr(angel_fetcher, "_okai_standard_supertrend_v1", False):
+        return
+
+    original_calculate_indicators = angel_fetcher.calculate_indicators
+
+    def calculate_indicators_with_standard_supertrend(dataframe):
+        result = original_calculate_indicators(dataframe)
+        if result is None:
+            return None
+
+        frame, trend = result
+        frame = _apply_standard_supertrend(frame)
+        return frame, trend
+
+    # Live/Paper calls resolve through angel_fetcher, while backtests imported the
+    # function directly into backtest.routes. Patch both references so all modes
+    # use exactly the same Supertrend state.
+    angel_fetcher.calculate_indicators = (
+        calculate_indicators_with_standard_supertrend
+    )
+    backtest_routes.calculate_indicators = (
+        calculate_indicators_with_standard_supertrend
+    )
+    angel_fetcher._okai_standard_supertrend_v1 = True
+    backtest_routes._okai_standard_supertrend_v1 = True
 
 
 def _checks(signal, market):
@@ -149,6 +273,7 @@ def _normalize(signal, market):
         "safety_gate_reasons": safety_reasons,
         "safety_gate_passed": eligible,
         "entry_timing_mode": "MANDATORY_VWAP_ST_EMA_V1",
+        "supertrend_model": "STANDARD_FINAL_BANDS_V1",
     })
     return output
 
@@ -180,6 +305,10 @@ def _summary(original, scan):
     summary["structure_required"] = 3
     summary["core_required"] = 3
     summary["safety_gate_reasons"] = reasons[:8]
+    summary["supertrend_model"] = signal.get(
+        "supertrend_model",
+        "STANDARD_FINAL_BANDS_V1",
+    )
 
     if summary["trade_allowed"]:
         summary["status"] = "QUALIFIED"
@@ -195,6 +324,10 @@ def _summary(original, scan):
 
 
 def apply_mandatory_trend_structure_patch():
+    # Install the indicator correction even if the signal wrapper was already
+    # applied earlier in the same process.
+    _install_standard_supertrend_patch()
+
     if getattr(strategy, "_okai_mandatory_structure_v1", False):
         return
 
