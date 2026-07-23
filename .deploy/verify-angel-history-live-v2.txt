@@ -1,1 +1,0 @@
-Verify Railway release angel-history-rate-fix-v2 is live.

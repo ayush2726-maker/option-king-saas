@@ -1,14 +1,5 @@
-.env
 *.db
+*.sqlite
+*.sqlite3
 __pycache__/
-*.pyc
-*.pyo
-.venv/
-venv/
-*.egg-info/
-dist/
-build/
-.DS_Store
-connect_angel.py
-/tmp/broker.json
-server.log
+.pytest_cache/
