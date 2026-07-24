@@ -90,6 +90,7 @@ from bot.eod_safety_testing_access_patch import (
 from bot.consecutive_loss_cooldown_patch import (
     apply_consecutive_loss_cooldown_patch,
 )
+from bot.breakeven_5pct_patch import apply_breakeven_5pct_patch
 import os
 
 # Must exist before broker routes handle connect/switch requests.
@@ -132,6 +133,9 @@ apply_normal_entry_cutoff_1445_patch()
 # expectancy by cutting weak trades and allowing real winners to run.
 apply_capital_based_sizing_restore_patch()
 apply_expectancy_engine_v1_patch()
+# First cost-safe trail now protects charges plus 5% net profit in PAPER, LIVE and
+# backtest while retaining the active expectancy runner schedule.
+apply_breakeven_5pct_patch()
 # Annotate the final Daily/Monthly/Range dispatchers only after every other wrapper
 # is installed, and reject any path that would silently mix estimated premiums.
 finalize_real_option_premium_patch()
@@ -139,11 +143,11 @@ finalize_real_option_premium_patch()
 # unlimited only inside 09:15-14:45 IST and prevents the 15:25 close/reopen loop.
 apply_eod_entry_guard_patch()
 # This must be the outermost runtime guard. It catches every negative exit reason,
-# including structural/manual exits, and blocks all fresh entries for 30 minutes
+# including structural/manual exits, and blocks all fresh entries for 15 minutes
 # after two consecutive net losing trades during the same IST day.
 apply_consecutive_loss_cooldown_patch()
 
-RELEASE_VERSION = "two-loss-cooldown-chart-sync-v1"
+RELEASE_VERSION = "breakeven-5pct-two-loss-15m-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
