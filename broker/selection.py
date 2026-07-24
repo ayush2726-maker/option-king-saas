@@ -1,13 +1,16 @@
 """Selected-broker source of truth for every user workflow.
 
 Exactly one saved broker may be active for a user. Paper, live, chart/data and
-all backtest routes read this same row, preventing a stale Upstox token from
-being used while Angel One (or another broker) is selected in the app.
+all backtest routes read this same row, preventing a stale token from another
+broker being used after the user changes broker in the app.
 """
 
 from __future__ import annotations
 
 from database import get_db
+
+
+UNIQUE_SELECTED_INDEX = "uq_broker_credentials_one_active_per_user"
 
 
 def get_selected_broker(conn, user_id: int):
@@ -39,7 +42,7 @@ def activate_selected_broker(conn, user_id: int, broker_name: str) -> bool:
 
 
 def normalize_all_selected_brokers() -> int:
-    """Repair old databases where multiple brokers were marked active.
+    """Repair legacy duplicates and enforce one selected broker in SQLite.
 
     The most recently connected active broker wins. Users with no active broker
     remain unselected; an old disconnected credential is never silently revived.
@@ -74,6 +77,13 @@ def normalize_all_selected_brokers() -> int:
             )
             repaired += 1
 
+        # Database-level guard: even concurrent requests cannot leave two active
+        # broker rows for the same user after this migration has run.
+        conn.execute(
+            f"""CREATE UNIQUE INDEX IF NOT EXISTS {UNIQUE_SELECTED_INDEX}
+                ON broker_credentials(user_id)
+                WHERE is_active=1"""
+        )
         conn.commit()
         return repaired
     finally:
