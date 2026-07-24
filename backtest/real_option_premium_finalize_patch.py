@@ -1,12 +1,9 @@
-"""Final result routing and metadata for real option-premium backtests.
+"""Final routing and metadata for selected-broker real-premium backtests.
 
-Install this after all other backtest wrappers. It keeps Daily, Monthly and Date
-Range results honest: REAL means every Normal/AUTO trade used an exact option
-contract and real one-minute option OHLC. There is no synthetic fallback.
-
-Hero Zero/Combined remain explicitly unavailable in REAL mode until their
-low-premium contract-selection path is migrated; returning an error is safer
-than mixing estimated expiry-gamma P&L into a result labelled REAL.
+Daily, Monthly and Date Range use the same broker selected for PAPER/LIVE.
+Upstox can use active and expired-instrument APIs. Angel One and Zerodha use
+exact active-contract one-minute OHLC; dates whose required contract is already
+expired are explicitly SKIPPED rather than estimated or silently rerouted.
 """
 
 from __future__ import annotations
@@ -18,56 +15,75 @@ from backtest import routes
 from backtest.auto_real_premium_integrity_patch import (
     apply_auto_real_premium_integrity_patch,
 )
+from backtest.multi_broker_real_premium_patch import (
+    GENERIC_REAL_MODEL,
+    SUPPORTED_REAL_BROKERS,
+)
 from backtest.real_option_atr_patch import apply_real_option_atr_patch
 from backtest.real_option_contract_resolution_patch import (
     apply_real_option_contract_resolution_patch,
 )
-from backtest.real_option_premium_patch import REAL_PREMIUM_MODEL
 
 
 REAL_NOTE = (
-    "Signals use real one-minute index candles. Entry, option ATR stop, profit "
-    "lock and exit use the exact selected option contract's real one-minute "
-    "OHLC candles. No estimated-premium fallback is allowed."
+    "Signals use the selected broker's real index candles. Entry, option ATR "
+    "stop, profit lock and exit use the exact selected option contract's real "
+    "one-minute OHLC candles. No estimated-premium or alternate-broker fallback."
 )
 
 
-def _annotate(result):
+def _annotate(result, broker_name=None):
     if not isinstance(result, dict):
         return result
 
     output = result
+    broker = str(
+        broker_name
+        or output.get("selected_broker")
+        or output.get("broker_name")
+        or ""
+    ).lower().strip()
+
     output["premium_mode"] = "REAL"
-    output["premium_model"] = REAL_PREMIUM_MODEL
+    output["premium_model"] = GENERIC_REAL_MODEL
     output["premium_data"] = "EXACT_OPTION_CONTRACT_OHLC_1M"
     output["option_atr_model"] = "CAUSAL_REAL_OPTION_ATR14"
     output["estimated_premium_fallback"] = False
+    output["alternate_broker_fallback"] = False
     output["note"] = REAL_NOTE
+    if broker:
+        output["selected_broker"] = broker
+        output["broker_name"] = broker
 
     summary = dict(output.get("summary") or {})
     summary.update({
         "premium_mode": "REAL",
-        "premium_model": REAL_PREMIUM_MODEL,
+        "premium_model": GENERIC_REAL_MODEL,
         "premium_data": "EXACT_OPTION_CONTRACT_OHLC_1M",
         "option_atr_model": "CAUSAL_REAL_OPTION_ATR14",
         "estimated_premium_fallback": False,
+        "alternate_broker_fallback": False,
         "note": REAL_NOTE,
     })
+    if broker:
+        summary["selected_broker"] = broker
     output["summary"] = summary
 
     auto_scan = dict(output.get("auto_scan") or {})
     if auto_scan:
         auto_scan.update({
             "premium_mode": "REAL",
-            "premium_model": REAL_PREMIUM_MODEL,
+            "premium_model": GENERIC_REAL_MODEL,
+            "selected_broker": broker or auto_scan.get("selected_broker"),
         })
         output["auto_scan"] = auto_scan
 
     return output
 
 
-def _unsupported_strategy_result(strategy_mode):
+def _unsupported_strategy_result(strategy_mode, broker_name=None):
     selected = str(strategy_mode or "NORMAL").upper()
+    broker = str(broker_name or "").lower().strip()
     return {
         "success": False,
         "message": (
@@ -76,24 +92,22 @@ def _unsupported_strategy_result(strategy_mode):
             "Hero Zero/Combined ko estimated gamma ke saath mix nahi kiya gaya."
         ),
         "strategy_mode": selected,
+        "selected_broker": broker or None,
         "premium_mode": "REAL",
-        "premium_model": REAL_PREMIUM_MODEL,
+        "premium_model": GENERIC_REAL_MODEL,
         "estimated_premium_fallback": False,
+        "alternate_broker_fallback": False,
     }
 
 
 def finalize_real_option_premium_patch():
-    if getattr(routes, "_okai_real_option_premium_final_v1", False):
+    if getattr(routes, "_okai_real_option_premium_final_v2", False):
         return
 
-    # Recent completed dates may still use a currently active option contract and
-    # therefore do not need the Plus-only expired endpoints. Older contracts do.
+    # Upstox-specific resolver still provides expired-instrument support. The
+    # runtime dispatcher installed earlier handles Angel One/Zerodha active data.
     apply_real_option_contract_resolution_patch()
-    # The compiled strategy resolves these module globals at runtime, so this
-    # final wrapper upgrades SL calculation to causal ATR14 from option OHLC.
     apply_real_option_atr_patch()
-    # AUTO previously swallowed single-index option-data failures and returned a
-    # fake FLAT day. Install the integrity guard before final result routing.
     apply_auto_real_premium_integrity_patch()
 
     original_run_mode = routes._okai_run_backtest_mode
@@ -106,26 +120,43 @@ def finalize_real_option_premium_patch():
         if "strategy_mode" not in kwargs and len(args) >= 9:
             strategy_mode = args[8]
 
-        if str(broker_name or "").lower() != "upstox":
+        broker = str(broker_name or "").lower().strip()
+        if broker not in SUPPORTED_REAL_BROKERS:
             return {
                 "success": False,
-                "message": "REAL_PREMIUM_REQUIRES_UPSTOX_BROKER",
+                "message": "REAL_PREMIUM_SELECTED_BROKER_UNSUPPORTED",
+                "selected_broker": broker or None,
                 "premium_mode": "REAL",
-                "premium_model": REAL_PREMIUM_MODEL,
+                "premium_model": GENERIC_REAL_MODEL,
                 "estimated_premium_fallback": False,
+                "alternate_broker_fallback": False,
             }
 
         if str(strategy_mode or "NORMAL").upper() != "NORMAL":
-            return _unsupported_strategy_result(strategy_mode)
+            return _unsupported_strategy_result(strategy_mode, broker)
 
-        return _annotate(original_run_mode(*args, **kwargs))
+        return _annotate(
+            original_run_mode(*args, **kwargs),
+            broker,
+        )
 
     routes._okai_run_backtest_mode = real_run_mode
 
     original_monthly_sync = routes._okai_run_monthly_backtest_sync
 
     def real_monthly_sync(*args, **kwargs):
-        return _annotate(original_monthly_sync(*args, **kwargs))
+        result = original_monthly_sync(*args, **kwargs)
+        # Day/trade metadata carries the exact broker; preserve it at summary
+        # level when available without guessing from another saved credential.
+        broker = None
+        if isinstance(result, dict):
+            broker = result.get("selected_broker") or result.get("broker_name")
+            if not broker:
+                for trade in result.get("trades") or []:
+                    broker = trade.get("selected_broker") or trade.get("broker_name")
+                    if broker:
+                        break
+        return _annotate(result, broker)
 
     routes._okai_run_monthly_backtest_sync = real_monthly_sync
 
@@ -140,4 +171,6 @@ def finalize_real_option_premium_patch():
     range_routes._update_job = real_range_update
 
     routes._okai_real_option_premium_final_v1 = True
+    routes._okai_real_option_premium_final_v2 = True
     range_routes._okai_real_option_premium_final_v1 = True
+    range_routes._okai_real_option_premium_final_v2 = True
