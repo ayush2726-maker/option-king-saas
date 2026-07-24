@@ -87,6 +87,9 @@ from bot.eod_safety_testing_access_patch import (
     apply_eod_entry_guard_patch,
     initialize_testing_access_and_cleanup,
 )
+from bot.consecutive_loss_cooldown_patch import (
+    apply_consecutive_loss_cooldown_patch,
+)
 import os
 
 # Must exist before broker routes handle connect/switch requests.
@@ -135,8 +138,12 @@ finalize_real_option_premium_patch()
 # This is the final live/PAPER AUTO entry wrapper. It keeps PAPER observation
 # unlimited only inside 09:15-14:45 IST and prevents the 15:25 close/reopen loop.
 apply_eod_entry_guard_patch()
+# This must be the outermost runtime guard. It catches every negative exit reason,
+# including structural/manual exits, and blocks all fresh entries for 30 minutes
+# after two consecutive net losing trades during the same IST day.
+apply_consecutive_loss_cooldown_patch()
 
-RELEASE_VERSION = "eod-reentry-full-access-pnl-sync-v1"
+RELEASE_VERSION = "two-loss-cooldown-chart-sync-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
