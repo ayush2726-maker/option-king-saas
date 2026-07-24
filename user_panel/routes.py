@@ -3,6 +3,7 @@ from database import get_db
 from auth.routes import get_current_user
 from strategy.routes import DEFAULT_SETTINGS
 from telegram.routes import notify_user
+from bot.net_pnl_history_patch import backfill_closed_trade_costs
 from datetime import datetime, timedelta
 import json
 
@@ -16,6 +17,72 @@ def row_to_dict(row):
         return dict(row)
     except Exception:
         return {}
+
+
+def _number(value, default=0.0):
+    try:
+        number = float(value)
+        return number if number == number else float(default)
+    except Exception:
+        return float(default)
+
+
+def _iso_utc_timestamp(value):
+    """Make SQLite UTC timestamps parseable by Android/iOS JavaScript Date."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return text
+    if " " in text and "T" not in text:
+        text = text.replace(" ", "T", 1)
+    if text.endswith("Z"):
+        return text
+    # SQLite datetime('now') and backend naive ISO values are UTC.
+    if len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+        if "+" not in text[10:] and not (
+            len(text) >= 6 and text[-6:-5] in ("+", "-") and text[-3:-2] == ":"
+        ):
+            text += "Z"
+    return text
+
+
+def _paper_trade_view(row):
+    trade = row_to_dict(row)
+
+    for key in (
+        "created_at",
+        "updated_at",
+        "entry_time",
+        "exit_time",
+        "closed_at",
+        "timestamp",
+    ):
+        if trade.get(key):
+            trade[key] = _iso_utc_timestamp(trade.get(key))
+
+    # Closed rows are backfilled to net P&L. Keep the legacy `pnl` field equal to
+    # net P&L so old mobile chart code remains correct without an app rebuild.
+    if trade.get("net_pnl") is not None:
+        trade["pnl"] = round(_number(trade.get("net_pnl")), 2)
+        trade["net_pnl"] = round(_number(trade.get("net_pnl")), 2)
+    elif trade.get("pnl") is not None:
+        trade["pnl"] = round(_number(trade.get("pnl")), 2)
+
+    for key in (
+        "entry_price",
+        "exit_price",
+        "gross_pnl",
+        "slippage_cost",
+        "total_charges",
+        "brokerage",
+        "statutory_charges",
+    ):
+        if trade.get(key) is not None:
+            trade[key] = round(_number(trade.get(key)), 2)
+
+    return trade
+
 
 def ensure_tables(conn):
     conn.execute("""
@@ -123,16 +190,30 @@ def trade_history(authorization: str = Header(None)):
 @router.get("/history/paper")
 def paper_history(authorization: str = Header(None)):
     user = get_current_user(authorization)
+
+    # Convert old gross rows to net P&L before the graph reads them.
+    try:
+        backfill_closed_trade_costs(user["id"])
+    except Exception:
+        pass
+
     conn = get_db()
     ensure_tables(conn)
 
     rows = conn.execute(
-        "SELECT * FROM paper_trades WHERE user_id=? ORDER BY id DESC LIMIT 100",
+        "SELECT * FROM paper_trades WHERE user_id=? ORDER BY id DESC LIMIT 250",
         (user["id"],)
     ).fetchall()
+    trades = [_paper_trade_view(row) for row in rows]
 
     conn.close()
-    return {"success": True, "paper_trades": [row_to_dict(r) for r in rows]}
+    return {
+        "success": True,
+        "paper_trades": trades,
+        "count": len(trades),
+        "pnl_basis": "NET_AFTER_EXECUTION_COSTS",
+        "timestamp_format": "ISO_UTC",
+    }
 
 @router.get("/reports/daily")
 def daily_report(authorization: str = Header(None)):
@@ -343,4 +424,4 @@ def reset_all_settings(body: dict = None, authorization: str = Header(None)):
         f"♻️ <b>All Settings Reset</b>\nMode: PAPER\nPaper Capital: ₹{capital:,.0f}\nBroker credentials not removed."
     )
 
-    return {"success": True, "message": "All settings reset. Broker credentials not removed.", "settings": settings}
+    return {"success": True, "message": "All Settings Reset. Broker credentials not removed.", "settings": settings}
