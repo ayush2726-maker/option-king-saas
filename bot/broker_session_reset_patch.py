@@ -3,9 +3,23 @@
 from __future__ import annotations
 
 from bot import angel_fetcher
+from bot.completed_candle_direction_patch import (
+    apply_completed_candle_direction_patch,
+)
+from bot.live_net_pnl_breakeven_patch import (
+    apply_live_net_pnl_breakeven_patch,
+)
+from bot.net_pnl_history_patch import install_net_pnl_history_patch
 
 
 def apply_broker_session_reset_patch() -> None:
+    # These accounting/direction patches were previously present but could be
+    # skipped after later startup refactors. Install them before every runtime
+    # wrapper so Paper, Live and UI history use one consistent source of truth.
+    apply_live_net_pnl_breakeven_patch()
+    apply_completed_candle_direction_patch()
+    install_net_pnl_history_patch()
+
     if getattr(angel_fetcher, "_okai_broker_session_reset_v2", False):
         return
 
