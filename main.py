@@ -7,6 +7,7 @@ from auth.registration_email_middleware import SafeRegistrationEmailVerification
 from local_gateway.routes import router as local_gateway_router
 from local_gateway.service import ensure_local_gateway_schema
 from broker.routes import router as broker_router
+from broker.selection import normalize_all_selected_brokers
 from subscription.routes import router as subscription_router
 from admin.routes import router as admin_router
 from bot.routes import router as bot_router
@@ -79,9 +80,12 @@ from bot.capital_based_sizing_restore_patch import (
     apply_capital_based_sizing_restore_patch,
 )
 from bot.expectancy_engine_v1_patch import apply_expectancy_engine_v1_patch
+from bot.broker_session_reset_patch import apply_broker_session_reset_patch
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
 import os
 
+# Must exist before broker routes handle connect/switch requests.
+apply_broker_session_reset_patch()
 apply_score_history_patch()
 apply_upstox_live_candle_patch()
 apply_live_scan_history_fallback_patch()
@@ -124,7 +128,7 @@ apply_expectancy_engine_v1_patch()
 # is installed, and reject any path that would silently mix estimated premiums.
 finalize_real_option_premium_patch()
 
-RELEASE_VERSION = "real-option-premium-backtest-v1"
+RELEASE_VERSION = "selected-broker-everywhere-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
@@ -154,6 +158,13 @@ def startup():
 
     from database import init_bot_status_table
     init_bot_status_table()
+
+    # Repair old users that had Angel/Upstox/Zerodha simultaneously active.
+    # The most recently connected active broker remains selected.
+    repaired = normalize_all_selected_brokers()
+    if repaired:
+        print(f"Broker selection normalized for {repaired} user(s)")
+
     migrate_default_strategy_profiles()
 
     admin_email = os.getenv("ADMIN_EMAIL")
