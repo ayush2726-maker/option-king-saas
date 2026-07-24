@@ -18,6 +18,7 @@ from backtest.auto_real_premium_integrity_patch import (
 from backtest.multi_broker_real_premium_patch import (
     GENERIC_REAL_MODEL,
     SUPPORTED_REAL_BROKERS,
+    apply_multi_broker_real_premium_patch,
 )
 from backtest.real_option_atr_patch import apply_real_option_atr_patch
 from backtest.real_option_contract_resolution_patch import (
@@ -104,8 +105,13 @@ def finalize_real_option_premium_patch():
     if getattr(routes, "_okai_real_option_premium_final_v2", False):
         return
 
+    # prepare_real_option_premium_patch() installed the Upstox helper earlier.
+    # Replace its runtime dispatcher now so the compiled strategy asks the exact
+    # broker selected by the user for option OHLC.
+    apply_multi_broker_real_premium_patch()
+
     # Upstox-specific resolver still provides expired-instrument support. The
-    # runtime dispatcher installed earlier handles Angel One/Zerodha active data.
+    # runtime dispatcher handles Angel One/Zerodha active contract data.
     apply_real_option_contract_resolution_patch()
     apply_real_option_atr_patch()
     apply_auto_real_premium_integrity_patch()
@@ -146,8 +152,6 @@ def finalize_real_option_premium_patch():
 
     def real_monthly_sync(*args, **kwargs):
         result = original_monthly_sync(*args, **kwargs)
-        # Day/trade metadata carries the exact broker; preserve it at summary
-        # level when available without guessing from another saved credential.
         broker = None
         if isinstance(result, dict):
             broker = result.get("selected_broker") or result.get("broker_name")
