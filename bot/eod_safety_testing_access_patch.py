@@ -25,6 +25,11 @@ IST = ZoneInfo("Asia/Kolkata")
 AUTO_ENTRY_START_MINUTE = 9 * 60 + 15
 AUTO_ENTRY_CUTOFF_MINUTE = 14 * 60 + 45
 HARD_EOD_MINUTE = 15 * 60 + 25
+REQUESTED_ADMIN_PURGE_IST_DATES = {
+    "2026-07-20",
+    "2026-07-21",
+    "2026-07-22",
+}
 
 _ACCESS_REFRESH_SECONDS = 30
 _access_lock = threading.Lock()
@@ -240,6 +245,108 @@ def cleanup_invalid_eod_paper_entries() -> int:
         conn.close()
 
 
+def cleanup_requested_admin_trade_dates() -> dict:
+    """Permanently remove the owner's PAPER trades for 20-22 July 2026 IST.
+
+    The request is deliberately scoped to admin/owner accounts so another user's
+    testing history cannot be removed by a deployment cleanup.  Bot totals are
+    recalculated from the remaining rows, keeping the dashboard and history P&L
+    consistent after deletion.
+    """
+    conn = get_db()
+    removed_by_date = {
+        day: 0 for day in sorted(REQUESTED_ADMIN_PURGE_IST_DATES)
+    }
+    affected_users: set[int] = set()
+    try:
+        admin_rows = conn.execute(
+            "SELECT id FROM users WHERE COALESCE(is_admin, 0)=1"
+        ).fetchall()
+        admin_ids = [int(row["id"]) for row in admin_rows]
+        if not admin_ids:
+            return {
+                "removed": 0,
+                "removed_by_date": removed_by_date,
+                "affected_users": 0,
+            }
+
+        placeholders = ",".join("?" for _ in admin_ids)
+        rows = conn.execute(
+            f"SELECT * FROM paper_trades WHERE user_id IN ({placeholders}) ORDER BY id ASC",
+            tuple(admin_ids),
+        ).fetchall()
+
+        for row in rows:
+            trade = dict(row)
+            created_utc = _parse_utc_timestamp(trade.get("created_at"))
+            if created_utc is None:
+                continue
+            ist_day = created_utc.astimezone(IST).date().isoformat()
+            if ist_day not in REQUESTED_ADMIN_PURGE_IST_DATES:
+                continue
+
+            trade_id = int(trade.get("id") or 0)
+            user_id = int(trade.get("user_id") or 0)
+            if trade_id <= 0 or user_id <= 0:
+                continue
+
+            conn.execute("DELETE FROM paper_trades WHERE id=?", (trade_id,))
+            try:
+                conn.execute(
+                    "DELETE FROM auto_reentry_blocks WHERE source_trade_id=?",
+                    (trade_id,),
+                )
+            except Exception:
+                pass
+            removed_by_date[ist_day] += 1
+            affected_users.add(user_id)
+
+        paper_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(paper_trades)").fetchall()
+        }
+        pnl_column = "net_pnl" if "net_pnl" in paper_columns else "pnl"
+        for user_id in affected_users:
+            summary = conn.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS total_trades,
+                    COALESCE(SUM(
+                        CASE
+                            WHEN UPPER(COALESCE(status, ''))='CLOSED'
+                            THEN COALESCE({pnl_column}, 0)
+                            ELSE 0
+                        END
+                    ), 0) AS total_pnl
+                FROM paper_trades
+                WHERE user_id=?
+                """,
+                (user_id,),
+            ).fetchone()
+            conn.execute(
+                """
+                UPDATE bot_status
+                SET total_trades=?, total_pnl=?, updated_at=?
+                WHERE user_id=?
+                """,
+                (
+                    int(summary["total_trades"] or 0),
+                    round(float(summary["total_pnl"] or 0), 2),
+                    datetime.now(timezone.utc).isoformat(),
+                    user_id,
+                ),
+            )
+
+        conn.commit()
+        return {
+            "removed": sum(removed_by_date.values()),
+            "removed_by_date": removed_by_date,
+            "affected_users": len(affected_users),
+        }
+    finally:
+        conn.close()
+
+
 def activate_testing_access(force: bool = False) -> int:
     """Keep every active account fully enabled while public testing is running."""
     global _last_access_refresh
@@ -273,9 +380,13 @@ def activate_testing_access(force: bool = False) -> int:
 
 
 def initialize_testing_access_and_cleanup() -> dict:
+    requested_cleanup = cleanup_requested_admin_trade_dates()
     return {
         "testing_access_users_updated": activate_testing_access(force=True),
         "invalid_eod_paper_trades_removed": cleanup_invalid_eod_paper_entries(),
+        "requested_trade_dates_removed": requested_cleanup["removed"],
+        "requested_trade_dates_breakdown": requested_cleanup["removed_by_date"],
+        "requested_trade_cleanup_users": requested_cleanup["affected_users"],
     }
 
 
@@ -367,5 +478,5 @@ class TestingFullAccessAndFreshDataMiddleware(BaseHTTPMiddleware):
             response.headers["Expires"] = "0"
 
         response.headers["X-OKAI-Testing-Access"] = "full"
-        response.headers["X-OKAI-Release"] = "eod-reentry-full-access-pnl-sync-v1"
+        response.headers["X-OKAI-Release"] = "admin-trade-purge-jul20-22-v1"
         return response
