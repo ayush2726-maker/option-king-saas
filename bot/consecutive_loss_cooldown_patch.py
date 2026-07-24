@@ -3,7 +3,7 @@
 The older guard only reacted to PURE ATR SL on the same index and same side.
 Losses closed by structural reversal, EOD, manual exit, or another side/index
 could therefore be followed by a new position in the same monitor cycle.  This
-patch is installed last and blocks every fresh AUTO entry for 30 minutes after
+patch is installed last and blocks every fresh AUTO entry for 15 minutes after
 any two consecutive net losing trades during the same IST trading day.
 """
 
@@ -16,8 +16,8 @@ from bot import auto_portfolio_runtime as runtime
 
 
 IST = ZoneInfo("Asia/Kolkata")
-COOLDOWN_MINUTES = 30
-BLOCK_REASON = "TWO_CONSECUTIVE_LOSSES_GLOBAL_COOLDOWN_30M"
+COOLDOWN_MINUTES = 15
+BLOCK_REASON = "TWO_CONSECUTIVE_LOSSES_GLOBAL_COOLDOWN_15M"
 
 
 def _now_utc() -> datetime:
