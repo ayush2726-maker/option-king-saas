@@ -82,6 +82,11 @@ from bot.capital_based_sizing_restore_patch import (
 from bot.expectancy_engine_v1_patch import apply_expectancy_engine_v1_patch
 from bot.broker_session_reset_patch import apply_broker_session_reset_patch
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
+from bot.eod_safety_testing_access_patch import (
+    TestingFullAccessAndFreshDataMiddleware,
+    apply_eod_entry_guard_patch,
+    initialize_testing_access_and_cleanup,
+)
 import os
 
 # Must exist before broker routes handle connect/switch requests.
@@ -127,8 +132,11 @@ apply_expectancy_engine_v1_patch()
 # Annotate the final Daily/Monthly/Range dispatchers only after every other wrapper
 # is installed, and reject any path that would silently mix estimated premiums.
 finalize_real_option_premium_patch()
+# This is the final live/PAPER AUTO entry wrapper. It keeps PAPER observation
+# unlimited only inside 09:15-14:45 IST and prevents the 15:25 close/reopen loop.
+apply_eod_entry_guard_patch()
 
-RELEASE_VERSION = "selected-broker-everywhere-v1"
+RELEASE_VERSION = "eod-reentry-full-access-pnl-sync-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
@@ -141,6 +149,7 @@ app = FastAPI(
 app.add_middleware(BacktestActiveStrategyMiddleware)
 app.add_middleware(StrictSignalHistoryMiddleware)
 app.add_middleware(SafeRegistrationEmailVerificationMiddleware)
+app.add_middleware(TestingFullAccessAndFreshDataMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -158,6 +167,13 @@ def startup():
 
     from database import init_bot_status_table
     init_bot_status_table()
+
+    testing_init = initialize_testing_access_and_cleanup()
+    print(
+        "Testing access/EOD cleanup | "
+        f"users={testing_init['testing_access_users_updated']} | "
+        f"removed={testing_init['invalid_eod_paper_trades_removed']}"
+    )
 
     # Repair old users that had Angel/Upstox/Zerodha simultaneously active.
     # The most recently connected active broker remains selected.
