@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from fastapi import BackgroundTasks, Header
 
 from backtest import routes
+from backtest.unlimited_range_patch import apply_unlimited_range_patch
 
 
 STALE_JOB_SECONDS = 45 * 60
@@ -114,6 +115,10 @@ def _remove_original_monthly_start_route():
 
 
 def apply_monthly_job_start_patch():
+    # main.py already calls this patch on every server boot. Activating the range
+    # override here removes the 366-day ceiling without disturbing route order.
+    apply_unlimited_range_patch()
+
     if getattr(routes, "_okai_monthly_job_start_v2", False):
         return
 
