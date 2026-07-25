@@ -18,7 +18,7 @@ from bot.news_intelligence import (
     news_health,
     start_news_intelligence,
 )
-from bot.advanced_intelligence import (
+from bot.advanced_intelligence_v2 import (
     health as advanced_health,
     summary as get_advanced_summary,
     start as start_advanced_intelligence,
@@ -220,14 +220,15 @@ def ai_health():
             "started": advanced.get("started"),
             "thread_alive": advanced.get("thread_alive"),
             "last_cycle_at": advanced.get("last_cycle_at"),
-            "last_global_fetch_at": advanced.get("last_global_fetch_at"),
             "last_error": advanced.get("last_error"),
             "snapshot_count": advanced.get("snapshots"),
-            "actual_trade_label_count": advanced.get("actual_trade_labels"),
-            "broker_neutral": advanced.get("broker_neutral"),
+            "outcome_count": advanced.get("outcomes"),
             "supported_brokers": advanced.get("supported_brokers"),
+            "model": advanced.get("model"),
             "location": "RAILWAY",
-            "storage_persistent": bool(advanced_storage.get("persistent")),
+            "storage_persistent": bool(
+                advanced_storage.get("persistent")
+            ),
             "trade_blocking": False,
             "order_execution": False,
         },
@@ -308,7 +309,7 @@ def get_ai_advanced_monitor(
     authorization: str = Header(None),
     recent_limit: int = 20,
 ):
-    """Broker-neutral option/global/news/calibration shadow report."""
+    """Broker-neutral option/global/model shadow report."""
     user = get_current_user(authorization)
     return get_advanced_summary(
         user["id"],
