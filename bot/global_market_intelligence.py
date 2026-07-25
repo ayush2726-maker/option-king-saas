@@ -9,6 +9,9 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict
 
+# Installs the exact-expiry Upstox chain resolver after broker_intelligence loads.
+import bot.upstox_option_intelligence_patch  # noqa: F401
+
 VERSION = "OKAI-GLOBAL-MARKET-INTELLIGENCE-V1"
 REFRESH_SECONDS = 180
 DEFAULT_SYMBOLS = {
