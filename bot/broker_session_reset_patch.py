@@ -10,6 +10,9 @@ from bot.live_net_pnl_breakeven_patch import (
     apply_live_net_pnl_breakeven_patch,
 )
 from bot.net_pnl_history_patch import install_net_pnl_history_patch
+from bot.shared_trial_paper_feed_patch import (
+    apply_shared_trial_paper_feed_patch,
+)
 
 
 def apply_broker_session_reset_patch() -> None:
@@ -21,6 +24,7 @@ def apply_broker_session_reset_patch() -> None:
     install_net_pnl_history_patch()
 
     if getattr(angel_fetcher, "_okai_broker_session_reset_v2", False):
+        apply_shared_trial_paper_feed_patch()
         return
 
     def reset_user_broker_runtime(user_id: int):
@@ -78,3 +82,7 @@ def apply_broker_session_reset_patch() -> None:
     angel_fetcher.reset_user_broker_runtime = reset_user_broker_runtime
     angel_fetcher._okai_broker_session_reset_v1 = True
     angel_fetcher._okai_broker_session_reset_v2 = True
+
+    # New trial/testing users can start isolated PAPER bots using the owner's
+    # selected broker only as a shared market-data source. LIVE remains personal.
+    apply_shared_trial_paper_feed_patch()
