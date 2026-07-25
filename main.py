@@ -8,6 +8,10 @@ from local_gateway.routes import router as local_gateway_router
 from local_gateway.service import ensure_local_gateway_schema
 from broker.routes import router as broker_router
 from broker.selection import normalize_all_selected_brokers
+from broker.selected_broker_control import (
+    router as broker_selection_router,
+    repair_admin_angel_selection_once,
+)
 from subscription.routes import router as subscription_router
 from admin.routes import router as admin_router
 from bot.routes import router as bot_router
@@ -147,7 +151,7 @@ apply_eod_entry_guard_patch()
 # after two consecutive net losing trades during the same IST day.
 apply_consecutive_loss_cooldown_patch()
 
-RELEASE_VERSION = "breakeven-4pct-two-loss-15m-v1"
+RELEASE_VERSION = "angel-selected-broker-backtest-source-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
@@ -239,6 +243,16 @@ def startup():
             print(f"Admin created: {admin_email}")
         conn.close()
 
+    # The broker page used to default visually to Angel even when stale Upstox was
+    # still selected. Repair the reported owner mismatch once; later switches remain
+    # fully user-controlled through /broker/select/{broker_name}.
+    admin_broker_repaired = repair_admin_angel_selection_once()
+    if admin_broker_repaired:
+        print(
+            "Admin selected broker repaired to Angel One for "
+            f"{admin_broker_repaired} user(s)"
+        )
+
     # Run once more after the admin row is guaranteed to exist, so the owner's
     # generated editable default copy receives the balanced weights immediately.
     migrate_default_strategy_profiles()
@@ -250,6 +264,7 @@ app.include_router(auth_router)
 app.include_router(recovery_router)
 app.include_router(local_gateway_router)
 app.include_router(broker_router)
+app.include_router(broker_selection_router)
 app.include_router(subscription_router)
 app.include_router(admin_router)
 app.include_router(bot_router)
