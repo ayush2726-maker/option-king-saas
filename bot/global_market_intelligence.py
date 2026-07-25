@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict
@@ -12,7 +13,7 @@ from typing import Any, Dict
 # Installs the exact-expiry Upstox chain resolver after broker_intelligence loads.
 import bot.upstox_option_intelligence_patch  # noqa: F401
 
-VERSION = "OKAI-GLOBAL-MARKET-INTELLIGENCE-V1"
+VERSION = "OKAI-GLOBAL-MARKET-INTELLIGENCE-V2"
 REFRESH_SECONDS = 180
 DEFAULT_SYMBOLS = {
     "sp500": "%5EGSPC",
@@ -22,6 +23,7 @@ DEFAULT_SYMBOLS = {
     "crude": "CL%3DF",
     "usd_inr": "USDINR%3DX",
     "india_vix": "%5EINDIAVIX",
+    "us_10y": "%5ETNX",
 }
 _lock = threading.RLock()
 _cached: Dict[str, Any] = {}
@@ -41,6 +43,9 @@ def _iso():
 
 def _symbols():
     result = dict(DEFAULT_SYMBOLS)
+    gift = str(os.getenv("OKAI_GIFT_NIFTY_YAHOO_SYMBOL", "")).strip()
+    if gift:
+        result["gift_nifty"] = urllib.parse.quote(gift, safe="%")
     raw = str(os.getenv("OKAI_GLOBAL_MARKET_SYMBOLS_JSON", "")).strip()
     if raw:
         try:
@@ -56,7 +61,7 @@ def _fetch(name, symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=2d&interval=5m"
     request = urllib.request.Request(
         url,
-        headers={"User-Agent": "OptionKingAI-GlobalMonitor/1.0", "Accept": "application/json"},
+        headers={"User-Agent": "OptionKingAI-GlobalMonitor/2.0", "Accept": "application/json"},
     )
     with urllib.request.urlopen(request, timeout=8) as response:
         payload = json.loads(response.read().decode("utf-8", "replace"))
@@ -77,18 +82,33 @@ def _fetch(name, symbol):
 
 def _risk_summary(values):
     score = 0.0
-    for name, weight in (("sp500", 1.2), ("nasdaq", 1.1), ("nikkei", 0.8), ("hang_seng", 0.8)):
+    for name, weight in (
+        ("sp500", 1.2),
+        ("nasdaq", 1.1),
+        ("nikkei", 0.8),
+        ("hang_seng", 0.8),
+        ("gift_nifty", 1.4),
+    ):
         score += max(-2.5, min(2.5, _f((values.get(name) or {}).get("change_percent")))) * weight
     score -= max(-4.0, min(4.0, _f((values.get("crude") or {}).get("change_percent")))) * 0.45
     score -= max(-1.5, min(1.5, _f((values.get("usd_inr") or {}).get("change_percent")))) * 1.3
     score -= max(-8.0, min(8.0, _f((values.get("india_vix") or {}).get("change_percent")))) * 0.35
+    score -= max(-4.0, min(4.0, _f((values.get("us_10y") or {}).get("change_percent")))) * 0.40
     available = sum(_f(item.get("last_price")) > 0 for item in values.values())
+    risk = (
+        abs(_f((values.get("india_vix") or {}).get("change_percent"))) * 4.0
+        + abs(_f((values.get("us_10y") or {}).get("change_percent"))) * 3.0
+        + max(0.0, _f((values.get("crude") or {}).get("change_percent"))) * 2.0
+        + max(0.0, _f((values.get("usd_inr") or {}).get("change_percent"))) * 5.0
+    )
     return {
         "direction": "CE" if score >= 0.9 else "PE" if score <= -0.9 else "NEUTRAL",
         "risk_on_score": round(score, 4),
+        "global_risk_score": round(max(0.0, min(100.0, risk)), 2),
         "available_count": available,
         "expected_count": len(values),
         "data_coverage_score": round(available / max(1, len(values)) * 100.0, 2),
+        "gift_nifty_configured": "gift_nifty" in values,
     }
 
 
@@ -125,3 +145,12 @@ def snapshot(force=False):
         _cached = dict(result)
         _cached_mono = current
     return result
+
+
+# Runs after this module and advanced_intelligence_v2 have both defined the
+# functions that need wrapping. The patch is safe and idempotent.
+try:
+    from bot.institutional_flow_patch import install as _install_institutional_flow
+    _install_institutional_flow()
+except Exception as exc:
+    print(f"AI INSTITUTIONAL OVERLAY WARNING | {type(exc).__name__}:{str(exc)[:180]}")
