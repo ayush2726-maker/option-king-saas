@@ -8,6 +8,11 @@ from fastapi import APIRouter, Body, Header, HTTPException
 from auth.routes import get_current_user
 from bot.angel_fetcher import get_user_bot_state
 from bot.shared_ai import MODEL_VERSION, predict
+from bot.ai_shadow_monitor import (
+    get_shadow_summary,
+    shadow_monitor_health,
+    start_railway_shadow_monitor,
+)
 
 
 router = APIRouter(tags=["Shared Railway AI"])
@@ -57,24 +62,75 @@ def _user_snapshot(user_id: int) -> Dict[str, Any]:
     strategy = str(state.get("strategy") or "")
     signal = str(state.get("signal") or "WAITING")
 
-    engine_ready = strategy == "TQU_ENHANCED" and price > 0
-    feed_connected = bool(engine_ready and feed_age_ms <= 130000 and not status.startswith("ERROR"))
+    engine_ready = (
+        strategy in {"TQU_ENHANCED", "CUSTOM_PROFILE_V1"}
+        or state.get("engine_mode") == "AUTO_PORTFOLIO_V1"
+    )
+    engine_ready = bool(engine_ready and price > 0)
+    feed_connected = bool(
+        engine_ready
+        and feed_age_ms <= 130000
+        and not status.startswith("ERROR")
+    )
 
     return {
         "source": "SAAS_RAILWAY_ENGINE",
-        "symbol": state.get("underlying") or "NIFTY",
+        "symbol": (
+            state.get("underlying")
+            or state.get("chart_instrument")
+            or "NIFTY"
+        ),
         "price": price,
         "signal": signal,
         "signal_direction": _signal_direction(signal),
         "strategy_score": int(_to_float(state.get("score"), 0)),
         "min_strategy_score": int(
-            _to_float(state.get("min_score_required", state.get("min_score", 82)), 82)
+            _to_float(
+                state.get(
+                    "min_score_required",
+                    state.get("min_score", 82),
+                ),
+                82,
+            )
         ),
         "server_trade_allowed": bool(state.get("trade_allowed", False)),
+        "ema_fast": _to_float(
+            state.get("ema9", state.get("ema_fast")),
+            price,
+        ),
+        "ema_slow": _to_float(
+            state.get("ema21", state.get("ema_slow")),
+            price,
+        ),
+        "vwap": _to_float(state.get("vwap"), price),
+        "supertrend_direction": (
+            state.get("supertrend_direction")
+            or state.get("supertrend_dir")
+            or state.get("supertrend")
+            or ""
+        ),
+        "structure_direction": (
+            state.get("structure_direction")
+            or state.get("market_structure")
+            or ""
+        ),
+        "mtf_direction": (
+            state.get("mtf_direction")
+            or state.get("mtf_trend")
+            or ""
+        ),
         "adx": _to_float(state.get("adx"), 0.0),
+        "rsi": _to_float(state.get("rsi"), 50.0),
+        "atr": _to_float(state.get("atr"), 0.0),
+        "atr_percent": _to_float(state.get("atr_percent"), 0.0),
         "volume_ratio": _to_float(state.get("volume_ratio"), 0.0),
+        "spread_percent": _to_float(state.get("spread_percent"), 0.0),
         "mtf_confirmed": bool(state.get("mtf_confirmed", False)),
-        "market_regime": state.get("market_regime") or state.get("regime") or "",
+        "market_regime": (
+            state.get("market_regime")
+            or state.get("regime")
+            or ""
+        ),
         "warnings": state.get("warnings") or [],
         "strategy": strategy,
         "engine_status": status,
@@ -82,7 +138,10 @@ def _user_snapshot(user_id: int) -> Dict[str, Any]:
         "feed_age_ms": feed_age_ms,
         "feed_connected": feed_connected,
         "market_open": _market_open_ist(now_utc),
-        "has_open_position": bool(state.get("active_trade") or state.get("has_open_position")),
+        "has_open_position": bool(
+            state.get("active_trade")
+            or state.get("has_open_position")
+        ),
         "server_time": now_utc.isoformat(),
     }
 
@@ -90,7 +149,10 @@ def _user_snapshot(user_id: int) -> Dict[str, Any]:
 def _require_personal_ai_key(x_ai_key: Optional[str]) -> None:
     expected = os.getenv("OKAI_AI_API_KEY", "").strip()
     if not expected:
-        raise HTTPException(status_code=503, detail="OKAI_AI_API_KEY is not configured on Railway")
+        raise HTTPException(
+            status_code=503,
+            detail="OKAI_AI_API_KEY is not configured on Railway",
+        )
     provided = str(x_ai_key or "").strip()
     if not provided or not hmac.compare_digest(provided, expected):
         raise HTTPException(status_code=401, detail="Invalid AI API key")
@@ -98,12 +160,27 @@ def _require_personal_ai_key(x_ai_key: Optional[str]) -> None:
 
 @router.get("/ai/health")
 def ai_health():
+    monitor = shadow_monitor_health()
+    storage = monitor.get("storage") or {}
     return {
         "success": True,
         "service": "Option King Shared Railway AI",
         "model_version": MODEL_VERSION,
-        "personal_api_key_configured": bool(os.getenv("OKAI_AI_API_KEY", "").strip()),
+        "personal_api_key_configured": bool(
+            os.getenv("OKAI_AI_API_KEY", "").strip()
+        ),
         "order_execution": False,
+        "shadow_monitor": {
+            "monitor_version": monitor.get("monitor_version"),
+            "started": monitor.get("started"),
+            "thread_alive": monitor.get("thread_alive"),
+            "last_cycle_at": monitor.get("last_cycle_at"),
+            "last_error": monitor.get("last_error"),
+            "location": "RAILWAY",
+            "storage_persistent": bool(storage.get("persistent")),
+            "trade_blocking": False,
+            "order_execution": False,
+        },
     }
 
 
@@ -145,5 +222,24 @@ def get_ai_decision(authorization: str = Header(None)):
         **result,
         "decision_location": "RAILWAY_SHARED_AI",
         "order_execution": False,
+        "trade_blocking": False,
         "snapshot": snapshot,
     }
+
+
+@router.get("/bot/ai-shadow-monitor")
+def get_ai_shadow_monitor(
+    authorization: str = Header(None),
+    recent_limit: int = 20,
+):
+    """Railway-persistent counterfactual AI outcome report for this user."""
+    user = get_current_user(authorization)
+    return get_shadow_summary(
+        user["id"],
+        recent_limit=recent_limit,
+    )
+
+
+# This starts a daemon inside Railway, restores persisted running bot sessions,
+# and continuously evaluates AI decisions without touching any trade path.
+start_railway_shadow_monitor(_user_snapshot)
