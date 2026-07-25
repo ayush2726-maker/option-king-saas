@@ -18,6 +18,11 @@ from bot.news_intelligence import (
     news_health,
     start_news_intelligence,
 )
+from bot.advanced_intelligence import (
+    health as advanced_health,
+    summary as get_advanced_summary,
+    start as start_advanced_intelligence,
+)
 
 
 router = APIRouter(tags=["Shared Railway AI"])
@@ -43,7 +48,13 @@ def _feed_age_ms(updated_at, now_utc: datetime) -> int:
         parsed = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
-        return max(0, int((now_utc - parsed.astimezone(timezone.utc)).total_seconds() * 1000))
+        return max(
+            0,
+            int(
+                (now_utc - parsed.astimezone(timezone.utc)).total_seconds()
+                * 1000
+            ),
+        )
     except Exception:
         return 999999
 
@@ -169,6 +180,8 @@ def ai_health():
     storage = monitor.get("storage") or {}
     news = news_health()
     news_storage = news.get("storage") or {}
+    advanced = advanced_health()
+    advanced_storage = advanced.get("storage") or {}
     return {
         "success": True,
         "service": "Option King Shared Railway AI",
@@ -199,6 +212,22 @@ def ai_health():
             "source_counts": news.get("source_counts"),
             "location": "RAILWAY",
             "storage_persistent": bool(news_storage.get("persistent")),
+            "trade_blocking": False,
+            "order_execution": False,
+        },
+        "advanced_intelligence": {
+            "version": advanced.get("version"),
+            "started": advanced.get("started"),
+            "thread_alive": advanced.get("thread_alive"),
+            "last_cycle_at": advanced.get("last_cycle_at"),
+            "last_global_fetch_at": advanced.get("last_global_fetch_at"),
+            "last_error": advanced.get("last_error"),
+            "snapshot_count": advanced.get("snapshots"),
+            "actual_trade_label_count": advanced.get("actual_trade_labels"),
+            "broker_neutral": advanced.get("broker_neutral"),
+            "supported_brokers": advanced.get("supported_brokers"),
+            "location": "RAILWAY",
+            "storage_persistent": bool(advanced_storage.get("persistent")),
             "trade_blocking": False,
             "order_execution": False,
         },
@@ -274,6 +303,20 @@ def get_ai_news_monitor(
     )
 
 
-# Both daemons are Railway-resident and monitoring-only.
+@router.get("/bot/ai-advanced-monitor")
+def get_ai_advanced_monitor(
+    authorization: str = Header(None),
+    recent_limit: int = 20,
+):
+    """Broker-neutral option/global/news/calibration shadow report."""
+    user = get_current_user(authorization)
+    return get_advanced_summary(
+        user["id"],
+        limit=recent_limit,
+    )
+
+
+# All daemons are Railway-resident and monitoring-only.
 start_railway_shadow_monitor(_user_snapshot)
 start_news_intelligence(_user_snapshot)
+start_advanced_intelligence(_user_snapshot)
