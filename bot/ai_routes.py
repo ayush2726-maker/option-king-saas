@@ -18,12 +18,13 @@ from bot.news_intelligence import (
     news_health,
     start_news_intelligence,
 )
-from bot.advanced_intelligence import (
-    health as advanced_health,
-    summary as get_advanced_summary,
-    start as start_advanced_intelligence,
+from bot.advanced_intelligence_v2 import (
+    advanced_health,
+    get_advanced_summary,
+    start_advanced_intelligence,
 )
-
+from bot.adaptive_model_v2 import model_status
+from bot.broker_intelligence import BROKER_CAPABILITIES
 
 router = APIRouter(tags=["Shared Railway AI"])
 
@@ -48,13 +49,7 @@ def _feed_age_ms(updated_at, now_utc: datetime) -> int:
         parsed = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
-        return max(
-            0,
-            int(
-                (now_utc - parsed.astimezone(timezone.utc)).total_seconds()
-                * 1000
-            ),
-        )
+        return max(0, int((now_utc - parsed.astimezone(timezone.utc)).total_seconds() * 1000))
     except Exception:
         return 999999
 
@@ -77,64 +72,36 @@ def _user_snapshot(user_id: int) -> Dict[str, Any]:
     status = str(state.get("status") or "NOT_STARTED")
     strategy = str(state.get("strategy") or "")
     signal = str(state.get("signal") or "WAITING")
-
     engine_ready = (
         strategy in {"TQU_ENHANCED", "CUSTOM_PROFILE_V1"}
         or state.get("engine_mode") == "AUTO_PORTFOLIO_V1"
     )
     engine_ready = bool(engine_ready and price > 0)
     feed_connected = bool(
-        engine_ready
-        and feed_age_ms <= 130000
-        and not status.startswith("ERROR")
+        engine_ready and feed_age_ms <= 130000 and not status.startswith("ERROR")
     )
-
     return {
         "source": "SAAS_RAILWAY_ENGINE",
-        "symbol": (
-            state.get("underlying")
-            or state.get("chart_instrument")
-            or "NIFTY"
-        ),
+        "symbol": state.get("underlying") or state.get("chart_instrument") or "NIFTY",
         "price": price,
         "signal": signal,
         "signal_direction": _signal_direction(signal),
         "strategy_score": int(_to_float(state.get("score"), 0)),
         "min_strategy_score": int(
-            _to_float(
-                state.get(
-                    "min_score_required",
-                    state.get("min_score", 82),
-                ),
-                82,
-            )
+            _to_float(state.get("min_score_required", state.get("min_score", 82)), 82)
         ),
         "server_trade_allowed": bool(state.get("trade_allowed", False)),
-        "ema_fast": _to_float(
-            state.get("ema9", state.get("ema_fast")),
-            price,
-        ),
-        "ema_slow": _to_float(
-            state.get("ema21", state.get("ema_slow")),
-            price,
-        ),
+        "ema_fast": _to_float(state.get("ema9", state.get("ema_fast")), price),
+        "ema_slow": _to_float(state.get("ema21", state.get("ema_slow")), price),
         "vwap": _to_float(state.get("vwap"), price),
         "supertrend_direction": (
-            state.get("supertrend_direction")
-            or state.get("supertrend_dir")
-            or state.get("supertrend")
-            or ""
+            state.get("supertrend_direction") or state.get("supertrend_dir")
+            or state.get("supertrend") or ""
         ),
         "structure_direction": (
-            state.get("structure_direction")
-            or state.get("market_structure")
-            or ""
+            state.get("structure_direction") or state.get("market_structure") or ""
         ),
-        "mtf_direction": (
-            state.get("mtf_direction")
-            or state.get("mtf_trend")
-            or ""
-        ),
+        "mtf_direction": state.get("mtf_direction") or state.get("mtf_trend") or "",
         "adx": _to_float(state.get("adx"), 0.0),
         "rsi": _to_float(state.get("rsi"), 50.0),
         "atr": _to_float(state.get("atr"), 0.0),
@@ -142,11 +109,7 @@ def _user_snapshot(user_id: int) -> Dict[str, Any]:
         "volume_ratio": _to_float(state.get("volume_ratio"), 0.0),
         "spread_percent": _to_float(state.get("spread_percent"), 0.0),
         "mtf_confirmed": bool(state.get("mtf_confirmed", False)),
-        "market_regime": (
-            state.get("market_regime")
-            or state.get("regime")
-            or ""
-        ),
+        "market_regime": state.get("market_regime") or state.get("regime") or "",
         "warnings": state.get("warnings") or [],
         "strategy": strategy,
         "engine_status": status,
@@ -154,10 +117,7 @@ def _user_snapshot(user_id: int) -> Dict[str, Any]:
         "feed_age_ms": feed_age_ms,
         "feed_connected": feed_connected,
         "market_open": _market_open_ist(now_utc),
-        "has_open_position": bool(
-            state.get("active_trade")
-            or state.get("has_open_position")
-        ),
+        "has_open_position": bool(state.get("active_trade") or state.get("has_open_position")),
         "server_time": now_utc.isoformat(),
     }
 
@@ -165,10 +125,7 @@ def _user_snapshot(user_id: int) -> Dict[str, Any]:
 def _require_personal_ai_key(x_ai_key: Optional[str]) -> None:
     expected = os.getenv("OKAI_AI_API_KEY", "").strip()
     if not expected:
-        raise HTTPException(
-            status_code=503,
-            detail="OKAI_AI_API_KEY is not configured on Railway",
-        )
+        raise HTTPException(status_code=503, detail="OKAI_AI_API_KEY is not configured on Railway")
     provided = str(x_ai_key or "").strip()
     if not provided or not hmac.compare_digest(provided, expected):
         raise HTTPException(status_code=401, detail="Invalid AI API key")
@@ -186,9 +143,7 @@ def ai_health():
         "success": True,
         "service": "Option King Shared Railway AI",
         "model_version": MODEL_VERSION,
-        "personal_api_key_configured": bool(
-            os.getenv("OKAI_AI_API_KEY", "").strip()
-        ),
+        "personal_api_key_configured": bool(os.getenv("OKAI_AI_API_KEY", "").strip()),
         "order_execution": False,
         "shadow_monitor": {
             "monitor_version": monitor.get("monitor_version"),
@@ -220,14 +175,13 @@ def ai_health():
             "started": advanced.get("started"),
             "thread_alive": advanced.get("thread_alive"),
             "last_cycle_at": advanced.get("last_cycle_at"),
-            "last_global_fetch_at": advanced.get("last_global_fetch_at"),
             "last_error": advanced.get("last_error"),
-            "snapshot_count": advanced.get("snapshots"),
-            "actual_trade_label_count": advanced.get("actual_trade_labels"),
-            "broker_neutral": advanced.get("broker_neutral"),
-            "supported_brokers": advanced.get("supported_brokers"),
+            "decision_count": advanced.get("decision_count"),
+            "pending_count": advanced.get("pending_count"),
+            "adaptive_models": advanced.get("adaptive_models"),
             "location": "RAILWAY",
             "storage_persistent": bool(advanced_storage.get("persistent")),
+            "supported_brokers": ["angelone", "upstox", "zerodha"],
             "trade_blocking": False,
             "order_execution": False,
         },
@@ -239,11 +193,6 @@ def shared_ai_predict(
     snapshot: Dict[str, Any] = Body(...),
     x_ai_key: Optional[str] = Header(None, alias="X-AI-Key"),
 ):
-    """Prediction endpoint used by the personal bot.
-
-    It receives market features only. Broker credentials and order instructions
-    must never be sent to this endpoint.
-    """
     _require_personal_ai_key(x_ai_key)
     result = predict(dict(snapshot or {}))
     result["decision_location"] = "RAILWAY_SHARED_AI"
@@ -255,16 +204,11 @@ def shared_ai_predict(
 def get_ai_snapshot(authorization: str = Header(None)):
     user = get_current_user(authorization)
     snapshot = _user_snapshot(user["id"])
-    return {
-        "success": True,
-        "decision_location": "RAILWAY_SHARED_AI",
-        **snapshot,
-    }
+    return {"success": True, "decision_location": "RAILWAY_SHARED_AI", **snapshot}
 
 
 @router.get("/bot/ai-decision")
 def get_ai_decision(authorization: str = Header(None)):
-    """Authenticated SaaS prediction using the same shared AI core."""
     user = get_current_user(authorization)
     snapshot = _user_snapshot(user["id"])
     result = predict(snapshot)
@@ -278,45 +222,42 @@ def get_ai_decision(authorization: str = Header(None)):
 
 
 @router.get("/bot/ai-shadow-monitor")
-def get_ai_shadow_monitor(
-    authorization: str = Header(None),
-    recent_limit: int = 20,
-):
-    """Railway-persistent counterfactual AI outcome report for this user."""
+def get_ai_shadow_monitor(authorization: str = Header(None), recent_limit: int = 20):
     user = get_current_user(authorization)
-    return get_shadow_summary(
-        user["id"],
-        recent_limit=recent_limit,
-    )
+    return get_shadow_summary(user["id"], recent_limit=recent_limit)
 
 
 @router.get("/bot/ai-news-monitor")
-def get_ai_news_monitor(
-    authorization: str = Header(None),
-    recent_limit: int = 20,
-):
-    """Global-news, market-reaction and fusion shadow report."""
+def get_ai_news_monitor(authorization: str = Header(None), recent_limit: int = 20):
     user = get_current_user(authorization)
-    return get_news_summary(
-        user["id"],
-        recent_limit=recent_limit,
-    )
+    return get_news_summary(user["id"], recent_limit=recent_limit)
 
 
 @router.get("/bot/ai-advanced-monitor")
-def get_ai_advanced_monitor(
-    authorization: str = Header(None),
-    recent_limit: int = 20,
-):
-    """Broker-neutral option/global/news/calibration shadow report."""
+def get_ai_advanced_monitor(authorization: str = Header(None), recent_limit: int = 20):
     user = get_current_user(authorization)
-    return get_advanced_summary(
-        user["id"],
-        limit=recent_limit,
-    )
+    return get_advanced_summary(user["id"], recent_limit=recent_limit)
 
 
-# All daemons are Railway-resident and monitoring-only.
+@router.get("/bot/ai-model-status")
+def get_ai_model_status(authorization: str = Header(None)):
+    get_current_user(authorization)
+    return model_status()
+
+
+@router.get("/bot/ai-broker-capabilities")
+def get_ai_broker_capabilities(authorization: str = Header(None)):
+    get_current_user(authorization)
+    return {
+        "success": True,
+        "brokers": BROKER_CAPABILITIES,
+        "core_ai_runs_for_every_supported_broker": True,
+        "missing_native_fields_are_derived_or_marked_unavailable": True,
+        "trade_blocking": False,
+        "order_execution": False,
+    }
+
+
 start_railway_shadow_monitor(_user_snapshot)
 start_news_intelligence(_user_snapshot)
 start_advanced_intelligence(_user_snapshot)
