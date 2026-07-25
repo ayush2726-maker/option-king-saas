@@ -13,6 +13,11 @@ from bot.ai_shadow_monitor import (
     shadow_monitor_health,
     start_railway_shadow_monitor,
 )
+from bot.news_intelligence import (
+    get_news_summary,
+    news_health,
+    start_news_intelligence,
+)
 
 
 router = APIRouter(tags=["Shared Railway AI"])
@@ -162,6 +167,8 @@ def _require_personal_ai_key(x_ai_key: Optional[str]) -> None:
 def ai_health():
     monitor = shadow_monitor_health()
     storage = monitor.get("storage") or {}
+    news = news_health()
+    news_storage = news.get("storage") or {}
     return {
         "success": True,
         "service": "Option King Shared Railway AI",
@@ -178,6 +185,20 @@ def ai_health():
             "last_error": monitor.get("last_error"),
             "location": "RAILWAY",
             "storage_persistent": bool(storage.get("persistent")),
+            "trade_blocking": False,
+            "order_execution": False,
+        },
+        "news_intelligence": {
+            "news_version": news.get("news_version"),
+            "started": news.get("started"),
+            "thread_alive": news.get("thread_alive"),
+            "last_cycle_at": news.get("last_cycle_at"),
+            "last_fetch_at": news.get("last_fetch_at"),
+            "last_error": news.get("last_error"),
+            "recent_event_count": news.get("recent_event_count"),
+            "source_counts": news.get("source_counts"),
+            "location": "RAILWAY",
+            "storage_persistent": bool(news_storage.get("persistent")),
             "trade_blocking": False,
             "order_execution": False,
         },
@@ -240,6 +261,19 @@ def get_ai_shadow_monitor(
     )
 
 
-# This starts a daemon inside Railway, restores persisted running bot sessions,
-# and continuously evaluates AI decisions without touching any trade path.
+@router.get("/bot/ai-news-monitor")
+def get_ai_news_monitor(
+    authorization: str = Header(None),
+    recent_limit: int = 20,
+):
+    """Global-news, market-reaction and fusion shadow report."""
+    user = get_current_user(authorization)
+    return get_news_summary(
+        user["id"],
+        recent_limit=recent_limit,
+    )
+
+
+# Both daemons are Railway-resident and monitoring-only.
 start_railway_shadow_monitor(_user_snapshot)
+start_news_intelligence(_user_snapshot)
