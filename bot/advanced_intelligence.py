@@ -301,8 +301,15 @@ def register_snapshot(user_id, market, base, option_payload, news, advanced):
             if when and same and (now - when).total_seconds() < RECORD_SPACING_SECONDS:
                 return None
         decision_id = uuid.uuid4().hex[:20]
-        conn.execute("""INSERT INTO ai_advanced_snapshots VALUES(
-        ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,0,0)""", (
+        conn.execute("""INSERT INTO ai_advanced_snapshots(
+        id,user_id,created_at,broker,symbol,spot,base_decision,base_confidence,
+        base_probabilities_json,option_decision,option_confidence,news_bias,
+        news_strength,news_risk,advanced_decision,advanced_confidence,
+        advanced_probabilities_json,reasons_json,feature_json,option_summary_json,
+        global_market_json,news_snapshot_json,adaptive_model_json,ce_contract_json,
+        pe_contract_json,data_coverage_score,option_risk_score,complete,completed_at,
+        trade_blocking,order_execution) VALUES(
+        ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,0,0)""", (
             decision_id,user_id,_iso(now),str(option_payload.get("broker") or ""),str(market.get("symbol") or "NIFTY"),round(_f(market.get("price")),2),
             _direction(base.get("decision")),_i(base.get("confidence")),_dumps(base.get("probabilities") or {}),
             str(option.get("option_direction") or "NO_TRADE"),_i(option.get("option_confidence")),str(news.get("news_bias") or "NEUTRAL"),
