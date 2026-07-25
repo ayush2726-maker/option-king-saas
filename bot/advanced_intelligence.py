@@ -11,6 +11,8 @@ for _part_name in (
     "advanced_intelligence_2.inc",
     "advanced_intelligence_3.inc",
     "advanced_intelligence_4.inc",
+    "advanced_intelligence_5.inc",
+    "advanced_intelligence_6.inc",
 ):
     _path = _BASE / _part_name
     exec(
