@@ -13,6 +13,9 @@ from bot.net_pnl_history_patch import install_net_pnl_history_patch
 from bot.shared_trial_paper_feed_patch import (
     apply_shared_trial_paper_feed_patch,
 )
+from bot.capital_continuity_patch import (
+    apply_capital_continuity_patch,
+)
 
 
 def apply_broker_session_reset_patch() -> None:
@@ -22,9 +25,11 @@ def apply_broker_session_reset_patch() -> None:
     apply_live_net_pnl_breakeven_patch()
     apply_completed_candle_direction_patch()
     install_net_pnl_history_patch()
+    apply_capital_continuity_patch()
 
     if getattr(angel_fetcher, "_okai_broker_session_reset_v2", False):
         apply_shared_trial_paper_feed_patch()
+        apply_capital_continuity_patch()
         return
 
     def reset_user_broker_runtime(user_id: int):
@@ -86,3 +91,4 @@ def apply_broker_session_reset_patch() -> None:
     # New trial/testing users can start isolated PAPER bots using the owner's
     # selected broker only as a shared market-data source. LIVE remains personal.
     apply_shared_trial_paper_feed_patch()
+    apply_capital_continuity_patch()
