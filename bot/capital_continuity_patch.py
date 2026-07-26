@@ -9,7 +9,6 @@ already-reduced cash balance.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 
 from fastapi import Header
@@ -56,8 +55,10 @@ def _paper_summary(conn, user_id: int, settings: dict) -> dict:
     where = [
         "user_id=?",
         "status='CLOSED'",
-        "COALESCE(trading_mode, 'paper')='paper'",
     ]
+    if _has_column(conn, "paper_trades", "trading_mode"):
+        where.append("COALESCE(trading_mode, 'paper')='paper'")
+
     params = [int(user_id)]
     if reset_at:
         where.append("datetime(created_at) >= datetime(?)")
@@ -141,11 +142,15 @@ def _reset_continuous_paper_account(
     try:
         settings = paper_routes.load_settings(conn, int(user["id"]))
         try:
+            mode_filter = (
+                " AND COALESCE(trading_mode, 'paper')='paper'"
+                if _has_column(conn, "paper_trades", "trading_mode")
+                else ""
+            )
             open_trade = conn.execute(
-                """
+                f"""
                 SELECT id FROM paper_trades
-                WHERE user_id=? AND status='OPEN'
-                  AND COALESCE(trading_mode, 'paper')='paper'
+                WHERE user_id=? AND status='OPEN'{mode_filter}
                 LIMIT 1
                 """,
                 (int(user["id"]),),
