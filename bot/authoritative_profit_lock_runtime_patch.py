@@ -18,6 +18,7 @@ from typing import Any, Dict
 
 from bot import auto_portfolio_runtime as runtime
 from bot import live_net_pnl_breakeven_patch as live_cost
+from bot.trade_visibility_metrics_patch import apply_trade_visibility_metrics_patch
 
 
 TICK_SIZE = 0.05
@@ -141,6 +142,7 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
 
 def apply_authoritative_profit_lock_runtime_patch() -> None:
     if getattr(runtime, "_okai_authoritative_profit_lock_v1", False):
+        apply_trade_visibility_metrics_patch()
         return
 
     previous_evaluate = runtime._evaluate_exit
@@ -179,3 +181,4 @@ def apply_authoritative_profit_lock_runtime_patch() -> None:
     evaluate_with_authoritative_trail._okai_authoritative_profit_lock_v1 = True
     runtime._evaluate_exit = evaluate_with_authoritative_trail
     runtime._okai_authoritative_profit_lock_v1 = True
+    apply_trade_visibility_metrics_patch()
