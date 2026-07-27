@@ -25,6 +25,9 @@ from bot.advanced_intelligence_v2 import (
 )
 from bot.adaptive_model_v2 import model_status
 from bot.broker_intelligence import BROKER_CAPABILITIES
+from bot.advanced_ai_data_recovery_patch import (
+    apply_advanced_ai_data_recovery_patch,
+)
 
 router = APIRouter(tags=["Shared Railway AI"])
 
@@ -179,6 +182,8 @@ def ai_health():
             "decision_count": advanced.get("decision_count"),
             "pending_count": advanced.get("pending_count"),
             "adaptive_models": advanced.get("adaptive_models"),
+            "live_probe_count": advanced.get("live_probe_count"),
+            "live_probes": advanced.get("live_probes"),
             "location": "RAILWAY",
             "storage_persistent": bool(advanced_storage.get("persistent")),
             "supported_brokers": ["angelone", "upstox", "zerodha"],
@@ -257,6 +262,15 @@ def get_ai_broker_capabilities(authorization: str = Header(None)):
         "order_execution": False,
     }
 
+
+# Install the shadow-only recovery before starting any monitor threads.  Rebind the
+# imported names so the already-defined route functions resolve the patched live
+# summary and health functions at request time.
+apply_advanced_ai_data_recovery_patch()
+from bot import advanced_intelligence_v2 as _advanced_runtime
+advanced_health = _advanced_runtime.advanced_health
+get_advanced_summary = _advanced_runtime.get_advanced_summary
+start_advanced_intelligence = _advanced_runtime.start_advanced_intelligence
 
 start_railway_shadow_monitor(_user_snapshot)
 start_news_intelligence(_user_snapshot)
