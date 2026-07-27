@@ -14,6 +14,9 @@ from bot import angel_fetcher
 from bot import dynamic_exit
 from bot import live_net_pnl_breakeven_patch as live_cost
 from bot import strategy
+from bot.authoritative_profit_lock_runtime_patch import (
+    apply_authoritative_profit_lock_runtime_patch,
+)
 
 
 NET_PROFIT_LOCK_PERCENT = 4.0
@@ -86,5 +89,10 @@ def apply_breakeven_4pct_patch() -> None:
     backtest_lock = _wrap(getattr(backtest_routes, "update_option_profit_lock", None))
     if callable(backtest_lock):
         backtest_routes.update_option_profit_lock = backtest_lock
+
+    # Final runtime authority: recalculate the stop from the actual broker, index,
+    # quantity and PAPER/LIVE mode. This repairs any stale legacy helper chain while
+    # keeping the agreed 0.75R / 1.35R / 2.20R / 3.20R schedule unchanged.
+    apply_authoritative_profit_lock_runtime_patch()
 
     angel_fetcher._okai_breakeven_4pct_v1 = True
