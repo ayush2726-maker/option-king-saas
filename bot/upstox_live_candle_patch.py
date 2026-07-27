@@ -9,6 +9,7 @@ import threading
 import time
 
 from bot import angel_fetcher
+from bot.angel_index_token_patch import apply_angel_index_token_patch
 
 
 _lock = threading.Lock()
@@ -206,6 +207,8 @@ def _get_upstox_candles(broker_obj, underlying):
 
 
 def apply_upstox_live_candle_patch():
+    apply_angel_index_token_patch()
+
     if getattr(angel_fetcher, "_okai_upstox_live_patch_v2", False):
         return
 
