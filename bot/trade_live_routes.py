@@ -46,6 +46,123 @@ def _number(value, default=0.0):
         return float(default)
 
 
+def _optional_number(value):
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+        return number if number == number else None
+    except Exception:
+        return None
+
+
+def _round_price(value):
+    number = _optional_number(value)
+    return round(number, 2) if number is not None else None
+
+
+def _money(value):
+    number = _optional_number(value)
+    return "--" if number is None else f"₹{number:.2f}"
+
+
+def _time_ist(value):
+    if not value:
+        return None
+    try:
+        text = str(value).strip().replace(" ", "T")
+        if text.endswith("Z"):
+            parsed = datetime.fromisoformat(text[:-1] + "+00:00")
+        else:
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+        ist = parsed.astimezone(timezone.utc) + timedelta(hours=5, minutes=30)
+        return ist.strftime("%H:%M IST")
+    except Exception:
+        return None
+
+
+def _history_metrics(row, status, entry, qty):
+    exit_price = _optional_number(_row_value(row, "exit_price"))
+    last_ltp = _optional_number(_row_value(row, "last_ltp"))
+    peak = _optional_number(_row_value(row, "peak_price"))
+    saved_high = _optional_number(_row_value(row, "high_price"))
+    saved_low = _optional_number(_row_value(row, "low_price"))
+
+    price_candidates = [entry]
+    for value in (exit_price, last_ltp, peak, saved_high, saved_low):
+        if value is not None and value > 0:
+            price_candidates.append(value)
+
+    current = last_ltp if last_ltp is not None else (exit_price if exit_price is not None else entry)
+    high = saved_high if saved_high is not None and saved_high > 0 else max(price_candidates)
+    low = saved_low if saved_low is not None and saved_low > 0 else min(price_candidates)
+
+    high_pnl = _optional_number(_row_value(row, "high_net_pnl"))
+    if high_pnl is None:
+        high_pnl = _optional_number(_row_value(row, "high_pnl"))
+    if high_pnl is None:
+        high_pnl = max(0.0, (high - entry) * qty)
+
+    low_pnl = _optional_number(_row_value(row, "low_net_pnl"))
+    if low_pnl is None:
+        low_pnl = _optional_number(_row_value(row, "low_pnl"))
+    if low_pnl is None:
+        low_pnl = min(0.0, (low - entry) * qty)
+
+    return {
+        "current_price": _round_price(current),
+        "live_price": _round_price(current),
+        "last_ltp": _round_price(last_ltp),
+        "high_price": _round_price(high),
+        "low_price": _round_price(low),
+        "high_pnl": round(high_pnl, 2),
+        "high_net_pnl": round(high_pnl, 2),
+        "low_pnl": round(low_pnl, 2),
+        "low_net_pnl": round(low_pnl, 2),
+        "max_favourable_points": round(max(0.0, high - entry), 2),
+        "max_adverse_points": round(max(0.0, entry - low), 2),
+        "entry_time": _row_value(row, "entry_time") or _row_value(row, "created_at"),
+        "exit_time": _row_value(row, "exit_time") or _row_value(row, "closed_at"),
+        "current_price_source": "RUNTIME_LAST_LTP" if last_ltp is not None else "EXIT_PRICE",
+    }
+
+
+def _display_reason(row, trade, status):
+    base_reason = str(_row_value(row, "reason", "") or "").split("\n", 1)[0].strip()
+    if status == "OPEN":
+        return base_reason
+
+    high = trade.get("high_price")
+    low = trade.get("low_price")
+    current = trade.get("current_price")
+    high_pnl = _optional_number(trade.get("high_net_pnl") or trade.get("high_pnl"))
+    low_pnl = _optional_number(trade.get("low_net_pnl") or trade.get("low_pnl"))
+    entry_time = _time_ist(trade.get("entry_time") or _row_value(row, "created_at"))
+    exit_time = _time_ist(trade.get("exit_time"))
+
+    parts = [
+        f"High {_money(high)}",
+        f"Low {_money(low)}",
+        f"Now {_money(current)}",
+    ]
+    if high_pnl is not None:
+        parts.append(f"Max +₹{high_pnl:.0f}")
+    if low_pnl is not None and low_pnl < 0:
+        parts.append(f"Worst ₹{low_pnl:.0f}")
+
+    time_parts = []
+    if entry_time:
+        time_parts.append(f"Entry {entry_time}")
+    if exit_time:
+        time_parts.append(f"Exit {exit_time}")
+
+    metric_line = " • ".join(parts)
+    time_line = " • ".join(time_parts)
+    return "\n".join(x for x in (base_reason, metric_line, time_line) if x)
+
+
 def _trade_view(row):
     """Return one trade with net P&L fields normalized for the app."""
     trade = dict(row)
@@ -53,9 +170,11 @@ def _trade_view(row):
     entry = _number(_row_value(row, "entry_price"), 0.0)
     qty = int(_number(_row_value(row, "qty"), 0))
 
+    metrics = _history_metrics(row, status, entry, qty)
+    trade.update(metrics)
+
     if status == "OPEN":
-        raw_ltp = _row_value(row, "last_ltp")
-        current = _number(raw_ltp, entry) if raw_ltp is not None else entry
+        current = _number(trade.get("current_price"), entry)
         try:
             costs = calculate_row_net_costs(row, exit_price=current)
         except Exception:
@@ -69,8 +188,6 @@ def _trade_view(row):
         net = round(_number(costs.get("net_pnl"), gross - charges), 2)
         trade.update(
             {
-                "current_price": round(current, 2),
-                "live_price": round(current, 2),
                 "gross_pnl": gross,
                 "estimated_exit_costs": charges,
                 "total_charges": charges,
@@ -91,18 +208,33 @@ def _trade_view(row):
         elif trade.get("pnl") is not None:
             trade["pnl"] = round(_number(trade.get("pnl")), 2)
 
-        for key in (
-            "entry_price",
-            "exit_price",
-            "gross_pnl",
-            "slippage_cost",
-            "total_charges",
-            "brokerage",
-            "statutory_charges",
-        ):
-            if trade.get(key) is not None:
-                trade[key] = round(_number(trade.get(key)), 2)
+    for key in (
+        "entry_price",
+        "exit_price",
+        "gross_pnl",
+        "slippage_cost",
+        "total_charges",
+        "brokerage",
+        "statutory_charges",
+        "high_price",
+        "low_price",
+        "high_pnl",
+        "low_pnl",
+        "high_net_pnl",
+        "low_net_pnl",
+        "current_price",
+        "live_price",
+        "last_ltp",
+    ):
+        if trade.get(key) is not None:
+            trade[key] = round(_number(trade.get(key)), 2)
 
+    trade["reason"] = _display_reason(row, trade, status)
+    trade["visibility_metrics"] = {
+        "shows_high_low_after_close": True,
+        "shows_latest_saved_price_after_close": True,
+        "current_price_source": trade.get("current_price_source"),
+    }
     return trade
 
 
@@ -196,6 +328,7 @@ def get_trade_history(authorization: str = Header(None)):
         "count": len(trades),
         "today": _today_summary(trades),
         "pnl_basis": "NET_AFTER_EXECUTION_COSTS",
+        "history_display": "HIGH_LOW_NOW_ENTRY_EXIT_TIME_V2",
     }
 
 
