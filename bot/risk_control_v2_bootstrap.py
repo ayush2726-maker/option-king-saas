@@ -6,6 +6,7 @@ from bot.risk_control_v2_patch import (
     _install_backtest_risk_sizing,
     apply_risk_control_v2_patch,
 )
+from bot.balanced_exit_cooldown_patch import apply_balanced_exit_cooldown_patch
 
 
 if not getattr(frequency_patch, "_okai_risk_control_v2_hook", False):
@@ -19,6 +20,7 @@ if not getattr(frequency_patch, "_okai_risk_control_v2_hook", False):
         # dispatcher so backtest lot sizing remains identical to live/paper.
         backtest_routes._okai_risk_sizing_v2 = False
         _install_backtest_risk_sizing()
+        apply_balanced_exit_cooldown_patch()
 
     frequency_patch.apply_live_frequency_portfolio_patch = (
         apply_frequency_then_risk_control
@@ -27,3 +29,4 @@ if not getattr(frequency_patch, "_okai_risk_control_v2_hook", False):
 
 
 apply_risk_control_v2_patch()
+apply_balanced_exit_cooldown_patch()
