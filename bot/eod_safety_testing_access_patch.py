@@ -1,9 +1,8 @@
 """Final AUTO EOD safety, invalid-trade cleanup and testing access.
 
-This module is intentionally applied after every strategy/runtime wrapper so the
-last active AUTO Portfolio entry path cannot reopen a position after the normal
-entry cutoff.  PAPER observation remains unlimited during the valid session;
-LIVE limits and every existing quality/risk gate remain unchanged.
+This module is applied late in startup. Fresh local/Railway databases may not yet
+have runtime-created trade tables, so every startup cleanup is defensive: missing
+optional trading tables must never stop the API server from booting.
 """
 
 from __future__ import annotations
@@ -11,8 +10,14 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
+
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except Exception:
+    # Termux/Railway fallback if OS tzdata is unavailable during first boot.
+    IST = timezone(timedelta(hours=5, minutes=30))
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
@@ -21,7 +26,6 @@ from bot import auto_portfolio_runtime as runtime
 from database import get_db
 
 
-IST = ZoneInfo("Asia/Kolkata")
 AUTO_ENTRY_START_MINUTE = 9 * 60 + 15
 AUTO_ENTRY_CUTOFF_MINUTE = 14 * 60 + 45
 HARD_EOD_MINUTE = 15 * 60 + 25
@@ -153,6 +157,17 @@ def apply_eod_entry_guard_patch() -> None:
     runtime._okai_final_eod_entry_guard_v1 = True
 
 
+def _table_exists(conn, table_name: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
 def _parse_utc_timestamp(value) -> datetime | None:
     if value is None:
         return None
@@ -168,20 +183,18 @@ def _parse_utc_timestamp(value) -> datetime | None:
     except Exception:
         return None
     if parsed.tzinfo is None:
-        # Backend/SQLite naive timestamps in this project are UTC.
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
 
 
 def cleanup_invalid_eod_paper_entries() -> int:
-    """Archive and remove PAPER entries that were opened at/after 15:25 IST.
-
-    Only the invalid entry row is removed.  A valid position opened earlier and
-    closed by the 15:25 EOD exit remains in history.
-    """
+    """Archive/remove PAPER entries opened at/after 15:25 IST when the table exists."""
     conn = get_db()
     removed = 0
     try:
+        if not _table_exists(conn, "paper_trades"):
+            return 0
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS invalid_eod_trades_archive (
@@ -246,29 +259,25 @@ def cleanup_invalid_eod_paper_entries() -> int:
 
 
 def cleanup_requested_admin_trade_dates() -> dict:
-    """Permanently remove the owner's PAPER trades for 20-22 July 2026 IST.
-
-    The request is deliberately scoped to admin/owner accounts so another user's
-    testing history cannot be removed by a deployment cleanup.  Bot totals are
-    recalculated from the remaining rows, keeping the dashboard and history P&L
-    consistent after deletion.
-    """
+    """Remove selected admin PAPER history dates only when users/trade tables exist."""
     conn = get_db()
-    removed_by_date = {
-        day: 0 for day in sorted(REQUESTED_ADMIN_PURGE_IST_DATES)
-    }
+    removed_by_date = {day: 0 for day in sorted(REQUESTED_ADMIN_PURGE_IST_DATES)}
     affected_users: set[int] = set()
+    empty = {
+        "removed": 0,
+        "removed_by_date": removed_by_date,
+        "affected_users": 0,
+    }
     try:
+        if not _table_exists(conn, "users") or not _table_exists(conn, "paper_trades"):
+            return empty
+
         admin_rows = conn.execute(
             "SELECT id FROM users WHERE COALESCE(is_admin, 0)=1"
         ).fetchall()
         admin_ids = [int(row["id"]) for row in admin_rows]
         if not admin_ids:
-            return {
-                "removed": 0,
-                "removed_by_date": removed_by_date,
-                "affected_users": 0,
-            }
+            return empty
 
         placeholders = ",".join("?" for _ in admin_ids)
         rows = conn.execute(
@@ -302,40 +311,40 @@ def cleanup_requested_admin_trade_dates() -> dict:
             affected_users.add(user_id)
 
         paper_columns = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(paper_trades)").fetchall()
+            row[1] for row in conn.execute("PRAGMA table_info(paper_trades)").fetchall()
         }
         pnl_column = "net_pnl" if "net_pnl" in paper_columns else "pnl"
-        for user_id in affected_users:
-            summary = conn.execute(
-                f"""
-                SELECT
-                    COUNT(*) AS total_trades,
-                    COALESCE(SUM(
-                        CASE
-                            WHEN UPPER(COALESCE(status, ''))='CLOSED'
-                            THEN COALESCE({pnl_column}, 0)
-                            ELSE 0
-                        END
-                    ), 0) AS total_pnl
-                FROM paper_trades
-                WHERE user_id=?
-                """,
-                (user_id,),
-            ).fetchone()
-            conn.execute(
-                """
-                UPDATE bot_status
-                SET total_trades=?, total_pnl=?, updated_at=?
-                WHERE user_id=?
-                """,
-                (
-                    int(summary["total_trades"] or 0),
-                    round(float(summary["total_pnl"] or 0), 2),
-                    datetime.now(timezone.utc).isoformat(),
-                    user_id,
-                ),
-            )
+        if _table_exists(conn, "bot_status"):
+            for user_id in affected_users:
+                summary = conn.execute(
+                    f"""
+                    SELECT
+                        COUNT(*) AS total_trades,
+                        COALESCE(SUM(
+                            CASE
+                                WHEN UPPER(COALESCE(status, ''))='CLOSED'
+                                THEN COALESCE({pnl_column}, 0)
+                                ELSE 0
+                            END
+                        ), 0) AS total_pnl
+                    FROM paper_trades
+                    WHERE user_id=?
+                    """,
+                    (user_id,),
+                ).fetchone()
+                conn.execute(
+                    """
+                    UPDATE bot_status
+                    SET total_trades=?, total_pnl=?, updated_at=?
+                    WHERE user_id=?
+                    """,
+                    (
+                        int(summary["total_trades"] or 0),
+                        round(float(summary["total_pnl"] or 0), 2),
+                        datetime.now(timezone.utc).isoformat(),
+                        user_id,
+                    ),
+                )
 
         conn.commit()
         return {
@@ -360,6 +369,8 @@ def activate_testing_access(force: bool = False) -> int:
             return 0
         conn = get_db()
         try:
+            if not _table_exists(conn, "users"):
+                return 0
             cursor = conn.execute(
                 """
                 UPDATE users
@@ -396,10 +407,7 @@ def _normalize_access_payload(value, path: str):
     if not isinstance(value, dict):
         return value
 
-    normalized = {
-        key: _normalize_access_payload(item, path)
-        for key, item in value.items()
-    }
+    normalized = {key: _normalize_access_payload(item, path) for key, item in value.items()}
     if "subscription_status" in normalized:
         normalized["subscription_status"] = "active"
     if "trial_ends_at" in normalized:
@@ -478,5 +486,5 @@ class TestingFullAccessAndFreshDataMiddleware(BaseHTTPMiddleware):
             response.headers["Expires"] = "0"
 
         response.headers["X-OKAI-Testing-Access"] = "full"
-        response.headers["X-OKAI-Release"] = "admin-trade-purge-jul20-22-v1"
+        response.headers["X-OKAI-Release"] = "admin-trade-purge-jul20-22-startup-safe-v2"
         return response
