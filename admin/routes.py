@@ -223,3 +223,78 @@ def bot_stop(authorization: str = Header(None)):
         pass
     conn.close()
     return {"success": True, "message": "Bot stopped"}
+
+# ── Admin Safe User Delete ─────────────────────────────
+@router.post("/users/delete-by-email")
+def delete_users_by_email(body: dict, authorization: str = Header(None)):
+    admin_user = require_admin(authorization)
+
+    raw_emails = body.get("emails") or []
+    emails = []
+    for value in raw_emails:
+        email = str(value or "").strip().lower()
+        if email and email not in emails:
+            emails.append(email)
+
+    if not emails:
+        raise HTTPException(status_code=400, detail="emails list required")
+
+    conn = get_db()
+    deleted = []
+    skipped = []
+
+    try:
+        tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+
+        def has_user_id(table):
+            if table not in tables:
+                return False
+            cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            return any(row[1] == "user_id" for row in cols)
+
+        for email in emails:
+            user = conn.execute(
+                "SELECT id, email, name, is_admin FROM users WHERE lower(email)=?",
+                (email,),
+            ).fetchone()
+
+            if not user:
+                skipped.append({"email": email, "reason": "not_found"})
+                continue
+
+            if int(user["id"]) == int(admin_user["id"]) or bool(user["is_admin"]):
+                skipped.append({"email": email, "reason": "admin_user_protected"})
+                continue
+
+            user_id = int(user["id"])
+
+            for table in list(tables):
+                if table == "users":
+                    continue
+                if has_user_id(table):
+                    try:
+                        conn.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
+                    except Exception:
+                        pass
+
+            conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+            deleted.append({
+                "id": user_id,
+                "email": user["email"],
+                "name": user["name"],
+            })
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "success": True,
+        "deleted": deleted,
+        "skipped": skipped,
+    }
