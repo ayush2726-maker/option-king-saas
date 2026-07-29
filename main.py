@@ -94,6 +94,7 @@ from bot.eod_safety_testing_access_patch import (
 from bot.consecutive_loss_cooldown_patch import (
     apply_consecutive_loss_cooldown_patch,
 )
+from bot.active_strategy_score_patch import apply_active_strategy_score_patch
 from bot.breakeven_4pct_patch import apply_breakeven_4pct_patch
 import os
 
@@ -150,6 +151,9 @@ apply_eod_entry_guard_patch()
 # including structural/manual exits, and blocks all fresh entries for 15 minutes
 # after two consecutive net losing trades during the same IST day.
 apply_consecutive_loss_cooldown_patch()
+# Display-only: attach the active editable strategy snapshot to each live scan so
+# the Trade tab score card cannot reuse stale default weights/thresholds.
+apply_active_strategy_score_patch()
 
 RELEASE_VERSION = "angel-selected-broker-backtest-source-v1"
 
@@ -259,115 +263,29 @@ def startup():
 
     print(f"Option King AI SaaS Server started | {RELEASE_VERSION}")
 
-
 app.include_router(auth_router)
 app.include_router(recovery_router)
-app.include_router(local_gateway_router)
 app.include_router(broker_router)
 app.include_router(broker_selection_router)
+app.include_router(local_gateway_router)
 app.include_router(subscription_router)
 app.include_router(admin_router)
 app.include_router(bot_router)
 app.include_router(trade_live_router)
-app.include_router(ai_router)
 app.include_router(telegram_router)
 app.include_router(user_panel_router)
 app.include_router(paper_router)
 app.include_router(strategy_router)
 app.include_router(strategy_profile_router)
 app.include_router(market_router)
+app.include_router(ai_router)
 app.include_router(backtest_router)
 app.include_router(backtest_range_router)
 
-
 @app.get("/")
 def root():
-    return {
-        "app": "Option King AI SaaS",
-        "version": "1.0.0",
-        "release": RELEASE_VERSION,
-        "status": "running",
-        "docs": "/docs",
-    }
-
+    return {"message": "Option King AI SaaS API running"}
 
 @app.get("/health")
 def health():
-    try:
-        from database import get_db
-        conn = get_db()
-        conn.execute("SELECT 1")
-        conn.close()
-        db_status = "ok"
-    except Exception as exc:
-        db_status = f"error: {str(exc)}"
-
-    return {
-        "status": "healthy",
-        "database": db_status,
-        "release": RELEASE_VERSION,
-    }
-
-
-from fastapi.responses import FileResponse, HTMLResponse
-from html import escape
-
-
-@app.get("/upstox/callback", response_class=HTMLResponse)
-def upstox_callback(code: str = "", state: str = ""):
-    safe_code = escape(str(code or ""))
-    safe_state = escape(str(state or ""))
-    code_html = (
-        "<p><b>Authorization Code:</b></p>"
-        f"<div style='word-break:break-all;color:#f5c842'>{safe_code}</div>"
-        if safe_code
-        else (
-            "<p>Redirect URL verified. Manual token ke liye "
-            "Developer Apps me Generate dabayein.</p>"
-        )
-    )
-    state_html = (
-        f"<p style='color:#777'>State: {safe_state}</p>"
-        if safe_state
-        else ""
-    )
-    return (
-        "<!doctype html><html><head>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>Option King AI Upstox</title></head>"
-        "<body style='background:#0a0a0f;color:#e8e8f0;"
-        "font-family:Arial;padding:24px'>"
-        "<div style='max-width:680px;margin:auto;background:#13131f;"
-        "border:1px solid #252540;border-radius:18px;padding:22px'>"
-        "<h2 style='color:#00d4a0'>✅ Option King AI Upstox Callback</h2>"
-        "<p>Upstox redirect successfully receive ho gaya.</p>"
-        + code_html
-        + state_html
-        + "</div></body></html>"
-    )
-
-
-@app.post("/upstox/postback")
-def upstox_postback(body: dict = None):
-    return {"success": True, "received": True}
-
-
-@app.get("/admin/panel")
-def admin_panel():
-    return FileResponse(
-        os.path.join(os.path.dirname(__file__), "admin/panel.html")
-    )
-
-
-@app.get("/signup")
-def signup_page():
-    return FileResponse(
-        os.path.join(os.path.dirname(__file__), "signup.html")
-    )
-
-
-@app.get("/join")
-def join_page():
-    return FileResponse(
-        os.path.join(os.path.dirname(__file__), "signup.html")
-    )
+    return {"status": "ok", "version": RELEASE_VERSION}
