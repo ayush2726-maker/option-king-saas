@@ -89,14 +89,50 @@ def _apply_snapshot_to_signal(signal, snapshot):
     signal["min_score_required"] = snapshot["entry_threshold"]
 
     # Older scans may already carry a breakdown that was calculated before the
-    # current editable profile was attached. Removing it forces the display-only
-    # live score wrapper to recompute with the active weights and thresholds.
+    # current editable profile was attached. Removing it prevents stale display
+    # data like ADX threshold 25.0 while the active strategy is ADX 22.0.
     signal.pop("live_score_breakdown", None)
     signal.pop("score_components", None)
 
 
+def _profile_like(snapshot):
+    return {
+        "weights": dict(snapshot["weights"]),
+        "enabled": dict(snapshot["enabled"]),
+        "entry_threshold": snapshot["entry_threshold"],
+        "adx_threshold": snapshot["adx_threshold"],
+        "volume_threshold": snapshot["volume_threshold"],
+        "profile_key": snapshot["profile_key"],
+        "profile_name": snapshot["profile_name"],
+    }
+
+
+def _recompute_display_payload(scan, signal, snapshot):
+    """Rebuild display-only score rows after the active profile is attached."""
+    if not isinstance(scan, dict) or not isinstance(signal, dict):
+        return
+
+    try:
+        from bot.live_score_breakdown_patch import _score_payload
+
+        payload = _score_payload(
+            scan.get("market_data") or {},
+            signal,
+            _profile_like(snapshot),
+        )
+        signal["score_components"] = payload.get("components", [])
+        signal["live_score_breakdown"] = payload
+        scan["score_components"] = payload.get("components", [])
+        scan["live_score_breakdown"] = payload
+    except Exception as exc:
+        try:
+            print(f"Active strategy display recompute skipped: {str(exc)[:160]}")
+        except Exception:
+            pass
+
+
 def apply_active_strategy_score_patch() -> None:
-    if getattr(runtime, "_okai_active_strategy_score_v1", False):
+    if getattr(runtime, "_okai_active_strategy_score_v2", False):
         return
 
     # Install before wrapping _build_scan so strong trend scans do not stay blocked
@@ -129,6 +165,7 @@ def apply_active_strategy_score_patch() -> None:
 
             snapshot = _profile_snapshot(profile, signal)
             _apply_snapshot_to_signal(signal, snapshot)
+            _recompute_display_payload(scan, signal, snapshot)
 
             scan["profile_config"] = {
                 "profile_key": snapshot["profile_key"],
@@ -148,4 +185,5 @@ def apply_active_strategy_score_patch() -> None:
         return scan
 
     runtime._build_scan = build_scan_with_active_profile
+    runtime._okai_active_strategy_score_v2 = True
     runtime._okai_active_strategy_score_v1 = True
