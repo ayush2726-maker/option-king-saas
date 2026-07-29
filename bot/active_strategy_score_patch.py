@@ -131,8 +131,21 @@ def _recompute_display_payload(scan, signal, snapshot):
             pass
 
 
+def _install_trade_miss_audit():
+    try:
+        from bot.trade_miss_audit_patch import apply_trade_miss_audit_patch
+
+        apply_trade_miss_audit_patch()
+    except Exception as exc:
+        try:
+            print(f"Trade miss audit patch skipped: {str(exc)[:160]}")
+        except Exception:
+            pass
+
+
 def apply_active_strategy_score_patch() -> None:
     if getattr(runtime, "_okai_active_strategy_score_v2", False):
+        _install_trade_miss_audit()
         return
 
     # Install before wrapping _build_scan so strong trend scans do not stay blocked
@@ -187,3 +200,4 @@ def apply_active_strategy_score_patch() -> None:
     runtime._build_scan = build_scan_with_active_profile
     runtime._okai_active_strategy_score_v2 = True
     runtime._okai_active_strategy_score_v1 = True
+    _install_trade_miss_audit()
