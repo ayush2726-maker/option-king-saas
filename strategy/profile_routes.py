@@ -5,6 +5,7 @@ from fastapi import (
 )
 
 from auth.routes import get_current_user
+from bot.default_strategy_patch import editable_template_config
 from telegram.routes import notify_user
 from strategy.profile_engine import (
     activate_strategy_profile,
@@ -43,12 +44,9 @@ def _is_admin(user):
 def _ensure_admin_editable_active(user, profiles):
     """Ensure owner has an editable copy without changing activation.
 
-    Earlier this helper reactivated "OKAI Editable" whenever the admin selected
-    the protected default. That made Default activation appear successful for one
-    request, then the next Strategy Builder refresh flipped Paper back to
-    Editable and the live scan kept showing the wrong profile. Activation must
-    always remain the user's explicit choice; this helper now only creates the
-    editable copy if it is missing.
+    Default must remain the locked original strategy.  The editable copy is
+    created from its own custom template, not by duplicating Default.  Activation
+    always remains the user's explicit choice.
     """
     if not _is_admin(user):
         return profiles, False
@@ -65,32 +63,10 @@ def _ensure_admin_editable_active(user, profiles):
     if editable is not None:
         return profiles, False
 
-    source = next(
-        (
-            profile
-            for profile in profiles
-            if profile.get("locked")
-            and str(profile.get("profile_key") or "") == "okai_default_82"
-        ),
-        None,
-    )
-    if source is None:
-        source = next(
-            (
-                profile
-                for profile in profiles
-                if profile.get("locked")
-            ),
-            None,
-        )
-
-    if source is None:
-        return profiles, False
-
-    duplicate_strategy_profile(
+    create_strategy_profile(
         user["id"],
-        source["profile_key"],
         "OKAI Editable 82",
+        editable_template_config(),
     )
     return list_strategy_profiles(user["id"]), True
 
