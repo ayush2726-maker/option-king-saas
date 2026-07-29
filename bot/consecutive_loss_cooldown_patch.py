@@ -314,3 +314,12 @@ def apply_consecutive_loss_cooldown_patch() -> None:
     runtime._can_enter = can_enter_with_global_cooldown
     runtime._open_common = open_common_with_global_cooldown
     runtime._okai_consecutive_loss_cooldown_v1 = True
+
+    # Install after the final cooldown wrapper so accepted entries receive the
+    # exact final decision context that will be shown in the mobile Trade card.
+    try:
+        from bot.trade_explanation_patch import apply_trade_explanation_patch
+
+        apply_trade_explanation_patch()
+    except Exception as exc:
+        print(f"Trade explanation patch skipped: {str(exc)[:160]}")
