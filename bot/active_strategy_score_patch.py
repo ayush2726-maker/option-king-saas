@@ -5,8 +5,10 @@ This patch makes that same profile explicit on each scan payload and removes any
 stale precomputed live_score_breakdown so the display wrapper recomputes the
 visible per-indicator score using the latest active weights and thresholds.
 
-Display-only: it does not change entry, exit, order placement, quantity, SL, or
-risk decisions.
+Display scoring is display-only: it does not change entry, exit, order
+placement, quantity, SL, or risk decisions.  The small LIVE exit duplicate guard
+below only prevents a second SELL from being placed while a previous LIVE exit
+order is already pending for the same open trade.
 """
 
 from __future__ import annotations
@@ -168,6 +170,79 @@ def _install_trade_miss_audit():
             pass
 
 
+def _install_live_exit_duplicate_guard():
+    """Prevent duplicate LIVE SELL orders while an exit is already pending.
+
+    The original runtime already records EXIT_PENDING and sets live_order_lock
+    when a broker SELL is not confirmed within the wait window.  This guard makes
+    the next monitor ticks skip that same open row instead of placing another
+    SELL for the same trade. PAPER exits are untouched.
+    """
+    if getattr(runtime, "_okai_live_exit_duplicate_guard_v1", False):
+        return
+
+    original_manage_rows = runtime._manage_rows
+
+    def manage_rows_with_live_exit_duplicate_guard(
+        conn,
+        user_id,
+        rows,
+        scans,
+        quote_fetcher,
+        live_order,
+        state,
+    ):
+        safe_rows = []
+        blocked = []
+
+        for row in rows or []:
+            try:
+                is_live = runtime._mode(row) == "live"
+                exit_order_id = str(runtime._v(row, "exit_order_id", "") or "").strip()
+                exit_status = str(
+                    runtime._v(row, "live_order_status", "") or ""
+                ).upper().strip()
+                pending_exit = exit_status == "EXIT_PENDING" or (
+                    bool(exit_order_id)
+                    and exit_status not in {"EXIT_FAILED", "EXIT_REJECTED", "EXIT_CANCELLED", "EXIT_CANCELED"}
+                )
+                if is_live and pending_exit:
+                    blocked.append(
+                        {
+                            "trade_id": runtime._v(row, "id", None),
+                            "exit_order_id": exit_order_id,
+                            "live_order_status": exit_status or "EXIT_PENDING",
+                        }
+                    )
+                    continue
+            except Exception:
+                pass
+
+            safe_rows.append(row)
+
+        if blocked and isinstance(state, dict):
+            state["live_order_lock"] = True
+            state["live_exit_duplicate_guard"] = {
+                "blocked_rows": len(blocked),
+                "message": "Existing LIVE exit order pending; duplicate SELL blocked.",
+                "rows": blocked[:5],
+            }
+            state["live_order_error"] = "Existing LIVE exit order pending; duplicate SELL blocked."
+
+        return original_manage_rows(
+            conn,
+            user_id,
+            safe_rows,
+            scans,
+            quote_fetcher,
+            live_order,
+            state,
+        )
+
+    runtime._manage_rows = manage_rows_with_live_exit_duplicate_guard
+    runtime._okai_live_exit_duplicate_guard_v1 = True
+
+
 def _sync_state_display_score(state, scans, selected, settings):
     """Keep /bot/signal aligned with the active-profile breakdown display.
 
@@ -207,7 +282,8 @@ def _sync_state_display_score(state, scans, selected, settings):
 
 
 def apply_active_strategy_score_patch() -> None:
-    if getattr(runtime, "_okai_active_strategy_score_v3", False):
+    if getattr(runtime, "_okai_active_strategy_score_v4", False):
+        _install_live_exit_duplicate_guard()
         _install_trade_miss_audit()
         return
 
@@ -267,7 +343,9 @@ def apply_active_strategy_score_patch() -> None:
 
     runtime._build_scan = build_scan_with_active_profile
     runtime._state_update = state_update_with_active_display
+    runtime._okai_active_strategy_score_v4 = True
     runtime._okai_active_strategy_score_v3 = True
     runtime._okai_active_strategy_score_v2 = True
     runtime._okai_active_strategy_score_v1 = True
+    _install_live_exit_duplicate_guard()
     _install_trade_miss_audit()
