@@ -65,8 +65,8 @@ def _profile_snapshot(profile, signal):
             82,
         ),
         "adx_threshold": _f(
-            profile.get("adx_threshold", signal.get("adx_threshold", 25.0)),
-            25.0,
+            profile.get("adx_threshold", signal.get("adx_threshold", 22.0)),
+            22.0,
         ),
         "volume_threshold": _f(
             profile.get("volume_threshold", signal.get("volume_threshold", 1.2)),
@@ -98,6 +98,21 @@ def _apply_snapshot_to_signal(signal, snapshot):
 def apply_active_strategy_score_patch() -> None:
     if getattr(runtime, "_okai_active_strategy_score_v1", False):
         return
+
+    # Install before wrapping _build_scan so strong trend scans do not stay blocked
+    # just because ST_DIR was NEUTRAL while the numeric Supertrend line confirmed
+    # the same direction.
+    try:
+        from bot.supertrend_neutral_line_fallback_patch import (
+            apply_supertrend_neutral_line_fallback_patch,
+        )
+
+        apply_supertrend_neutral_line_fallback_patch()
+    except Exception as exc:
+        try:
+            print(f"Supertrend line fallback patch skipped: {str(exc)[:160]}")
+        except Exception:
+            pass
 
     original_build_scan = runtime._build_scan
 

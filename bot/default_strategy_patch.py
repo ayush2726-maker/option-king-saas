@@ -18,14 +18,15 @@ from strategy import profile_engine
 
 TARGET_WEIGHTS = {
     "vwap": 15,
-    "supertrend": 13,
-    "ema_trend": 18,
-    "orb": 15,
+    "supertrend": 18,
+    "ema_trend": 28,
+    "orb": 0,
     "momentum": 10,
     "adx": 14,
     "volume": 5,
     "mtf": 10,
 }
+TARGET_ADX_THRESHOLD = 22.0
 
 
 def _target_config(base=None):
@@ -34,11 +35,12 @@ def _target_config(base=None):
     )
     config["entry_threshold"] = 82
     config["weights"] = copy.deepcopy(TARGET_WEIGHTS)
+    config["adx_threshold"] = TARGET_ADX_THRESHOLD
     config["enabled"] = {
         key: True
         for key in profile_engine.INDICATOR_KEYS
     }
-    config["version"] = 2
+    config["version"] = 3
     return profile_engine.normalize_profile_config(config)
 
 
@@ -60,7 +62,8 @@ def apply_default_strategy_patch():
 
     profile_engine.DEFAULT_CONFIG["weights"] = copy.deepcopy(TARGET_WEIGHTS)
     profile_engine.DEFAULT_CONFIG["entry_threshold"] = 82
-    profile_engine.DEFAULT_CONFIG["version"] = 2
+    profile_engine.DEFAULT_CONFIG["adx_threshold"] = TARGET_ADX_THRESHOLD
+    profile_engine.DEFAULT_CONFIG["version"] = 3
 
     original_get_full_signal = strategy.get_full_signal
 
