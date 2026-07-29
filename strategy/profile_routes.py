@@ -41,22 +41,16 @@ def _is_admin(user):
 
 
 def _ensure_admin_editable_active(user, profiles):
-    """Keep the protected default intact while making owner controls editable.
+    """Ensure owner has an editable copy without changing activation.
 
-    StrategyBuilder intentionally disables a locked profile. For an admin whose
-    active profile is still the protected OKAI default, create (or reuse) a
-    normal custom copy with identical settings and activate that copy. This is
-    safe because the score/risk configuration is unchanged; only editability
-    changes.
+    Earlier this helper reactivated "OKAI Editable" whenever the admin selected
+    the protected default. That made Default activation appear successful for one
+    request, then the next Strategy Builder refresh flipped Paper back to
+    Editable and the live scan kept showing the wrong profile. Activation must
+    always remain the user's explicit choice; this helper now only creates the
+    editable copy if it is missing.
     """
     if not _is_admin(user):
-        return profiles, False
-
-    active = next(
-        (profile for profile in profiles if profile.get("active")),
-        None,
-    )
-    if not active or not active.get("locked"):
         return profiles, False
 
     editable = next(
@@ -68,22 +62,35 @@ def _ensure_admin_editable_active(user, profiles):
         ),
         None,
     )
-    if editable is None:
-        editable = next(
-            (profile for profile in profiles if not profile.get("locked")),
+    if editable is not None:
+        return profiles, False
+
+    source = next(
+        (
+            profile
+            for profile in profiles
+            if profile.get("locked")
+            and str(profile.get("profile_key") or "") == "okai_default_82"
+        ),
+        None,
+    )
+    if source is None:
+        source = next(
+            (
+                profile
+                for profile in profiles
+                if profile.get("locked")
+            ),
             None,
         )
 
-    if editable is None:
-        editable = duplicate_strategy_profile(
-            user["id"],
-            active["profile_key"],
-            "OKAI Editable 82",
-        )
+    if source is None:
+        return profiles, False
 
-    activate_strategy_profile(
+    duplicate_strategy_profile(
         user["id"],
-        editable["profile_key"],
+        source["profile_key"],
+        "OKAI Editable 82",
     )
     return list_strategy_profiles(user["id"]), True
 
@@ -127,11 +134,10 @@ def get_profiles(
         "live_activation_available": False,
         "admin_editable_ready": bool(
             _is_admin(user)
-            and active
-            and not active.get("locked")
+            and any(not profile.get("locked") for profile in profiles)
         ),
         "editable_profile_created": editable_created,
-        "version": 2,
+        "version": 3,
     }
 
 
