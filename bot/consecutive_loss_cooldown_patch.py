@@ -323,3 +323,12 @@ def apply_consecutive_loss_cooldown_patch() -> None:
         apply_trade_explanation_patch()
     except Exception as exc:
         print(f"Trade explanation patch skipped: {str(exc)[:160]}")
+
+    # Live score is display-only. It annotates scan summaries for the app without
+    # changing entry/exit decisions.
+    try:
+        from bot.live_score_breakdown_patch import apply_live_score_breakdown_patch
+
+        apply_live_score_breakdown_patch()
+    except Exception as exc:
+        print(f"Live score breakdown patch skipped: {str(exc)[:160]}")
