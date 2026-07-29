@@ -2,7 +2,7 @@
 
 The protected threshold remains 82.  This module changes only the score mix and
 ensures the locked default uses the same weighted profile engine as the editable
-copy.  Existing unrelated custom profiles are not overwritten.
+copy.  User-editable/custom profiles must never be overwritten during deploy.
 """
 
 import copy
@@ -96,7 +96,7 @@ def apply_default_strategy_patch():
 
 
 def migrate_default_strategy_profiles():
-    """Update locked defaults and the owner's generated editable default copy."""
+    """Update only locked defaults; preserve editable/custom user changes."""
     conn = get_db()
     try:
         profile_engine.ensure_profile_tables(conn)
@@ -106,7 +106,10 @@ def migrate_default_strategy_profiles():
             separators=(",", ":"),
         )
 
-        # All locked defaults become the new permanent default.
+        # Keep the protected OKAI default in sync with the latest default mix.
+        # Do not touch unlocked profiles, including the admin's "OKAI Editable"
+        # copy. The app lets users tune and save that copy; redeploy/startup must
+        # not reset ADX, ORB/EMA weights, or other edited strategy values.
         conn.execute(
             """
             UPDATE strategy_profiles
@@ -115,30 +118,13 @@ def migrate_default_strategy_profiles():
                 locked=1,
                 updated_at=?
             WHERE profile_key=?
+              AND COALESCE(locked, 0)=1
             """,
             (
                 default_json,
                 now,
                 profile_engine.DEFAULT_PROFILE_KEY,
             ),
-        )
-
-        # The admin's automatically generated editable copy should match the
-        # new default immediately.  Other user-created custom profiles remain
-        # untouched.
-        conn.execute(
-            """
-            UPDATE strategy_profiles
-            SET config_json=?,
-                updated_at=?
-            WHERE locked=0
-              AND name LIKE 'OKAI Editable%'
-              AND user_id IN (
-                  SELECT id FROM users
-                  WHERE COALESCE(is_admin, 0)=1
-              )
-            """,
-            (default_json, now),
         )
         conn.commit()
     finally:
