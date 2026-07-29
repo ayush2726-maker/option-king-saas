@@ -89,7 +89,7 @@ def _apply_snapshot_to_signal(signal, snapshot):
     signal["min_score_required"] = snapshot["entry_threshold"]
 
     # Older scans may already carry a breakdown that was calculated before the
-    # current editable profile was attached. Removing it prevents stale display
+    # current active profile was attached. Removing it prevents stale display
     # data like ADX threshold 25.0 while the active strategy is ADX 22.0.
     signal.pop("live_score_breakdown", None)
     signal.pop("score_components", None)
@@ -107,6 +107,23 @@ def _profile_like(snapshot):
     }
 
 
+def _display_signal(signal, snapshot):
+    """Copy the signal and force active-profile values to win for display."""
+    display_signal = dict(signal or {})
+    _apply_snapshot_to_signal(display_signal, snapshot)
+
+    # Some older wrappers write engine defaults (for example ADX 25) directly on
+    # the signal before the active profile is attached.  The score breakdown uses
+    # result.* values before profile.* values, so make the display copy explicit.
+    display_signal["adx_threshold"] = snapshot["adx_threshold"]
+    display_signal["volume_threshold"] = snapshot["volume_threshold"]
+    display_signal["min_score"] = snapshot["entry_threshold"]
+    display_signal["min_score_required"] = snapshot["entry_threshold"]
+    display_signal["profile_weights"] = dict(snapshot["weights"])
+    display_signal["profile_enabled"] = dict(snapshot["enabled"])
+    return display_signal
+
+
 def _recompute_display_payload(scan, signal, snapshot):
     """Rebuild display-only score rows after the active profile is attached."""
     if not isinstance(scan, dict) or not isinstance(signal, dict):
@@ -115,15 +132,23 @@ def _recompute_display_payload(scan, signal, snapshot):
     try:
         from bot.live_score_breakdown_patch import _score_payload
 
+        display_signal = _display_signal(signal, snapshot)
         payload = _score_payload(
             scan.get("market_data") or {},
-            signal,
+            display_signal,
             _profile_like(snapshot),
         )
         signal["score_components"] = payload.get("components", [])
         signal["live_score_breakdown"] = payload
+        signal["display_score"] = payload.get("display_score", payload.get("score"))
+        signal["decision_score"] = signal.get("score")
+        signal["component_total"] = payload.get("component_total")
+        signal["decision_component_total"] = payload.get("decision_component_total")
+        signal["enabled_weight_total"] = payload.get("enabled_weight_total")
         scan["score_components"] = payload.get("components", [])
         scan["live_score_breakdown"] = payload
+        scan["display_score"] = payload.get("display_score", payload.get("score"))
+        scan["decision_score"] = signal.get("score")
     except Exception as exc:
         try:
             print(f"Active strategy display recompute skipped: {str(exc)[:160]}")
@@ -143,8 +168,46 @@ def _install_trade_miss_audit():
             pass
 
 
+def _sync_state_display_score(state, scans, selected, settings):
+    """Keep /bot/signal aligned with the active-profile breakdown display.
+
+    Entry selection has already completed before _state_update runs, so this is
+    display-only.  It prevents the app header/card from showing the old engine
+    score while the breakdown rows show the active-profile partial score.
+    """
+    try:
+        display = runtime._display_scan(scans, selected, settings)
+        if not isinstance(display, dict):
+            return
+        signal = display.get("signal_data") or {}
+        payload = signal.get("live_score_breakdown") or display.get("live_score_breakdown")
+        if not isinstance(payload, dict):
+            return
+
+        display_score = _i(payload.get("display_score", payload.get("score", state.get("score", 0))))
+        state["score"] = display_score
+        state["display_score"] = display_score
+        state["decision_score"] = payload.get("decision_score", signal.get("score"))
+        state["score_components"] = payload.get("components", [])
+        state["live_score_breakdown"] = payload
+        state["component_total"] = payload.get("component_total")
+        state["decision_component_total"] = payload.get("decision_component_total")
+        state["enabled_weight_total"] = payload.get("enabled_weight_total")
+        state["profile_weights"] = payload.get("profile_weights", signal.get("profile_weights"))
+        state["profile_enabled"] = payload.get("profile_enabled", signal.get("profile_enabled"))
+        state["adx_threshold"] = signal.get("adx_threshold", state.get("adx_threshold"))
+        state["volume_threshold"] = signal.get("volume_threshold", state.get("volume_threshold"))
+        state["strategy_profile_key"] = signal.get("strategy_profile_key", state.get("strategy_profile_key"))
+        state["strategy_profile_name"] = signal.get("strategy_profile_name", state.get("strategy_profile_name"))
+    except Exception as exc:
+        try:
+            print(f"Active strategy state display sync skipped: {str(exc)[:160]}")
+        except Exception:
+            pass
+
+
 def apply_active_strategy_score_patch() -> None:
-    if getattr(runtime, "_okai_active_strategy_score_v2", False):
+    if getattr(runtime, "_okai_active_strategy_score_v3", False):
         _install_trade_miss_audit()
         return
 
@@ -164,6 +227,7 @@ def apply_active_strategy_score_patch() -> None:
             pass
 
     original_build_scan = runtime._build_scan
+    original_state_update = runtime._state_update
 
     def build_scan_with_active_profile(user_id, underlying, df, profile, loss_streak):
         scan = original_build_scan(user_id, underlying, df, profile, loss_streak)
@@ -197,7 +261,13 @@ def apply_active_strategy_score_patch() -> None:
 
         return scan
 
+    def state_update_with_active_display(state, scans, selected, settings, rows):
+        original_state_update(state, scans, selected, settings, rows)
+        _sync_state_display_score(state, scans, selected, settings)
+
     runtime._build_scan = build_scan_with_active_profile
+    runtime._state_update = state_update_with_active_display
+    runtime._okai_active_strategy_score_v3 = True
     runtime._okai_active_strategy_score_v2 = True
     runtime._okai_active_strategy_score_v1 = True
     _install_trade_miss_audit()
