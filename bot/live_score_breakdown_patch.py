@@ -1,9 +1,9 @@
 """Live per-indicator score breakdown for the mobile Trade tab.
 
-This patch keeps the trading decision unchanged. It only annotates the active
+This patch keeps the trading decision unchanged. It annotates the active
 signal payload and AUTO portfolio scan summaries with the score each enabled
-strategy rule is currently contributing. The displayed component scores are
-partial/proportional, so the UI does not show only 0 or full weight.
+strategy rule is currently contributing. Display scores use partial/proportional
+values and the currently active strategy weights.
 """
 
 from __future__ import annotations
@@ -27,14 +27,17 @@ LABELS = {
     "mtf": "Trend / MTF Confirmation",
 }
 
+# Fallback must match the permanent OKAI Default 82 / editable default profile.
+# Profile-provided weights still win; these values are used only when a scan
+# summary does not carry profile_weights yet.
 DEFAULT_WEIGHTS = {
-    "vwap": 11,
-    "supertrend": 11,
-    "ema_trend": 11,
-    "orb": 11,
-    "momentum": 11,
-    "adx": 20,
-    "volume": 15,
+    "vwap": 15,
+    "supertrend": 13,
+    "ema_trend": 18,
+    "orb": 15,
+    "momentum": 10,
+    "adx": 14,
+    "volume": 5,
     "mtf": 10,
 }
 
@@ -78,14 +81,27 @@ def _partial(max_score: int, ratio: float) -> int:
     return max(1, min(max_score, int(round(max_score * ratio))))
 
 
+def _active_default_weights() -> dict:
+    try:
+        from bot.default_strategy_patch import TARGET_WEIGHTS
+
+        if isinstance(TARGET_WEIGHTS, dict) and TARGET_WEIGHTS:
+            return {key: _i(TARGET_WEIGHTS.get(key), DEFAULT_WEIGHTS[key]) for key in DEFAULT_WEIGHTS}
+    except Exception:
+        pass
+    return dict(DEFAULT_WEIGHTS)
+
+
 def _weights(profile: dict | None, result: dict | None) -> dict:
     result = result or {}
     profile = profile or {}
     raw = result.get("profile_weights") or profile.get("weights") or {}
-    weights = dict(DEFAULT_WEIGHTS)
+    weights = _active_default_weights()
     if isinstance(raw, dict):
         for key, value in raw.items():
-            weights[str(key)] = _i(value, weights.get(str(key), 0))
+            key = str(key)
+            if key in DEFAULT_WEIGHTS:
+                weights[key] = _i(value, weights.get(key, 0))
     return weights
 
 
@@ -96,7 +112,9 @@ def _enabled(profile: dict | None, result: dict | None) -> dict:
     enabled = {key: True for key in DEFAULT_WEIGHTS}
     if isinstance(raw, dict):
         for key, value in raw.items():
-            enabled[str(key)] = _b(value, True)
+            key = str(key)
+            if key in DEFAULT_WEIGHTS:
+                enabled[key] = _b(value, True)
     return enabled
 
 
@@ -343,12 +361,16 @@ def _score_components(market: dict, result: dict, profile: dict | None = None) -
 
 
 def _score_payload(market: dict, result: dict, profile: dict | None = None) -> dict:
-    components = _score_components(market or {}, result or {}, profile)
+    profile = profile or {}
+    result = result or {}
+    weights = _weights(profile, result)
+    enabled = _enabled(profile, result)
+    components = _score_components(market or {}, result, {"weights": weights, "enabled": enabled, **profile})
     display_total = sum(_i(item.get("score"), 0) for item in components)
     decision_component_total = sum(_i(item.get("decision_score"), 0) for item in components)
     raw_total = sum(_i(item.get("max_score"), 0) for item in components if _b(item.get("enabled"), True))
-    final_score = _i((result or {}).get("score"), decision_component_total)
-    min_score = _i((result or {}).get("min_score", (result or {}).get("min_score_required", 82)), 82)
+    final_score = _i(result.get("score"), decision_component_total)
+    min_score = _i(result.get("min_score", result.get("min_score_required", 82)), 82)
     return {
         "score": display_total,
         "display_score": display_total,
@@ -357,16 +379,18 @@ def _score_payload(market: dict, result: dict, profile: dict | None = None) -> d
         "decision_component_total": decision_component_total,
         "enabled_weight_total": raw_total,
         "min_score": min_score,
-        "candidate_signal": str((result or {}).get("candidate_signal") or (result or {}).get("signal") or "WAIT"),
-        "trade_allowed": _b((result or {}).get("trade_allowed"), False),
+        "candidate_signal": str(result.get("candidate_signal") or result.get("signal") or "WAIT"),
+        "trade_allowed": _b(result.get("trade_allowed"), False),
         "components": components,
-        "warnings": list((result or {}).get("warnings", []) or [])[:8],
-        "score_mode": "PARTIAL_DISPLAY_DECISION_UNCHANGED",
+        "warnings": list(result.get("warnings", []) or [])[:8],
+        "score_mode": "ACTIVE_PROFILE_PARTIAL_DISPLAY_DECISION_UNCHANGED",
+        "profile_weights": weights,
+        "profile_enabled": enabled,
     }
 
 
 def apply_live_score_breakdown_patch() -> None:
-    if getattr(strategy_module, "_okai_live_score_breakdown_v2", False):
+    if getattr(strategy_module, "_okai_live_score_breakdown_v3", False):
         return
 
     original_get_full_signal = strategy_module.get_full_signal
@@ -386,8 +410,9 @@ def apply_live_score_breakdown_patch() -> None:
         result.setdefault("volume_threshold", _f(profile.get("volume_threshold"), strategy_module.VOLUME_RATIO_THRESHOLD))
         result.setdefault("profile_weights", _weights(profile, result))
         result.setdefault("profile_enabled", _enabled(profile, result))
-        result["score_components"] = _score_components(market_data or {}, result, profile)
-        result["live_score_breakdown"] = _score_payload(market_data or {}, result, profile)
+        payload = _score_payload(market_data or {}, result, profile)
+        result["score_components"] = payload["components"]
+        result["live_score_breakdown"] = payload
         return result
 
     def summary_with_breakdown(scan):
@@ -396,26 +421,33 @@ def apply_live_score_breakdown_patch() -> None:
             return data
         signal = scan.get("signal_data") or {}
         market = scan.get("market_data") or {}
+        effective_weights = _weights(None, signal)
+        effective_enabled = _enabled(None, signal)
         profile_like = {
-            "weights": signal.get("profile_weights") or {},
-            "enabled": signal.get("profile_enabled") or {},
+            "weights": effective_weights,
+            "enabled": effective_enabled,
             "adx_threshold": signal.get("adx_threshold", strategy_module.ADX_THRESHOLD),
             "volume_threshold": signal.get("volume_threshold", strategy_module.VOLUME_RATIO_THRESHOLD),
         }
         payload = signal.get("live_score_breakdown") or _score_payload(market, signal, profile_like)
+        # Keep the original engine value as decision_score. Set score to the display
+        # score so the mobile live score card and mini rows show the same partial
+        # active-profile total that users see in the breakdown.
+        engine_score = data.get("score")
         data.update(
             {
+                "score": payload.get("display_score", payload.get("score", engine_score)),
                 "score_components": payload.get("components", []),
                 "live_score_breakdown": payload,
                 "display_score": payload.get("display_score"),
-                "decision_score": payload.get("decision_score", data.get("score")),
+                "decision_score": payload.get("decision_score", engine_score),
                 "component_total": payload.get("component_total"),
                 "decision_component_total": payload.get("decision_component_total"),
                 "enabled_weight_total": payload.get("enabled_weight_total"),
                 "adx_threshold": profile_like["adx_threshold"],
                 "volume_threshold": profile_like["volume_threshold"],
-                "profile_weights": profile_like["weights"],
-                "profile_enabled": profile_like["enabled"],
+                "profile_weights": payload.get("profile_weights", effective_weights),
+                "profile_enabled": payload.get("profile_enabled", effective_enabled),
                 "score_mode": payload.get("score_mode"),
             }
         )
@@ -431,5 +463,6 @@ def apply_live_score_breakdown_patch() -> None:
     except Exception:
         pass
 
+    strategy_module._okai_live_score_breakdown_v3 = True
     strategy_module._okai_live_score_breakdown_v2 = True
     strategy_module._okai_live_score_breakdown_v1 = True
