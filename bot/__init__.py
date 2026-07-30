@@ -15,3 +15,10 @@ try:
     apply_post_loss_reentry_guard_patch()
 except Exception:
     pass
+
+try:
+    from bot.entry_direction_confirmation_patch import apply_entry_direction_confirmation_patch
+
+    apply_entry_direction_confirmation_patch()
+except Exception:
+    pass
