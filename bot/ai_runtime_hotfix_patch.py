@@ -35,9 +35,45 @@ def apply_angel_pcr_force_binding() -> None:
 
         if callable(getattr(broker, "get_broker_intelligence", None)):
             advanced.get_broker_intelligence = broker.get_broker_intelligence
-            advanced._okai_angel_pcr_force_bound_v1 = True
+            advanced._okai_angel_pcr_force_bound_v2 = True
     except Exception:
         # Fail closed: startup must never break because this is display-only.
+        pass
+
+
+def apply_option_payload_pcr_injection_patch() -> None:
+    """Recover PCR on the final Advanced-AI option payload, including cached rows.
+
+    advanced_intelligence_v2 caches broker option payloads for 60 seconds. If an
+    older cached payload was built before the PCR wrapper was rebound, the live
+    probe can still show PCR as missing. This wrapper runs recovery/diagnostics on
+    the final payload returned to the monitor, so the mobile card receives either
+    PCR or a visible PCR error/source.
+    """
+    try:
+        from bot.angel_pcr_recovery_patch import (
+            apply_angel_pcr_recovery_patch,
+            recover_pcr_for_result,
+        )
+        from bot import advanced_intelligence_v2 as advanced
+
+        if getattr(advanced, "_okai_option_payload_pcr_injection_v1", False):
+            return
+
+        try:
+            apply_angel_pcr_recovery_patch()
+        except Exception:
+            pass
+
+        original_option_payload = advanced._option_payload
+
+        def option_payload_with_pcr(user_id, market):
+            result = dict(original_option_payload(user_id, market) or {})
+            return recover_pcr_for_result(user_id, market or {}, result)
+
+        advanced._option_payload = option_payload_with_pcr
+        advanced._okai_option_payload_pcr_injection_v1 = True
+    except Exception:
         pass
 
 
