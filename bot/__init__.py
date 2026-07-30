@@ -22,3 +22,12 @@ try:
     apply_entry_direction_confirmation_patch()
 except Exception:
     pass
+
+try:
+    from bot.selected_broker_ai_summary_guard_patch import (
+        apply_selected_broker_ai_summary_guard_patch,
+    )
+
+    apply_selected_broker_ai_summary_guard_patch()
+except Exception:
+    pass
