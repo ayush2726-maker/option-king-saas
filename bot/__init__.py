@@ -40,3 +40,12 @@ try:
     apply_orb_gap_neutral_scoring_patch()
 except Exception:
     pass
+
+try:
+    from bot.auto_entry_attempt_diagnostics_patch import (
+        apply_auto_entry_attempt_diagnostics_patch,
+    )
+
+    apply_auto_entry_attempt_diagnostics_patch()
+except Exception:
+    pass
