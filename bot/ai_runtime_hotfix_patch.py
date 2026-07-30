@@ -8,9 +8,6 @@ from __future__ import annotations
 from typing import Any, Dict
 
 
-_LAST_GOOD_PROBE: Dict[int, Dict[str, Any]] = {}
-
-
 def _i(value: Any, default: int = 0) -> int:
     try:
         return int(float(value))
@@ -88,61 +85,90 @@ def apply_option_payload_pcr_injection_patch() -> None:
         pass
 
 
-def _pcr_diagnostics(option: Dict[str, Any]) -> Dict[str, Any]:
-    """Attach explicit PCR source/error fields so mobile never silently shows --."""
-    result = dict(option or {})
-    if _f(result.get("pcr"), 0.0) > 0:
-        result.setdefault("pcr_source", "CHAIN_OI")
-        return result
+def apply_angel_timeout_last_good_cache_patch() -> None:
+    """Keep last good option intelligence when Angel temporarily times out.
 
-    result.setdefault("pcr_source", "UNAVAILABLE")
-    call_oi = _f(result.get("total_call_oi"), 0.0)
-    put_oi = _f(result.get("total_put_oi"), 0.0)
-    if not result.get("pcr_error"):
-        if call_oi <= 0 and put_oi <= 0:
-            result["pcr_error"] = "ANGEL_OI_MISSING_FOR_CE_PE_AND_NATIVE_PCR_EMPTY"
-        elif call_oi <= 0:
-            result["pcr_error"] = f"CALL_OI_ZERO put_oi={round(put_oi, 2)}"
-        else:
-            result["pcr_error"] = "PCR_VALUE_NOT_BUILT_DESPITE_OI"
+    Angel LTP/market-data timeouts should not overwrite the Advanced-AI card with
+    0% coverage. This is display-only and does not approve trades or orders.
+    """
+    try:
+        from bot import advanced_intelligence_v2 as advanced
 
-    reasons = list(result.get("reasons") or [])
-    if "PCR_DIAGNOSTIC_VISIBLE" not in reasons:
-        reasons.insert(0, "PCR_DIAGNOSTIC_VISIBLE")
-    result["reasons"] = list(dict.fromkeys(reasons))[:15]
-    return result
+        if getattr(advanced, "_okai_angel_timeout_last_good_cache_v1", False):
+            return
+
+        original_option_payload = advanced._option_payload
+
+        def option_payload_with_timeout_cache(user_id, market):
+            result = dict(original_option_payload(user_id, market) or {})
+            success = bool(result.get("success"))
+            reason = str(result.get("reason") or "")
+            broker = str(result.get("broker") or "").lower()
+            is_timeout = "TIMEOUT" in reason.upper() or "CONNECTTIMEOUT" in reason.upper()
+
+            if success:
+                advanced._okai_last_good_option_payload = getattr(
+                    advanced, "_okai_last_good_option_payload", {}
+                )
+                advanced._okai_last_good_option_payload[int(user_id)] = dict(result)
+                return result
+
+            cached_map = getattr(advanced, "_okai_last_good_option_payload", {}) or {}
+            cached = dict(cached_map.get(int(user_id)) or {})
+            if is_timeout and cached:
+                option = dict(cached.get("option_intelligence") or {})
+                reasons = list(option.get("reasons") or [])
+                reasons.append("ANGEL_TIMEOUT_SHOWING_LAST_GOOD_OPTION_DATA")
+                option["reasons"] = list(dict.fromkeys(reasons))[:12]
+                cached["option_intelligence"] = option
+                cached["stale_due_to_angel_timeout"] = True
+                cached["reason"] = "ANGEL_TIMEOUT_SHOWING_LAST_GOOD_OPTION_DATA"
+                return cached
+
+            if broker == "angelone" and is_timeout:
+                result["reason"] = "ANGEL_TIMEOUT_NO_LAST_GOOD_OPTION_DATA"
+            return result
+
+        advanced._option_payload = option_payload_with_timeout_cache
+        advanced._okai_angel_timeout_last_good_cache_v1 = True
+    except Exception:
+        pass
 
 
-def _probe_is_good(probe: Dict[str, Any]) -> bool:
-    option = dict(probe.get("option_intelligence") or {})
-    return bool(
-        probe.get("success")
-        and _i(option.get("data_coverage_score")) > 0
-        and option
-    )
+def _option_for_display(raw_option: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep unavailable OI-derived fields from showing as fake precise values."""
+    option = dict(raw_option or {})
+    pcr_missing = option.get("pcr") is None
+    pcr_unavailable = str(option.get("pcr_source") or "").upper() == "UNAVAILABLE"
+    call_oi = _f(option.get("total_call_oi"), 0.0)
+    put_oi = _f(option.get("total_put_oi"), 0.0)
 
-
-def _probe_is_timeout_or_blank(probe: Dict[str, Any]) -> bool:
-    option = dict(probe.get("option_intelligence") or {})
-    reason = str(probe.get("reason") or option.get("pcr_error") or "")
-    return bool(
-        _i(option.get("data_coverage_score")) <= 0
-        or "CONNECTTIMEOUT" in reason.upper()
-        or "MAX RETRIES" in reason.upper()
-        or "GETLTPDATA" in reason.upper()
-    )
+    if pcr_missing and (pcr_unavailable or (call_oi <= 0 and put_oi <= 0)):
+        # Max Pain is also OI-derived.  If Angel did not provide CE/PE OI,
+        # keeping a calculated strike on screen is misleading.  Show -- and
+        # expose the diagnostic in the reason line.
+        option["max_pain"] = None
+        option["max_pain_source"] = "OI_UNAVAILABLE"
+        option["max_pain_unavailable_reason"] = "ANGEL_OI_MISSING"
+        reasons = list(option.get("reasons") or [])
+        reasons.append("MAX_PAIN_HIDDEN_BECAUSE_OI_UNAVAILABLE")
+        option["reasons"] = list(dict.fromkeys(reasons))[:12]
+    return option
 
 
 def _live_probe_row(probe: Dict[str, Any]) -> Dict[str, Any]:
-    option = _pcr_diagnostics(dict(probe.get("option_intelligence") or {}))
-    reasons = ["LIVE_PROBE_CURRENT_MARKET"]
+    option = _option_for_display(dict(probe.get("option_intelligence") or {}))
+    reasons = []
+    if probe.get("reason"):
+        reasons.append(str(probe.get("reason")))
+    reasons.extend(list(option.get("reasons") or []))
+    reasons.append("LIVE_PROBE_CURRENT_MARKET")
     if option.get("pcr_source"):
         reasons.append("PCR_SOURCE_" + str(option.get("pcr_source")))
     if option.get("pcr_error"):
         reasons.append("PCR_ERROR_" + str(option.get("pcr_error"))[:90])
-    if probe.get("reason"):
-        reasons.append(str(probe.get("reason")))
-    reasons.extend(list(option.get("reasons") or []))
+    if option.get("max_pain_source") == "OI_UNAVAILABLE":
+        reasons.append("MAX_PAIN_SOURCE_OI_UNAVAILABLE")
 
     return {
         "id": "LIVE_PROBE_DISPLAY_ONLY",
@@ -157,7 +183,7 @@ def _live_probe_row(probe: Dict[str, Any]) -> Dict[str, Any]:
         "data_coverage_score": _i(option.get("data_coverage_score")),
         "option_risk_score": _i(option.get("risk_score")),
         "option_summary": option,
-        "reasons": list(dict.fromkeys(reasons))[:15],
+        "reasons": list(dict.fromkeys(reasons))[:12],
         "display_only": True,
         "live_probe": True,
         "trade_blocking": False,
@@ -166,12 +192,7 @@ def _live_probe_row(probe: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def apply_live_probe_recent_first_patch() -> None:
-    """Put the live probe first so mobile does not show a stale DB decision row.
-
-    If Angel times out for one cycle, keep the last good option snapshot for
-    display instead of overwriting the card with 0% coverage. The stale flag is
-    display-only and never trains the model or affects trading.
-    """
+    """Put the live probe first so mobile does not show a stale DB decision row."""
     try:
         from bot import advanced_intelligence_v2 as advanced
 
@@ -186,28 +207,7 @@ def apply_live_probe_recent_first_patch() -> None:
             if not probe:
                 return data
 
-            uid = int(user_id)
-            if _probe_is_good(probe):
-                _LAST_GOOD_PROBE[uid] = dict(probe)
-                display_probe = probe
-                data["using_stale_ai_probe_for_display"] = False
-            elif _probe_is_timeout_or_blank(probe) and _LAST_GOOD_PROBE.get(uid):
-                display_probe = dict(_LAST_GOOD_PROBE[uid])
-                option = dict(display_probe.get("option_intelligence") or {})
-                reasons = list(option.get("reasons") or [])
-                reasons.insert(0, "ANGEL_TIMEOUT_SHOWING_LAST_GOOD_OPTION_DATA")
-                option["reasons"] = list(dict.fromkeys(reasons))[:15]
-                option["stale_due_to_angel_timeout"] = True
-                option["latest_error"] = str(probe.get("reason") or "")[:260]
-                display_probe["option_intelligence"] = option
-                display_probe["reason"] = "ANGEL_TIMEOUT_SHOWING_LAST_GOOD_OPTION_DATA"
-                data["using_stale_ai_probe_for_display"] = True
-                data["latest_probe_error"] = str(probe.get("reason") or "")[:260]
-            else:
-                display_probe = probe
-                data["using_stale_ai_probe_for_display"] = False
-
-            live_row = _live_probe_row(display_probe)
+            live_row = _live_probe_row(probe)
             recent = [
                 dict(item)
                 for item in list(data.get("recent_decisions") or [])
@@ -216,9 +216,8 @@ def apply_live_probe_recent_first_patch() -> None:
             limit = max(1, min(_i(recent_limit, 20), 50))
             data["recent_decisions"] = [live_row] + recent[: max(0, limit - 1)]
             data["using_live_probe_for_display"] = True
-            data["current_probe"] = display_probe
-            if display_probe.get("broker"):
-                data["active_broker"] = display_probe.get("broker")
+            if probe.get("broker"):
+                data["active_broker"] = probe.get("broker")
             return data
 
         advanced.get_advanced_summary = get_advanced_summary
