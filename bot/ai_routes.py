@@ -30,6 +30,7 @@ from bot.advanced_ai_data_recovery_patch import (
 )
 from bot.ai_runtime_hotfix_patch import (
     apply_angel_pcr_force_binding,
+    apply_option_payload_pcr_injection_patch,
     apply_live_probe_recent_first_patch,
 )
 
@@ -269,10 +270,13 @@ def get_ai_broker_capabilities(authorization: str = Header(None)):
 
 # Install shadow-only runtime patches before monitor threads start.  The PCR
 # binding must run after advanced_intelligence_v2 is imported, because that
-# module keeps its own direct get_broker_intelligence reference.
+# module keeps its own direct get_broker_intelligence reference.  The final
+# option-payload wrapper runs after the Advanced-AI recovery wrapper so cached
+# monitor payloads still receive PCR or a visible PCR diagnostic.
 apply_angel_pcr_force_binding()
 apply_advanced_ai_data_recovery_patch()
 from bot import advanced_intelligence_v2 as _advanced_runtime
+apply_option_payload_pcr_injection_patch()
 apply_live_probe_recent_first_patch()
 advanced_health = _advanced_runtime.advanced_health
 get_advanced_summary = _advanced_runtime.get_advanced_summary
