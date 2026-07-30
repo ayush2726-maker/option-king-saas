@@ -1,10 +1,7 @@
 from datetime import date
 
-from bot.broker_expiry_guard import (
-    _max_normal_dte,
-    _validate_result,
-    install as install_broker_expiry_guard,
-)
+import bot.broker_expiry_guard as expiry_guard
+from bot.broker_expiry_guard import _max_normal_dte, _validate_result
 from bot.option_chain import expected_expiry_for_trade_date
 from bot.brokers.upstox_nearest_expiry_patch import (
     _pick_contract as pick_upstox_contract,
@@ -173,7 +170,18 @@ def test_broker_install_wrapper_keeps_valid_upstox_trade_openable():
                 "strike": strike,
             }
 
-    install_broker_expiry_guard(FakeAngel, FakeZerodha, FakeUpstox)
-    result = FakeUpstox().search_option("NIFTY", "current_week", 24250, "PE")
+    original_today = expiry_guard._today_ist
+    expiry_guard._today_ist = lambda: date(2026, 7, 30)
+    try:
+        expiry_guard.install(FakeAngel, FakeZerodha, FakeUpstox)
+        result = FakeUpstox().search_option(
+            "NIFTY",
+            "current_week",
+            24250,
+            "PE",
+        )
+    finally:
+        expiry_guard._today_ist = original_today
+
     assert result["success"] is True
     assert result["symbol"] == "NIFTY-VALID"
