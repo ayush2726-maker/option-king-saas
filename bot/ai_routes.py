@@ -28,6 +28,10 @@ from bot.broker_intelligence import BROKER_CAPABILITIES
 from bot.advanced_ai_data_recovery_patch import (
     apply_advanced_ai_data_recovery_patch,
 )
+from bot.ai_runtime_hotfix_patch import (
+    apply_angel_pcr_force_binding,
+    apply_live_probe_recent_first_patch,
+)
 
 router = APIRouter(tags=["Shared Railway AI"])
 
@@ -263,11 +267,13 @@ def get_ai_broker_capabilities(authorization: str = Header(None)):
     }
 
 
-# Install the shadow-only recovery before starting any monitor threads.  Rebind the
-# imported names so the already-defined route functions resolve the patched live
-# summary and health functions at request time.
+# Install shadow-only runtime patches before monitor threads start.  The PCR
+# binding must run after advanced_intelligence_v2 is imported, because that
+# module keeps its own direct get_broker_intelligence reference.
+apply_angel_pcr_force_binding()
 apply_advanced_ai_data_recovery_patch()
 from bot import advanced_intelligence_v2 as _advanced_runtime
+apply_live_probe_recent_first_patch()
 advanced_health = _advanced_runtime.advanced_health
 get_advanced_summary = _advanced_runtime.get_advanced_summary
 start_advanced_intelligence = _advanced_runtime.start_advanced_intelligence
