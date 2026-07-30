@@ -1,11 +1,17 @@
 """Option King bot package runtime patches."""
 
-# Keep this import tiny and fail-closed so local scripts/tests that do not configure
-# broker credentials still start normally.  The patch itself is monitoring-only and
-# only fills Angel PCR when chain-derived PCR is missing.
+# Keep imports fail-closed so local scripts/tests that do not configure broker
+# credentials still start normally.
 try:
     from bot.angel_pcr_recovery_patch import apply_angel_pcr_recovery_patch
 
     apply_angel_pcr_recovery_patch()
+except Exception:
+    pass
+
+try:
+    from bot.post_loss_reentry_guard_patch import apply_post_loss_reentry_guard_patch
+
+    apply_post_loss_reentry_guard_patch()
 except Exception:
     pass
