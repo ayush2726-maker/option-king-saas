@@ -2,11 +2,13 @@ from .angelone import AngelOneBroker
 from .zerodha import ZerodhaBroker
 from .upstox import UpstoxBroker
 from .upstox_nearest_expiry_patch import install as install_upstox_nearest_expiry_patch
+from bot.broker_expiry_guard import install as install_broker_expiry_guard
 
 
 # Install before any broker session is created so AUTO paper/live entries,
 # option-chain intelligence and quote routes all use the same validated resolver.
 install_upstox_nearest_expiry_patch(UpstoxBroker)
+install_broker_expiry_guard(AngelOneBroker, ZerodhaBroker, UpstoxBroker)
 
 
 BROKER_REGISTRY = {
