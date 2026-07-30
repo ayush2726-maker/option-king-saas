@@ -31,3 +31,12 @@ try:
     apply_selected_broker_ai_summary_guard_patch()
 except Exception:
     pass
+
+try:
+    from bot.orb_gap_neutral_scoring_patch import (
+        apply_orb_gap_neutral_scoring_patch,
+    )
+
+    apply_orb_gap_neutral_scoring_patch()
+except Exception:
+    pass
