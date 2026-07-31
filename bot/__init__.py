@@ -90,3 +90,12 @@ try:
     apply_admin_cleanup_report_patch()
 except Exception:
     pass
+
+try:
+    from bot.market_knowledge_brain_v1 import (
+        schedule_market_knowledge_brain_patch,
+    )
+
+    schedule_market_knowledge_brain_patch()
+except Exception:
+    pass
