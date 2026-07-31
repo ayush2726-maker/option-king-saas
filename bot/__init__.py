@@ -49,3 +49,12 @@ try:
     apply_auto_entry_attempt_diagnostics_patch()
 except Exception:
     pass
+
+try:
+    from bot.orb_session_backfill_patch import (
+        apply_orb_session_backfill_patch,
+    )
+
+    apply_orb_session_backfill_patch()
+except Exception:
+    pass
