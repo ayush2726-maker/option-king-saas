@@ -83,3 +83,10 @@ try:
     schedule_far_expiry_cleanup()
 except Exception:
     pass
+
+try:
+    from bot.admin_cleanup_report_patch import apply_admin_cleanup_report_patch
+
+    apply_admin_cleanup_report_patch()
+except Exception:
+    pass
