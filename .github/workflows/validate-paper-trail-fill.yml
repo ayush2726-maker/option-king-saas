@@ -20,4 +20,6 @@ jobs:
       - name: Compile runtime patch
         run: python -m py_compile bot/authoritative_profit_lock_runtime_patch.py
       - name: Run focused regression tests
-        run: pytest -q tests/test_authoritative_profit_lock_v3.py
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q tests/test_authoritative_profit_lock_v3.py
