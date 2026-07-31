@@ -1,15 +1,10 @@
 """Authoritative smooth R-based runtime profit lock.
 
-The active PAPER/LIVE monitor must not leave the original ATR stop unchanged after
-an option has moved materially in profit.  The first lock now covers the actual
-round-trip execution costs instead of waiting for an additional fixed 4% premium
-move.  Profit is then protected gradually so normal option noise still has room:
-
-* +1.00R: lock exact round-trip costs (net break-even);
-* +1.50R: lock at least +0.50R;
-* +2.00R: lock at least +1.00R;
-* +2.50R: trail 1.00R behind the peak and lock at least +1.25R;
-* +4.00R: trail 0.80R behind the peak and lock at least +2.50R.
+The first protected stop must honour the configured charges + 4% net-profit rule.
+After that threshold is genuinely reached, profit is protected gradually with the
+existing R-based runner schedule. PAPER stop exits are simulated at the stored stop
+with at most one tick of adverse slippage; a slow quote/poll must not turn a valid
+profit-lock stop into a large artificial loss. LIVE fills remain broker-controlled.
 
 The stop can only move upward. Entries, quantities, structural exits, fixed-target
 behaviour and EOD rules are not changed.
@@ -26,7 +21,7 @@ from bot.trade_visibility_metrics_patch import apply_trade_visibility_metrics_pa
 
 
 TICK_SIZE = 0.05
-COST_COVER_NET_PROFIT_PERCENT = 0.0
+COST_COVER_NET_PROFIT_PERCENT = 4.0
 FIRST_LOCK_TRIGGER_R = 1.00
 LOCK_1_TRIGGER_R = 1.50
 LOCK_1_R = 0.50
@@ -38,7 +33,8 @@ SMOOTH_TRAIL_DISTANCE_R = 1.00
 TIGHT_TRAIL_TRIGGER_R = 4.00
 TIGHT_TRAIL_MIN_LOCK_R = 2.50
 TIGHT_TRAIL_DISTANCE_R = 0.80
-AUTHORITY_VERSION = "AUTHORITATIVE_SMOOTH_R_TRAIL_V2"
+AUTHORITY_VERSION = "AUTHORITATIVE_4PCT_SMOOTH_R_TRAIL_V3"
+PAPER_FILL_VERSION = "PAPER_STOP_ONE_TICK_FILL_V1"
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -108,10 +104,13 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
         mode,
         COST_COVER_NET_PROFIT_PERCENT,
     )
-    cost_cover_price = max(entry, _f(exact.get("price"), entry))
+    # Keep one tick above the exact solver price so the PAPER one-tick fill cap
+    # still preserves the requested charges + 4% net-profit floor.
+    exact_price = max(entry, _f(exact.get("price"), entry))
+    cost_cover_price = _round_up_tick(exact_price + TICK_SIZE)
 
     new_sl = old_sl
-    stage = "WAITING_COST_COVER_LOCK_AT_1R"
+    stage = "WAITING_CHARGES_PLUS_4PCT_LOCK"
     triggered = bool(
         peak_r + 1e-9 >= FIRST_LOCK_TRIGGER_R
         and peak + 1e-9 >= cost_cover_price + TICK_SIZE
@@ -119,7 +118,7 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
 
     if triggered:
         new_sl = max(new_sl, cost_cover_price)
-        stage = "COST_COVER_LOCK_AT_1R"
+        stage = "CHARGES_PLUS_4PCT_LOCK"
 
         if peak_r + 1e-9 >= LOCK_1_TRIGGER_R:
             new_sl = max(new_sl, entry + LOCK_1_R * risk)
@@ -146,7 +145,6 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
             stage = "TIGHT_TRAIL_0_80R_AFTER_4_00R"
 
     # A protected stop must stay below the observed peak by at least one tick.
-    # Round the desired stop upward, but cap it to a valid tradable tick below peak.
     peak_room = _round_down_tick(peak - TICK_SIZE)
     desired = _round_up_tick(new_sl)
     candidate = min(desired, peak_room)
@@ -163,8 +161,9 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
         "stage": stage,
         "initial_risk": round(risk, 2),
         "cost_safe_breakeven_price": round(cost_cover_price, 2),
+        "exact_4pct_solver_price": round(exact_price, 2),
         "breakeven_triggered": triggered,
-        "breakeven_rule": "EXACT_COST_COVER_AT_1R_THEN_SMOOTH_R_LOCKS",
+        "breakeven_rule": "EXACT_CHARGES_PLUS_4PCT_THEN_SMOOTH_R_LOCKS",
         "breakeven_net_profit_percent": COST_COVER_NET_PROFIT_PERCENT,
         "breakeven_target_net_profit": exact.get("target_net_profit"),
         "breakeven_net_pnl_at_stop": exact.get("net_pnl_at_price"),
@@ -187,12 +186,44 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
     }
 
 
+def _paper_stop_fill_price(conn, trade, observed_price: float, reason: str) -> float:
+    """Cap PAPER stop slippage to one tick; LIVE execution is never changed."""
+    if runtime._mode(trade) != "paper":
+        return round(_f(observed_price), 2)
+
+    reason_text = str(reason or "").upper()
+    if "SL HIT" not in reason_text and "PROFIT LOCK TRAIL HIT" not in reason_text:
+        return round(_f(observed_price), 2)
+
+    stop_price = _f(runtime._v(trade, "sl_price", 0), 0)
+    try:
+        row = conn.execute(
+            "SELECT sl_price FROM paper_trades WHERE id=? LIMIT 1",
+            (_i(runtime._v(trade, "id", 0), 0),),
+        ).fetchone()
+        if row is not None:
+            try:
+                stop_price = max(stop_price, _f(row["sl_price"], stop_price))
+            except Exception:
+                stop_price = max(stop_price, _f(row[0], stop_price))
+    except Exception:
+        pass
+
+    observed = max(TICK_SIZE, _f(observed_price, TICK_SIZE))
+    if stop_price <= 0:
+        return _round_down_tick(observed)
+
+    one_tick_below_stop = _round_down_tick(stop_price - TICK_SIZE)
+    return round(max(observed, one_tick_below_stop), 2)
+
+
 def apply_authoritative_profit_lock_runtime_patch() -> None:
-    if getattr(runtime, "_okai_authoritative_profit_lock_v2", False):
+    if getattr(runtime, "_okai_authoritative_profit_lock_v3", False):
         apply_trade_visibility_metrics_patch()
         return
 
     previous_evaluate = runtime._evaluate_exit
+    previous_close = runtime._close
 
     def evaluate_with_authoritative_trail(trade, ltp, market_data, candle_id):
         result = dict(
@@ -231,7 +262,35 @@ def apply_authoritative_profit_lock_runtime_patch() -> None:
         result["profit_lock_authority"] = AUTHORITY_VERSION
         return result
 
-    evaluate_with_authoritative_trail._okai_authoritative_profit_lock_v2 = True
+    def close_with_bounded_paper_stop_fill(
+        conn,
+        user_id,
+        trade,
+        price,
+        reason,
+        order_id=None,
+    ):
+        adjusted_price = _paper_stop_fill_price(conn, trade, price, reason)
+        adjusted_reason = reason
+        if runtime._mode(trade) == "paper" and adjusted_price > _f(price) + 1e-9:
+            adjusted_reason = (
+                f"{reason} | {PAPER_FILL_VERSION}"
+                f" | observed={_f(price):.2f}"
+                f" | fill={adjusted_price:.2f}"
+            )
+        return previous_close(
+            conn,
+            user_id,
+            trade,
+            adjusted_price,
+            adjusted_reason,
+            order_id,
+        )
+
+    evaluate_with_authoritative_trail._okai_authoritative_profit_lock_v3 = True
+    close_with_bounded_paper_stop_fill._okai_paper_stop_fill_v1 = True
     runtime._evaluate_exit = evaluate_with_authoritative_trail
+    runtime._close = close_with_bounded_paper_stop_fill
+    runtime._okai_authoritative_profit_lock_v3 = True
     runtime._okai_authoritative_profit_lock_v2 = True
     apply_trade_visibility_metrics_patch()
