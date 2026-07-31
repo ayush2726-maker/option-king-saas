@@ -44,8 +44,8 @@ def _is_admin(user):
 def _ensure_admin_editable_active(user, profiles):
     """Ensure owner has an editable copy without changing activation.
 
-    Default must remain the locked original strategy.  The editable copy is
-    created from its own custom template, not by duplicating Default.  Activation
+    Default must remain the locked original strategy. The editable copy is
+    created from its own custom template, not by duplicating Default. Activation
     always remains the user's explicit choice.
     """
     if not _is_admin(user):
@@ -69,6 +69,42 @@ def _ensure_admin_editable_active(user, profiles):
         editable_template_config(),
     )
     return list_strategy_profiles(user["id"]), True
+
+
+def _refresh_running_engine(user_id):
+    """Drop only the stale in-memory engine after an active-profile change.
+
+    The persisted bot-running flag is intentionally left untouched. The next
+    /bot/signal poll recreates the broker engine and its first scan reads the
+    freshly saved active profile. Open positions remain in the database and are
+    therefore not duplicated or closed by this refresh.
+    """
+    result = {
+        "requested": False,
+        "was_running": False,
+        "message": "Bot was not running; strategy will apply on next start.",
+    }
+
+    try:
+        from bot.angel_fetcher import get_user_bot_state, stop_user_bot
+
+        state = get_user_bot_state(user_id) or {}
+        result["was_running"] = bool(state.get("running"))
+        if not result["was_running"]:
+            return result
+
+        stopped = stop_user_bot(user_id) or {}
+        result["requested"] = bool(stopped.get("success"))
+        result["message"] = (
+            "Running engine refresh requested; next live-score poll will start "
+            "with the saved active strategy."
+            if result["requested"]
+            else str(stopped.get("message") or "Engine refresh could not be requested")
+        )
+    except Exception as exc:
+        result["message"] = f"Engine refresh warning: {str(exc)[:160]}"
+
+    return result
 
 
 @router.get("")
@@ -113,7 +149,7 @@ def get_profiles(
             and any(not profile.get("locked") for profile in profiles)
         ),
         "editable_profile_created": editable_created,
-        "version": 3,
+        "version": 4,
     }
 
 
@@ -171,10 +207,21 @@ def update_profile(
     except Exception as exc:
         _error(exc)
 
+    runtime_refresh = (
+        _refresh_running_engine(user["id"])
+        if profile.get("active")
+        else {
+            "requested": False,
+            "was_running": False,
+            "message": "Saved profile is not active; running engine unchanged.",
+        }
+    )
+
     return {
         "success": True,
         "message": "Strategy profile saved",
         "profile": profile,
+        "runtime_refresh": runtime_refresh,
     }
 
 
@@ -242,6 +289,13 @@ def activate_profile(
     except Exception as exc:
         _error(exc)
 
+    active_config = get_active_profile_config(
+        user["id"]
+    )
+    runtime_refresh = _refresh_running_engine(
+        user["id"]
+    )
+
     notify_user(
         user["id"],
         (
@@ -259,11 +313,8 @@ def activate_profile(
             "Strategy activated for Paper Mode"
         ),
         "profile": profile,
-        "active_config": (
-            get_active_profile_config(
-                user["id"]
-            )
-        ),
+        "active_config": active_config,
+        "runtime_refresh": runtime_refresh,
     }
 
 
