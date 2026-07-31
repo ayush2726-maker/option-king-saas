@@ -67,3 +67,12 @@ try:
     apply_replay_orb_runtime_patch()
 except Exception:
     pass
+
+try:
+    from bot.final_contract_and_quote_safety_patch import (
+        apply_final_contract_and_quote_safety_patch,
+    )
+
+    apply_final_contract_and_quote_safety_patch()
+except Exception:
+    pass
