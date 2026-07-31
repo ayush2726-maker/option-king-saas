@@ -76,3 +76,10 @@ try:
     apply_final_contract_and_quote_safety_patch()
 except Exception:
     pass
+
+try:
+    from bot.far_expiry_cleanup_scheduler import schedule_far_expiry_cleanup
+
+    schedule_far_expiry_cleanup()
+except Exception:
+    pass
