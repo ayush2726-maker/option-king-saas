@@ -1,12 +1,13 @@
-"""Final defence-in-depth safety for AUTO option contracts and PAPER quotes.
+"""Final defence-in-depth safety for AUTO entries and PAPER quotes.
 
-This layer deliberately does not impose an entry clock. Entry timing remains
-controlled by the user's active settings and the existing runtime guards.
+This layer does not impose an entry clock. Entry timing remains controlled by the
+user's active settings and existing runtime guards.
 
-It only adds two protections:
-* reject missing, expired, or abnormally distant option expiries immediately
-  before the trade row is inserted;
-* require confirmation for a single extreme PAPER quote jump through the SL.
+It protects the final row-insertion path by requiring:
+* a real CE/PE signal whose saved score meets its saved minimum;
+* ``trade_allowed`` and option-quality checks not to be explicitly false;
+* a present, non-expired and not abnormally distant option expiry;
+* confirmation of a single extreme PAPER quote jump through the stop-loss.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from zoneinfo import ZoneInfo
 from bot import auto_portfolio_runtime as runtime
 
 
-VERSION = "OKAI-FINAL-CONTRACT-QUOTE-SAFETY-V2"
+VERSION = "OKAI-FINAL-ENTRY-CONTRACT-QUOTE-SAFETY-V3"
 IST = ZoneInfo("Asia/Kolkata")
 MAX_DTE = {
     "NIFTY": 8,
@@ -37,6 +38,13 @@ _pending_quote_confirmation: dict[tuple[int, int], dict[str, float]] = {}
 
 def _today_ist() -> date:
     return datetime.now(timezone.utc).astimezone(IST).date()
+
+
+def _i(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return int(default)
 
 
 def _normal_underlying(value: Any) -> str:
@@ -76,8 +84,74 @@ def _parse_expiry(value: Any) -> Optional[date]:
 
     try:
         return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
-    except (TypeError, ValueError):
+    except Exception:
         return None
+
+
+def _decision_check(selected: Any, quality: Any) -> dict:
+    if not isinstance(selected, dict):
+        return {
+            "allowed": False,
+            "reason": "FINAL_ENTRY_SELECTED_SCAN_MISSING",
+            "safety_version": VERSION,
+        }
+
+    signal_data = dict(selected.get("signal_data") or {})
+    side = str(signal_data.get("signal") or "").upper().strip()
+    score = _i(signal_data.get("score"), 0)
+    min_score = _i(
+        signal_data.get("min_score"),
+        _i((selected.get("market_data") or {}).get("signal_min_score"), 0),
+    )
+    trade_allowed = signal_data.get("trade_allowed")
+
+    if side not in {"CE", "PE"}:
+        return {
+            "allowed": False,
+            "reason": "FINAL_ENTRY_SIGNAL_NOT_CE_OR_PE",
+            "signal": side,
+            "score": score,
+            "min_score": min_score,
+            "safety_version": VERSION,
+        }
+    if trade_allowed is False:
+        return {
+            "allowed": False,
+            "reason": "FINAL_ENTRY_TRADE_ALLOWED_FALSE",
+            "signal": side,
+            "score": score,
+            "min_score": min_score,
+            "safety_version": VERSION,
+        }
+    if min_score > 0 and score < min_score:
+        return {
+            "allowed": False,
+            "reason": "FINAL_ENTRY_SCORE_BELOW_THRESHOLD",
+            "signal": side,
+            "score": score,
+            "min_score": min_score,
+            "safety_version": VERSION,
+        }
+    if isinstance(quality, dict) and quality.get("allowed") is False:
+        return {
+            "allowed": False,
+            "reason": "FINAL_OPTION_ENTRY_QUALITY_BLOCKED",
+            "quality_reason": str(quality.get("reason") or ""),
+            "signal": side,
+            "score": score,
+            "min_score": min_score,
+            "safety_version": VERSION,
+        }
+
+    return {
+        "allowed": True,
+        "reason": "FINAL_ENTRY_DECISION_VALIDATED",
+        "signal": side,
+        "score": score,
+        "min_score": min_score,
+        "trade_allowed": trade_allowed,
+        "safety_version": VERSION,
+    }
 
 
 def _contract_check(resolved: Any, underlying: Any, today: date) -> dict:
@@ -134,6 +208,28 @@ def _contract_check(resolved: Any, underlying: Any, today: date) -> dict:
         "max_expiry_dte": max_dte,
         "safety_version": VERSION,
     }
+
+
+def _mark_entry_block(state: Any, check: dict) -> None:
+    if not isinstance(state, dict):
+        return
+    state.update(
+        {
+            "final_entry_safety_blocked": True,
+            "final_entry_safety": check,
+            "entry_block_reason": check.get("reason"),
+            "selected_for_entry": None,
+            "final_contract_quote_safety_version": VERSION,
+        }
+    )
+
+
+def _clear_entry_block(state: Any, check: dict) -> None:
+    if not isinstance(state, dict):
+        return
+    state["final_entry_safety_blocked"] = False
+    state["final_entry_safety"] = check
+    state["final_contract_quote_safety_version"] = VERSION
 
 
 def _mark_contract_block(state: Any, check: dict) -> None:
@@ -236,13 +332,13 @@ def _confirmed_or_defer_quote(user_id: int, trade: Any, quote: Any, state: Any) 
 
 
 def apply_final_contract_and_quote_safety_patch() -> None:
-    if getattr(runtime, "_okai_final_contract_quote_safety_v2", False):
+    if getattr(runtime, "_okai_final_entry_contract_quote_safety_v3", False):
         return
 
     original_open_common = runtime._open_common
     original_manage_rows = runtime._manage_rows
 
-    def open_common_with_final_contract_guard(
+    def open_common_with_final_entry_guard(
         conn,
         user_id,
         broker_name,
@@ -256,17 +352,23 @@ def apply_final_contract_and_quote_safety_patch() -> None:
         live_cash,
         state,
     ):
+        decision = _decision_check(selected, quality)
+        if not decision.get("allowed"):
+            _mark_entry_block(state, decision)
+            return False
+
         underlying = (
             selected.get("underlying")
             if isinstance(selected, dict)
             else ""
         )
-        check = _contract_check(resolved, underlying, _today_ist())
-        if not check.get("allowed"):
-            _mark_contract_block(state, check)
+        contract = _contract_check(resolved, underlying, _today_ist())
+        if not contract.get("allowed"):
+            _mark_contract_block(state, contract)
             return False
 
-        _clear_contract_block(state, check)
+        _clear_entry_block(state, decision)
+        _clear_contract_block(state, contract)
         return original_open_common(
             conn,
             user_id,
@@ -305,8 +407,9 @@ def apply_final_contract_and_quote_safety_patch() -> None:
             state,
         )
 
-    runtime._open_common = open_common_with_final_contract_guard
+    runtime._open_common = open_common_with_final_entry_guard
     runtime._manage_rows = manage_rows_with_paper_quote_confirmation
     runtime._okai_final_contract_quote_safety_v1 = True
     runtime._okai_final_contract_quote_safety_v2 = True
+    runtime._okai_final_entry_contract_quote_safety_v3 = True
     runtime._okai_final_contract_quote_safety_version = VERSION
