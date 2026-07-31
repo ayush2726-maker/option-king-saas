@@ -1,19 +1,23 @@
-"""Authoritative runtime profit-lock guard.
+"""Authoritative smooth R-based runtime profit lock.
 
-The active PAPER/LIVE monitor must never leave an initial ATR stop unchanged after
-the configured profit-lock thresholds have been crossed. This guard runs after all
-legacy exit wrappers and recalculates the final stop from the actual trade context:
+The active PAPER/LIVE monitor must not leave the original ATR stop unchanged after
+an option has moved materially in profit.  The first lock now covers the actual
+round-trip execution costs instead of waiting for an additional fixed 4% premium
+move.  Profit is then protected gradually so normal option noise still has room:
 
-* first lock: exact round-trip costs + 4% net profit, only after +0.75R;
-* +1.35R: lock at least +0.50R;
-* +2.20R: lock at least +1.20R and trail 1.00R behind peak;
-* +3.20R: lock at least +2.00R and trail 1.20R behind peak.
+* +1.00R: lock exact round-trip costs (net break-even);
+* +1.50R: lock at least +0.50R;
+* +2.00R: lock at least +1.00R;
+* +2.50R: trail 1.00R behind the peak and lock at least +1.25R;
+* +4.00R: trail 0.80R behind the peak and lock at least +2.50R.
 
-It does not change entries, quantities, fixed targets, structural exits or EOD rules.
+The stop can only move upward. Entries, quantities, structural exits, fixed-target
+behaviour and EOD rules are not changed.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict
 
 from bot import auto_portfolio_runtime as runtime
@@ -22,16 +26,19 @@ from bot.trade_visibility_metrics_patch import apply_trade_visibility_metrics_pa
 
 
 TICK_SIZE = 0.05
-NET_PROFIT_LOCK_PERCENT = 4.0
-FIRST_LOCK_TRIGGER_R = 0.75
-LOCK_1_TRIGGER_R = 1.35
+COST_COVER_NET_PROFIT_PERCENT = 0.0
+FIRST_LOCK_TRIGGER_R = 1.00
+LOCK_1_TRIGGER_R = 1.50
 LOCK_1_R = 0.50
-LOCK_2_TRIGGER_R = 2.20
-LOCK_2_R = 1.20
-LOCK_2_TRAIL_R = 1.00
-LOCK_3_TRIGGER_R = 3.20
-LOCK_3_R = 2.00
-LOCK_3_TRAIL_R = 1.20
+LOCK_2_TRIGGER_R = 2.00
+LOCK_2_R = 1.00
+SMOOTH_TRAIL_TRIGGER_R = 2.50
+SMOOTH_TRAIL_MIN_LOCK_R = 1.25
+SMOOTH_TRAIL_DISTANCE_R = 1.00
+TIGHT_TRAIL_TRIGGER_R = 4.00
+TIGHT_TRAIL_MIN_LOCK_R = 2.50
+TIGHT_TRAIL_DISTANCE_R = 0.80
+AUTHORITY_VERSION = "AUTHORITATIVE_SMOOTH_R_TRAIL_V2"
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -49,20 +56,42 @@ def _i(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _round_up_tick(value: float) -> float:
+    ticks = math.ceil(max(TICK_SIZE, _f(value, TICK_SIZE)) / TICK_SIZE - 1e-12)
+    return round(ticks * TICK_SIZE, 2)
+
+
+def _round_down_tick(value: float) -> float:
+    ticks = math.floor(max(TICK_SIZE, _f(value, TICK_SIZE)) / TICK_SIZE + 1e-12)
+    return round(max(TICK_SIZE, ticks * TICK_SIZE), 2)
+
+
 def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
-    entry = max(TICK_SIZE, _f(runtime._v(trade, "entry_price", TICK_SIZE), TICK_SIZE))
+    entry = max(
+        TICK_SIZE,
+        _f(runtime._v(trade, "entry_price", TICK_SIZE), TICK_SIZE),
+    )
     old_sl = max(
         TICK_SIZE,
-        _f(runtime._v(trade, "sl_price", entry - TICK_SIZE), entry - TICK_SIZE),
+        _f(
+            runtime._v(trade, "sl_price", entry - TICK_SIZE),
+            entry - TICK_SIZE,
+        ),
     )
     risk = max(
         TICK_SIZE,
-        _f(runtime._v(trade, "initial_risk", entry - old_sl), entry - old_sl),
+        _f(
+            runtime._v(trade, "initial_risk", entry - old_sl),
+            entry - old_sl,
+        ),
     )
     current = max(TICK_SIZE, _f(current_price, TICK_SIZE))
-    saved_peak = max(entry, _f(runtime._v(trade, "peak_price", entry), entry))
+    saved_peak = max(
+        entry,
+        _f(runtime._v(trade, "peak_price", entry), entry),
+    )
     peak = max(entry, saved_peak, current)
-    peak_r = (peak - entry) / risk
+    peak_r = max(0.0, (peak - entry) / risk)
 
     broker_name = str(
         runtime._v(trade, "broker_name", "angelone") or "angelone"
@@ -77,42 +106,51 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
         round(entry, 4),
         quantity,
         mode,
-        NET_PROFIT_LOCK_PERCENT,
+        COST_COVER_NET_PROFIT_PERCENT,
     )
-    cost_safe_price = max(entry, _f(exact.get("price"), entry))
+    cost_cover_price = max(entry, _f(exact.get("price"), entry))
 
     new_sl = old_sl
-    stage = "WAITING_FIRST_PROFIT_LOCK_0_75R"
+    stage = "WAITING_COST_COVER_LOCK_AT_1R"
     triggered = bool(
         peak_r + 1e-9 >= FIRST_LOCK_TRIGGER_R
-        and peak + 1e-9 >= cost_safe_price + TICK_SIZE
+        and peak + 1e-9 >= cost_cover_price + TICK_SIZE
     )
 
     if triggered:
-        new_sl = max(new_sl, cost_safe_price)
-        stage = "COSTS_PLUS_4PCT_LOCK_AFTER_0_75R"
+        new_sl = max(new_sl, cost_cover_price)
+        stage = "COST_COVER_LOCK_AT_1R"
 
         if peak_r + 1e-9 >= LOCK_1_TRIGGER_R:
             new_sl = max(new_sl, entry + LOCK_1_R * risk)
-            stage = "LOCK_0_50R_AFTER_1_35R"
+            stage = "LOCK_0_50R_AFTER_1_50R"
 
         if peak_r + 1e-9 >= LOCK_2_TRIGGER_R:
+            new_sl = max(new_sl, entry + LOCK_2_R * risk)
+            stage = "LOCK_1_00R_AFTER_2_00R"
+
+        if peak_r + 1e-9 >= SMOOTH_TRAIL_TRIGGER_R:
             new_sl = max(
                 new_sl,
-                entry + LOCK_2_R * risk,
-                peak - LOCK_2_TRAIL_R * risk,
+                entry + SMOOTH_TRAIL_MIN_LOCK_R * risk,
+                peak - SMOOTH_TRAIL_DISTANCE_R * risk,
             )
-            stage = "TRAIL_1_00R_AFTER_2_20R"
+            stage = "SMOOTH_TRAIL_1_00R_AFTER_2_50R"
 
-        if peak_r + 1e-9 >= LOCK_3_TRIGGER_R:
+        if peak_r + 1e-9 >= TIGHT_TRAIL_TRIGGER_R:
             new_sl = max(
                 new_sl,
-                entry + LOCK_3_R * risk,
-                peak - LOCK_3_TRAIL_R * risk,
+                entry + TIGHT_TRAIL_MIN_LOCK_R * risk,
+                peak - TIGHT_TRAIL_DISTANCE_R * risk,
             )
-            stage = "TRAIL_1_20R_AFTER_3_20R"
+            stage = "TIGHT_TRAIL_0_80R_AFTER_4_00R"
 
-    candidate = min(new_sl, max(TICK_SIZE, peak - TICK_SIZE))
+    # A protected stop must stay below the observed peak by at least one tick.
+    # Round the desired stop upward, but cap it to a valid tradable tick below peak.
+    peak_room = _round_down_tick(peak - TICK_SIZE)
+    desired = _round_up_tick(new_sl)
+    candidate = min(desired, peak_room)
+    candidate = max(old_sl, candidate)
     updated = candidate > old_sl + 1e-9
 
     return {
@@ -124,10 +162,10 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
         "locked_r": round((candidate - entry) / risk, 2),
         "stage": stage,
         "initial_risk": round(risk, 2),
-        "cost_safe_breakeven_price": round(cost_safe_price, 2),
+        "cost_safe_breakeven_price": round(cost_cover_price, 2),
         "breakeven_triggered": triggered,
-        "breakeven_rule": "ENTRY_PLUS_EXACT_COSTS_PLUS_4PCT_NET_AND_0_75R",
-        "breakeven_net_profit_percent": NET_PROFIT_LOCK_PERCENT,
+        "breakeven_rule": "EXACT_COST_COVER_AT_1R_THEN_SMOOTH_R_LOCKS",
+        "breakeven_net_profit_percent": COST_COVER_NET_PROFIT_PERCENT,
         "breakeven_target_net_profit": exact.get("target_net_profit"),
         "breakeven_net_pnl_at_stop": exact.get("net_pnl_at_price"),
         "breakeven_total_charges": exact.get("total_charges_at_price"),
@@ -136,19 +174,30 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
         "breakeven_instrument_basis": exact.get("instrument_basis"),
         "breakeven_broker_basis": exact.get("broker_basis"),
         "breakeven_trading_mode_basis": exact.get("trading_mode_basis"),
-        "profit_lock_authority": "AUTHORITATIVE_RUNTIME_GUARD_V1",
+        "profit_lock_authority": AUTHORITY_VERSION,
+        "trail_schedule": {
+            "cost_cover_trigger_r": FIRST_LOCK_TRIGGER_R,
+            "lock_0_5r_trigger_r": LOCK_1_TRIGGER_R,
+            "lock_1r_trigger_r": LOCK_2_TRIGGER_R,
+            "smooth_trail_trigger_r": SMOOTH_TRAIL_TRIGGER_R,
+            "smooth_trail_distance_r": SMOOTH_TRAIL_DISTANCE_R,
+            "tight_trail_trigger_r": TIGHT_TRAIL_TRIGGER_R,
+            "tight_trail_distance_r": TIGHT_TRAIL_DISTANCE_R,
+        },
     }
 
 
 def apply_authoritative_profit_lock_runtime_patch() -> None:
-    if getattr(runtime, "_okai_authoritative_profit_lock_v1", False):
+    if getattr(runtime, "_okai_authoritative_profit_lock_v2", False):
         apply_trade_visibility_metrics_patch()
         return
 
     previous_evaluate = runtime._evaluate_exit
 
     def evaluate_with_authoritative_trail(trade, ltp, market_data, candle_id):
-        result = dict(previous_evaluate(trade, ltp, market_data, candle_id) or {})
+        result = dict(
+            previous_evaluate(trade, ltp, market_data, candle_id) or {}
+        )
         trail = _authoritative_trail(trade, ltp)
         result["trail"] = trail
         result["risk"] = trail["initial_risk"]
@@ -156,6 +205,8 @@ def apply_authoritative_profit_lock_runtime_patch() -> None:
         previous_updates = _i(runtime._v(trade, "trail_updates", 0), 0)
         result["updates"] = previous_updates + (1 if trail["updated"] else 0)
 
+        # Replace only a prior premium-SL/profit-lock decision. Structural and EOD
+        # exits from the wrapped evaluator remain authoritative.
         reason = result.get("reason")
         reason_text = str(reason or "").upper()
         if (
@@ -165,7 +216,9 @@ def apply_authoritative_profit_lock_runtime_patch() -> None:
             reason = None
 
         if reason is None and _f(ltp) <= _f(trail.get("sl_price")):
-            if _f(trail.get("sl_price")) >= _f(runtime._v(trade, "entry_price", 0)):
+            if _f(trail.get("sl_price")) >= _f(
+                runtime._v(trade, "entry_price", 0)
+            ):
                 reason = (
                     "PROFIT LOCK TRAIL HIT"
                     f" | {trail['stage']}"
@@ -175,10 +228,10 @@ def apply_authoritative_profit_lock_runtime_patch() -> None:
                 reason = "PURE ATR SL HIT"
 
         result["reason"] = reason
-        result["profit_lock_authority"] = "AUTHORITATIVE_RUNTIME_GUARD_V1"
+        result["profit_lock_authority"] = AUTHORITY_VERSION
         return result
 
-    evaluate_with_authoritative_trail._okai_authoritative_profit_lock_v1 = True
+    evaluate_with_authoritative_trail._okai_authoritative_profit_lock_v2 = True
     runtime._evaluate_exit = evaluate_with_authoritative_trail
-    runtime._okai_authoritative_profit_lock_v1 = True
+    runtime._okai_authoritative_profit_lock_v2 = True
     apply_trade_visibility_metrics_patch()
