@@ -58,3 +58,12 @@ try:
     apply_orb_session_backfill_patch()
 except Exception:
     pass
+
+try:
+    from bot.replay_orb_runtime_patch import (
+        apply_replay_orb_runtime_patch,
+    )
+
+    apply_replay_orb_runtime_patch()
+except Exception:
+    pass
