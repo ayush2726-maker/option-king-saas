@@ -1,8 +1,8 @@
-"""Keep PAPER testing active until the 15:30 IST market close.
+"""Keep PAPER testing active until the safer 15:25 IST cutoff.
 
-PAPER mode is intentionally allowed to accept fresh AUTO entries until 15:30 and
-open PAPER positions are force-closed at 15:30. LIVE mode keeps the safer existing
-14:45 entry cutoff and 15:25 EOD exit. Backtests are not changed.
+PAPER mode may accept fresh AUTO entries until 15:25 and open PAPER positions
+are force-closed at 15:25, five minutes before the 15:30 market close. LIVE mode
+keeps its existing 14:45 entry cutoff and 15:25 EOD exit. Backtests are unchanged.
 """
 
 from __future__ import annotations
@@ -16,11 +16,11 @@ from bot import eod_safety_testing_access_patch as eod_patch
 
 
 ENTRY_START_MINUTE = 9 * 60 + 15
-PAPER_ENTRY_CUTOFF_MINUTE = 15 * 60 + 30
-PAPER_EOD_MINUTE = 15 * 60 + 30
+PAPER_ENTRY_CUTOFF_MINUTE = 15 * 60 + 25
+PAPER_EOD_MINUTE = 15 * 60 + 25
 LIVE_ENTRY_CUTOFF_MINUTE = 14 * 60 + 45
 LIVE_EOD_MINUTE = 15 * 60 + 25
-PATCH_VERSION = "PAPER_MARKET_CLOSE_1530_V1"
+PATCH_VERSION = "PAPER_SAFE_CLOSE_1525_V2"
 
 _context = threading.local()
 
@@ -84,13 +84,13 @@ def _entry_block_reason(value: datetime) -> str:
     if _minute_of_day(value) < ENTRY_START_MINUTE:
         return "AUTO_ENTRY_BLOCKED_BEFORE_0915_IST"
     if _current_entry_mode() == "paper":
-        return "PAPER_ENTRY_CUTOFF_1530_IST"
+        return "PAPER_ENTRY_CUTOFF_1525_IST"
     return "LIVE_ENTRY_CUTOFF_1445_IST"
 
 
 def _window_labels(mode: str) -> tuple[str, str]:
     if str(mode).lower() == "paper":
-        return "09:15-15:30", "15:30"
+        return "09:15-15:25", "15:25"
     return "09:15-14:45", "15:25"
 
 
@@ -106,6 +106,7 @@ def _mark_entry_time_block(state: dict | None, value: datetime) -> None:
             "entry_window_ist": window,
             "hard_eod_exit_ist": hard_eod,
             "paper_testing_until_market_close": mode == "paper",
+            "paper_safe_close_buffer_minutes": 5 if mode == "paper" else 0,
             "selected_for_entry": None,
         }
     )
@@ -121,30 +122,35 @@ def _clear_entry_time_block(state: dict | None) -> None:
     state["entry_window_ist"] = window
     state["hard_eod_exit_ist"] = hard_eod
     state["paper_testing_until_market_close"] = mode == "paper"
+    state["paper_safe_close_buffer_minutes"] = 5 if mode == "paper" else 0
 
 
 def _adjust_eod_reason(mode: str, reason, value: datetime):
-    """Delay only the old PAPER EOD reason; preserve SL/structural exits."""
+    """Force PAPER EOD at 15:25 while preserving SL and structural exits."""
     if str(mode).lower() != "paper":
         return reason
 
     minute = _minute_of_day(value)
     text = str(reason or "").upper().strip()
-    old_eod = text == "EOD EXIT 15:25 IST"
+    old_eod = text in {
+        "EOD EXIT 15:25 IST",
+        "PAPER EOD EXIT 15:30 IST",
+    }
 
-    if old_eod and minute < PAPER_EOD_MINUTE:
+    if minute < PAPER_EOD_MINUTE and old_eod:
         return None
     if minute >= PAPER_EOD_MINUTE and (reason is None or old_eod):
-        return "PAPER EOD EXIT 15:30 IST"
+        return "PAPER EOD EXIT 15:25 IST"
     return reason
 
 
 def apply_paper_market_close_1530_patch() -> None:
-    if getattr(runtime, "_okai_paper_market_close_1530_v1", False):
+    """Compatibility entry point; installs the corrected 15:25 PAPER window."""
+    if getattr(runtime, "_okai_paper_safe_close_1525_v2", False):
         return
 
     # The existing EOD wrappers resolve these helpers dynamically, so a
-    # thread-local mode context lets PAPER and LIVE keep different windows.
+    # thread-local mode context lets PAPER and LIVE keep different entry windows.
     eod_patch._entry_window_open = _entry_window_open
     eod_patch._entry_block_reason = _entry_block_reason
     eod_patch._mark_entry_time_block = _mark_entry_time_block
@@ -191,26 +197,31 @@ def apply_paper_market_close_1530_patch() -> None:
                 state,
             )
 
-    def evaluate_with_paper_market_close(trade, ltp, market_data, candle_id):
+    def evaluate_with_paper_safe_close(trade, ltp, market_data, candle_id):
         result = dict(
             previous_evaluate_exit(trade, ltp, market_data, candle_id) or {}
         )
         mode = runtime._mode(trade)
-        result["reason"] = _adjust_eod_reason(mode, result.get("reason"), _now_ist())
+        result["reason"] = _adjust_eod_reason(
+            mode,
+            result.get("reason"),
+            _now_ist(),
+        )
         result["paper_market_close_patch"] = PATCH_VERSION
         return result
 
     runtime._can_enter = can_enter_with_mode_context
     runtime._open_common = open_common_with_mode_context
-    runtime._evaluate_exit = evaluate_with_paper_market_close
+    runtime._evaluate_exit = evaluate_with_paper_safe_close
+    runtime._okai_paper_safe_close_1525_v2 = True
     runtime._okai_paper_market_close_1530_v1 = True
 
-    # Trade-miss audit is display-only. During PAPER testing, do not show the old
-    # 14:45 warning while the actual PAPER entry window remains open.
+    # Trade-miss audit is display-only. During PAPER testing, use the actual
+    # 15:25 entry cutoff instead of the old 14:45 warning.
     try:
         from bot import trade_miss_audit_patch as audit
 
         audit.ENTRY_CUTOFF_HOUR = 15
-        audit.ENTRY_CUTOFF_MINUTE = 30
+        audit.ENTRY_CUTOFF_MINUTE = 25
     except Exception:
         pass
