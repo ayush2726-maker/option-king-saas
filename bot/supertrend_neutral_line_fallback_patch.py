@@ -109,7 +109,26 @@ def _repair_scan(scan):
     return scan
 
 
+def _install_paper_market_close_patch():
+    try:
+        from bot.paper_market_close_1530_patch import (
+            apply_paper_market_close_1530_patch,
+        )
+
+        apply_paper_market_close_1530_patch()
+    except Exception as exc:
+        try:
+            print(f"Paper market-close patch skipped: {str(exc)[:160]}")
+        except Exception:
+            pass
+
+
 def apply_supertrend_neutral_line_fallback_patch() -> None:
+    # This function is invoked by the final active-strategy patch, after the
+    # existing EOD guard is installed, so PAPER/LIVE clock windows can be split
+    # without changing startup order.
+    _install_paper_market_close_patch()
+
     if getattr(strategy, "_okai_supertrend_neutral_line_fallback_v1", False):
         return
 
