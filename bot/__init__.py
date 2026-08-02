@@ -3,6 +3,13 @@
 # Keep imports fail-closed so local scripts/tests that do not configure broker
 # credentials still start normally.
 try:
+    import sitecustomize as _angel_search_scrip_compat
+
+    _angel_search_scrip_compat._install()
+except Exception:
+    pass
+
+try:
     from bot.angel_pcr_recovery_patch import apply_angel_pcr_recovery_patch
 
     apply_angel_pcr_recovery_patch()
