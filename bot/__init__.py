@@ -106,3 +106,12 @@ try:
     schedule_market_knowledge_brain_patch()
 except Exception:
     pass
+
+try:
+    from bot.sector_rotation_ai_training_v1 import (
+        schedule_sector_rotation_ai_training_patch,
+    )
+
+    schedule_sector_rotation_ai_training_patch()
+except Exception:
+    pass
