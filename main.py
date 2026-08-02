@@ -22,6 +22,7 @@ from paper.routes import router as paper_router
 from strategy.routes import router as strategy_router
 from strategy.profile_routes import router as strategy_profile_router
 from bot.market_routes import router as market_router
+from bot.sector_rotation_routes import router as sector_rotation_router
 from bot.ai_routes import router as ai_router
 from backtest.routes import router as backtest_router
 from backtest.range_routes import router as backtest_range_router
@@ -29,27 +30,15 @@ from backtest.live_strategy_consistency_patch import (
     BacktestActiveStrategyMiddleware,
     apply_backtest_live_strategy_patch,
 )
-from backtest.live_frequency_portfolio_patch import (
-    apply_live_frequency_portfolio_patch,
-)
-from backtest.upstox_historical_key_patch import (
-    apply_upstox_historical_key_patch,
-)
-from backtest.post_loss_reentry_cooldown_patch import (
-    apply_backtest_post_loss_reentry_cooldown_patch,
-)
+from backtest.live_frequency_portfolio_patch import apply_live_frequency_portfolio_patch
+from backtest.upstox_historical_key_patch import apply_upstox_historical_key_patch
+from backtest.post_loss_reentry_cooldown_patch import apply_backtest_post_loss_reentry_cooldown_patch
 from backtest.realism_costs_patch import apply_backtest_realism_costs_patch
 from backtest.cost_idempotence_patch import apply_cost_idempotence_patch
 from backtest.monthly_job_start_patch import apply_monthly_job_start_patch
-from backtest.normal_entry_cutoff_1445_patch import (
-    apply_normal_entry_cutoff_1445_patch,
-)
-from backtest.real_option_premium_patch import (
-    prepare_real_option_premium_patch,
-)
-from backtest.real_option_premium_finalize_patch import (
-    finalize_real_option_premium_patch,
-)
+from backtest.normal_entry_cutoff_1445_patch import apply_normal_entry_cutoff_1445_patch
+from backtest.real_option_premium_patch import prepare_real_option_premium_patch
+from backtest.real_option_premium_finalize_patch import finalize_real_option_premium_patch
 from bot.score_history_patch import apply_score_history_patch
 from bot.upstox_live_candle_patch import apply_upstox_live_candle_patch
 from bot.live_scan_history_fallback_patch import apply_live_scan_history_fallback_patch
@@ -60,29 +49,17 @@ from bot.default_strategy_patch import (
 from bot.fresh_entry_guard_patch import apply_fresh_entry_guard_patch
 from bot.expiry_entry_diagnostics_patch import apply_expiry_entry_diagnostics_patch
 from bot.feed_safety_consistency_patch import apply_feed_safety_consistency_patch
-from bot.anti_chase_consistency_v3_patch import (
-    apply_anti_chase_consistency_v3_patch,
-)
+from bot.anti_chase_consistency_v3_patch import apply_anti_chase_consistency_v3_patch
 from bot.mandatory_trend_structure_patch import apply_mandatory_trend_structure_patch
 from bot.entry_quality_v2_patch import apply_entry_quality_v2_patch
-from bot.entry_timing_calibration_patch import (
-    apply_entry_timing_calibration_patch,
-)
+from bot.entry_timing_calibration_patch import apply_entry_timing_calibration_patch
 from bot.structural_exit_v2_patch import apply_structural_exit_v2_patch
-from bot.expiry_hardlock_one_second_monitor_patch import (
-    apply_expiry_hardlock_one_second_monitor_patch,
-)
+from bot.expiry_hardlock_one_second_monitor_patch import apply_expiry_hardlock_one_second_monitor_patch
 from bot.hero_zero_guard_patch import apply_hero_zero_guard_patch
 from bot.manual_exit_patch import apply_manual_exit_patch
-from bot.paper_unlimited_observation_patch import (
-    apply_paper_unlimited_observation_patch,
-)
-from bot.post_loss_reentry_guard_patch import (
-    apply_post_loss_reentry_guard_patch,
-)
-from bot.capital_based_sizing_restore_patch import (
-    apply_capital_based_sizing_restore_patch,
-)
+from bot.paper_unlimited_observation_patch import apply_paper_unlimited_observation_patch
+from bot.post_loss_reentry_guard_patch import apply_post_loss_reentry_guard_patch
+from bot.capital_based_sizing_restore_patch import apply_capital_based_sizing_restore_patch
 from bot.expectancy_engine_v1_patch import apply_expectancy_engine_v1_patch
 from bot.broker_session_reset_patch import apply_broker_session_reset_patch
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
@@ -91,14 +68,13 @@ from bot.eod_safety_testing_access_patch import (
     apply_eod_entry_guard_patch,
     initialize_testing_access_and_cleanup,
 )
-from bot.consecutive_loss_cooldown_patch import (
-    apply_consecutive_loss_cooldown_patch,
-)
+from bot.consecutive_loss_cooldown_patch import apply_consecutive_loss_cooldown_patch
 from bot.active_strategy_score_patch import apply_active_strategy_score_patch
 from bot.breakeven_4pct_patch import apply_breakeven_4pct_patch
 import os
 
-# Must exist before broker routes handle connect/switch requests.
+# Preserve the proven runtime patch order. The sector-rotation API is display-only
+# and is registered as a separate router below; it never wraps this trade engine.
 apply_broker_session_reset_patch()
 apply_score_history_patch()
 apply_upstox_live_candle_patch()
@@ -110,52 +86,31 @@ apply_feed_safety_consistency_patch()
 apply_anti_chase_consistency_v3_patch()
 apply_mandatory_trend_structure_patch()
 apply_entry_quality_v2_patch()
-# Final timing gate restores the profitable fresh-distance protection after all
-# consistency/quality wrappers have built the final signal payload.
 apply_entry_timing_calibration_patch()
-# Real premium must replace the Structural V5 source compiler before that patch
-# captures and compiles the single-index backtest function.
 prepare_real_option_premium_patch()
 apply_structural_exit_v2_patch()
 apply_expiry_hardlock_one_second_monitor_patch()
 apply_hero_zero_guard_patch()
 apply_manual_exit_patch()
 apply_paper_unlimited_observation_patch()
-# Runtime cooldown is applied last so the one-second monitor and unlimited PAPER
-# observation both respect the same stopped-index/side safety state.
 apply_post_loss_reentry_guard_patch()
 apply_backtest_live_strategy_patch()
 apply_live_frequency_portfolio_patch()
-# This must run after the frequency patch because that patch installs the final
-# historical fetch function which reads backtest.routes.UPSTOX_INDEX_KEYS.
 apply_upstox_historical_key_patch()
 apply_backtest_post_loss_reentry_cooldown_patch()
 apply_backtest_realism_costs_patch()
 apply_cost_idempotence_patch()
 apply_monthly_job_start_patch()
 apply_normal_entry_cutoff_1445_patch()
-# Final overrides: quantity comes only from capital allocation; strategy improves
-# expectancy by cutting weak trades and allowing real winners to run.
 apply_capital_based_sizing_restore_patch()
 apply_expectancy_engine_v1_patch()
-# First cost-safe trail now protects charges plus 4% net profit in PAPER, LIVE and
-# backtest while retaining the active expectancy runner schedule.
 apply_breakeven_4pct_patch()
-# Annotate the final Daily/Monthly/Range dispatchers only after every other wrapper
-# is installed, and reject any path that would silently mix estimated premiums.
 finalize_real_option_premium_patch()
-# This is the final live/PAPER AUTO entry wrapper. It keeps PAPER observation
-# unlimited only inside 09:15-14:45 IST and prevents the 15:25 close/reopen loop.
 apply_eod_entry_guard_patch()
-# This must be the outermost runtime guard. It catches every negative exit reason,
-# including structural/manual exits, and blocks all fresh entries for 15 minutes
-# after two consecutive net losing trades during the same IST day.
 apply_consecutive_loss_cooldown_patch()
-# Display-only: attach the active editable strategy snapshot to each live scan so
-# the Trade tab score card cannot reuse stale default weights/thresholds.
 apply_active_strategy_score_patch()
 
-RELEASE_VERSION = "angel-selected-broker-backtest-source-v1"
+RELEASE_VERSION = "sector-rotation-display-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
@@ -194,8 +149,6 @@ def startup():
         f"removed={testing_init['invalid_eod_paper_trades_removed']}"
     )
 
-    # Repair old users that had Angel/Upstox/Zerodha simultaneously active.
-    # The most recently connected active broker remains selected.
     repaired = normalize_all_selected_brokers()
     if repaired:
         print(f"Broker selection normalized for {repaired} user(s)")
@@ -247,9 +200,6 @@ def startup():
             print(f"Admin created: {admin_email}")
         conn.close()
 
-    # The broker page used to default visually to Angel even when stale Upstox was
-    # still selected. Repair the reported owner mismatch once; later switches remain
-    # fully user-controlled through /broker/select/{broker_name}.
     admin_broker_repaired = repair_admin_angel_selection_once()
     if admin_broker_repaired:
         print(
@@ -257,11 +207,9 @@ def startup():
             f"{admin_broker_repaired} user(s)"
         )
 
-    # Run once more after the admin row is guaranteed to exist, so the owner's
-    # generated editable default copy receives the balanced weights immediately.
     migrate_default_strategy_profiles()
-
     print(f"Option King AI SaaS Server started | {RELEASE_VERSION}")
+
 
 app.include_router(auth_router)
 app.include_router(recovery_router)
@@ -278,13 +226,16 @@ app.include_router(paper_router)
 app.include_router(strategy_router)
 app.include_router(strategy_profile_router)
 app.include_router(market_router)
+app.include_router(sector_rotation_router)
 app.include_router(ai_router)
 app.include_router(backtest_router)
 app.include_router(backtest_range_router)
 
+
 @app.get("/")
 def root():
     return {"message": "Option King AI SaaS API running"}
+
 
 @app.get("/health")
 def health():
