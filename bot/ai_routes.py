@@ -18,6 +18,7 @@ from bot.news_intelligence import (
     news_health,
     start_news_intelligence,
 )
+from bot.news_hindi_translation import add_hindi_headlines
 from bot.advanced_intelligence_v2 import (
     advanced_health,
     get_advanced_summary,
@@ -240,7 +241,8 @@ def get_ai_shadow_monitor(authorization: str = Header(None), recent_limit: int =
 @router.get("/bot/ai-news-monitor")
 def get_ai_news_monitor(authorization: str = Header(None), recent_limit: int = 20):
     user = get_current_user(authorization)
-    return get_news_summary(user["id"], recent_limit=recent_limit)
+    report = get_news_summary(user["id"], recent_limit=recent_limit)
+    return add_hindi_headlines(report)
 
 
 @router.get("/bot/ai-advanced-monitor")
