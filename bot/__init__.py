@@ -124,3 +124,12 @@ try:
     schedule_upstox_sector_change_fix()
 except Exception:
     pass
+
+try:
+    from bot.supertrend_completed_candle_consistency_patch import (
+        apply_supertrend_completed_candle_consistency_patch,
+    )
+
+    apply_supertrend_completed_candle_consistency_patch()
+except Exception:
+    pass
