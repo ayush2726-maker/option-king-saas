@@ -70,6 +70,9 @@ from bot.eod_safety_testing_access_patch import (
 )
 from bot.consecutive_loss_cooldown_patch import apply_consecutive_loss_cooldown_patch
 from bot.active_strategy_score_patch import apply_active_strategy_score_patch
+from bot.decision_score_display_consistency_patch import (
+    apply_decision_score_display_consistency_patch,
+)
 from bot.breakeven_4pct_patch import apply_breakeven_4pct_patch
 import os
 
@@ -109,8 +112,9 @@ finalize_real_option_premium_patch()
 apply_eod_entry_guard_patch()
 apply_consecutive_loss_cooldown_patch()
 apply_active_strategy_score_patch()
+apply_decision_score_display_consistency_patch()
 
-RELEASE_VERSION = "sector-rotation-display-v1"
+RELEASE_VERSION = "decision-score-display-consistency-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
