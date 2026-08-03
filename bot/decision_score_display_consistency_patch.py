@@ -92,6 +92,14 @@ def _normalise_scan(scan: Any) -> Any:
 
 def apply_decision_score_display_consistency_patch() -> None:
     if getattr(runtime, "_okai_decision_score_display_consistency_v1", False):
+        try:
+            from bot.real_mtf_session_guard_patch import (
+                apply_real_mtf_session_guard_patch,
+            )
+
+            apply_real_mtf_session_guard_patch()
+        except Exception:
+            pass
         return
 
     original_build_scan = runtime._build_scan
@@ -159,3 +167,15 @@ def apply_decision_score_display_consistency_patch() -> None:
     runtime._summary = summary_with_decision_score
     runtime._state_update = state_update_with_decision_score
     runtime._okai_decision_score_display_consistency_v1 = True
+
+    # Install the final safety correction only after every existing score and
+    # display wrapper has been attached.  This guarantees the real completed
+    # 5-minute confirmation is the score used by both entry and UI.
+    try:
+        from bot.real_mtf_session_guard_patch import (
+            apply_real_mtf_session_guard_patch,
+        )
+
+        apply_real_mtf_session_guard_patch()
+    except Exception:
+        pass
