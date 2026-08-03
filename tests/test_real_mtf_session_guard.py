@@ -3,11 +3,18 @@ from datetime import datetime
 import pandas as pd
 
 from bot import paper_market_close_1530_patch as paper_cutoff
+from bot.mandatory_trend_structure_patch import (
+    apply_mandatory_trend_structure_patch,
+)
 from bot.real_mtf_session_guard_patch import (
     _completed_5m_snapshot,
     _repair_scan,
     _restore_normal_auto_cutoff,
 )
+
+# Production installs the standard final-band Supertrend before the final real
+# MTF guard.  Reproduce that exact patch order in the focused unit test.
+apply_mandatory_trend_structure_patch()
 
 
 def _bullish_one_minute_frame():
