@@ -115,3 +115,12 @@ try:
     schedule_sector_rotation_ai_training_patch()
 except Exception:
     pass
+
+try:
+    from bot.upstox_sector_change_fix_v1 import (
+        schedule_upstox_sector_change_fix,
+    )
+
+    schedule_upstox_sector_change_fix()
+except Exception:
+    pass
