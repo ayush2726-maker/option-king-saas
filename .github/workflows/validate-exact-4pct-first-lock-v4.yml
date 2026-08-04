@@ -1,0 +1,38 @@
+name: Validate Exact 4pct First Lock V4
+
+on:
+  pull_request:
+    paths:
+      - "bot/breakeven_4pct_patch.py"
+      - "bot/authoritative_profit_lock_runtime_patch.py"
+      - "tests/test_exact_4pct_first_lock_v4.py"
+      - ".github/workflows/validate-exact-4pct-first-lock-v4.yml"
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Compile changed Python
+        run: |
+          python -m py_compile bot/breakeven_4pct_patch.py
+          python -m py_compile bot/authoritative_profit_lock_runtime_patch.py
+          python -m py_compile tests/test_exact_4pct_first_lock_v4.py
+
+      - name: Run exact 4 percent lock regression
+        env:
+          PYTHONPATH: .
+        run: pytest -q tests/test_exact_4pct_first_lock_v4.py tests/test_authoritative_profit_lock_v3.py
