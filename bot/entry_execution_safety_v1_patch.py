@@ -1,11 +1,11 @@
 """Final AUTO entry execution safety and audit patch.
 
-Adds three production-safe upgrades without changing strategy scores, MTF, ORB,
-ATR exits, cooldowns, sizing or broker order semantics:
+Adds three upgrades without changing strategy scores, MTF, ORB, ATR exits,
+cooldowns, sizing, broker routing or any previously installed wrapper:
 
-1. A selected option must show a real premium uptick before BUY.
-2. Fresh completed index data and healthy broker/DNS transport are mandatory.
-3. Every opened or blocked entry receives an explainable JSON audit snapshot.
+1. Selected option premium must show a real uptick before BUY.
+2. Completed index data and broker/DNS transport must be fresh and healthy.
+3. Opened and blocked entries receive explainable JSON audit snapshots.
 """
 
 from __future__ import annotations
@@ -83,7 +83,11 @@ def _transport_error(value: Any) -> bool:
 
 
 def _health_key(user_id: int, broker_name: str, channel: str) -> tuple[int, str, str]:
-    return int(user_id), _text(broker_name, "unknown").lower(), _text(channel, "unknown").lower()
+    return (
+        int(user_id),
+        _text(broker_name, "unknown").lower(),
+        _text(channel, "unknown").lower(),
+    )
 
 
 def _record_failure(user_id: int, broker_name: str, channel: str, error: Any) -> None:
@@ -92,7 +96,10 @@ def _record_failure(user_id: int, broker_name: str, channel: str, error: Any) ->
     now = time.time()
     key = _health_key(user_id, broker_name, channel)
     with _lock:
-        item = _health.setdefault(key, {"failures": deque(), "last_success": 0.0, "last_error": ""})
+        item = _health.setdefault(
+            key,
+            {"failures": deque(), "last_success": 0.0, "last_error": ""},
+        )
         failures = item["failures"]
         failures.append(now)
         while failures and now - failures[0] > BROKER_FAILURE_WINDOW_SECONDS:
@@ -103,7 +110,10 @@ def _record_failure(user_id: int, broker_name: str, channel: str, error: Any) ->
 def _record_success(user_id: int, broker_name: str, channel: str) -> None:
     key = _health_key(user_id, broker_name, channel)
     with _lock:
-        item = _health.setdefault(key, {"failures": deque(), "last_success": 0.0, "last_error": ""})
+        item = _health.setdefault(
+            key,
+            {"failures": deque(), "last_success": 0.0, "last_error": ""},
+        )
         item["last_success"] = time.time()
         item["failures"].clear()
         item["last_error"] = ""
@@ -113,19 +123,27 @@ def _health_snapshot(user_id: int, broker_name: str, channel: str) -> dict[str, 
     now = time.time()
     key = _health_key(user_id, broker_name, channel)
     with _lock:
-        item = _health.get(key) or {"failures": deque(), "last_success": 0.0, "last_error": ""}
+        item = _health.get(key) or {
+            "failures": deque(),
+            "last_success": 0.0,
+            "last_error": "",
+        }
         failures = item["failures"]
         while failures and now - failures[0] > BROKER_FAILURE_WINDOW_SECONDS:
             failures.popleft()
         count = len(failures)
-        last_failure_age = round(now - failures[-1], 3) if failures else None
-        last_success_age = round(now - item["last_success"], 3) if item.get("last_success") else None
         return {
             "channel": channel,
             "recent_transport_failures": count,
             "blocked": count >= BROKER_FAILURE_COUNT_TO_BLOCK,
-            "last_failure_age_seconds": last_failure_age,
-            "last_success_age_seconds": last_success_age,
+            "last_failure_age_seconds": (
+                round(now - failures[-1], 3) if failures else None
+            ),
+            "last_success_age_seconds": (
+                round(now - item["last_success"], 3)
+                if item.get("last_success")
+                else None
+            ),
             "last_error": item.get("last_error") or "",
         }
 
@@ -142,13 +160,18 @@ def _parse_candle_time(value: Any) -> datetime | None:
                 return None
             parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
+            # Angel historical candle strings are exchange-local when no offset
+            # is present. Explicit UTC/offset strings retain their own timezone.
             parsed = parsed.replace(tzinfo=IST)
         return parsed.astimezone(timezone.utc)
     except Exception:
         return None
 
 
-def _candle_freshness(selected: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+def _candle_freshness(
+    selected: dict[str, Any],
+    now: datetime | None = None,
+) -> dict[str, Any]:
     parsed = _parse_candle_time((selected or {}).get("candle_id"))
     if parsed is None:
         return {
@@ -178,8 +201,15 @@ def _momentum_check(
 ) -> dict[str, Any]:
     now = float(now_ts if now_ts is not None else time.time())
     current = _f(price, 0.0)
-    key = (int(user_id), _text(broker_name, "unknown").lower(), _text(symbol).upper())
-    required = max(MIN_PREMIUM_UPTICK_POINTS, current * MIN_PREMIUM_UPTICK_PERCENT / 100.0)
+    key = (
+        int(user_id),
+        _text(broker_name, "unknown").lower(),
+        _text(symbol).upper(),
+    )
+    required = max(
+        MIN_PREMIUM_UPTICK_POINTS,
+        current * MIN_PREMIUM_UPTICK_PERCENT / 100.0,
+    )
 
     with _lock:
         samples = _quote_samples[key]
@@ -220,11 +250,18 @@ def _momentum_check(
     allowed = move + 1e-9 >= required
     return {
         "allowed": allowed,
-        "reason": "OPTION_PREMIUM_MOMENTUM_OK" if allowed else "OPTION_PREMIUM_MOMENTUM_WEAK",
+        "reason": (
+            "OPTION_PREMIUM_MOMENTUM_OK"
+            if allowed
+            else "OPTION_PREMIUM_MOMENTUM_WEAK"
+        ),
         "previous_price": round(previous_price, 4),
         "current_price": round(current, 4),
         "move_points": round(move, 4),
-        "move_percent": round((move / previous_price * 100.0) if previous_price > 0 else 0.0, 4),
+        "move_percent": round(
+            (move / previous_price * 100.0) if previous_price > 0 else 0.0,
+            4,
+        ),
         "required_uptick": round(required, 4),
         "sample_age_seconds": round(now - previous[0], 3),
         "window_seconds": MOMENTUM_WINDOW_SECONDS,
@@ -232,7 +269,11 @@ def _momentum_check(
 
 
 def _clear_momentum(user_id: int, broker_name: str, symbol: str) -> None:
-    key = (int(user_id), _text(broker_name, "unknown").lower(), _text(symbol).upper())
+    key = (
+        int(user_id),
+        _text(broker_name, "unknown").lower(),
+        _text(symbol).upper(),
+    )
     with _lock:
         _quote_samples.pop(key, None)
 
@@ -265,21 +306,46 @@ def _entry_snapshot(
 ) -> dict[str, Any]:
     signal = dict((selected or {}).get("signal_data") or {})
     market = dict((selected or {}).get("market_data") or {})
-    breakdown = signal.get("score_breakdown") or signal.get("live_score_breakdown") or {}
-    side = _text(_first(signal, "signal", "candidate_signal", default="WAIT")).upper()
-
-    snapshot = {
+    side = _text(
+        _first(signal, "signal", "candidate_signal", default="WAIT")
+    ).upper()
+    return {
         "version": PATCH_VERSION,
         "captured_at": _iso_now(),
         "underlying": selected.get("underlying"),
         "side": side,
-        "decision_score": _i(_first(signal, "decision_score", "score", default=0)),
-        "minimum_required_score": _i(_first(signal, "min_score", "required_score", default=82), 82),
+        "decision_score": _i(
+            _first(signal, "decision_score", "score", default=0)
+        ),
+        "minimum_required_score": _i(
+            _first(signal, "min_score", "required_score", default=82),
+            82,
+        ),
         "base_score": _i(signal.get("base_score"), 0),
         "core_score": _core_score(signal),
-        "score_breakdown": breakdown,
-        "market_regime": _first(signal, "market_regime", "regime", default=_first(market, "market_regime", "regime", "trend", default="UNKNOWN")),
-        "fake_breakout_probability": _first(signal, "fake_breakout_probability", "fake_breakout", default=market.get("fake_breakout_probability")),
+        "score_breakdown": (
+            signal.get("score_breakdown")
+            or signal.get("live_score_breakdown")
+            or {}
+        ),
+        "market_regime": _first(
+            signal,
+            "market_regime",
+            "regime",
+            default=_first(
+                market,
+                "market_regime",
+                "regime",
+                "trend",
+                default="UNKNOWN",
+            ),
+        ),
+        "fake_breakout_probability": _first(
+            signal,
+            "fake_breakout_probability",
+            "fake_breakout",
+            default=market.get("fake_breakout_probability"),
+        ),
         "confidence": signal.get("confidence"),
         "warnings": list(signal.get("warnings") or []),
         "strategy_profile_key": signal.get("strategy_profile_key"),
@@ -301,7 +367,19 @@ def _entry_snapshot(
             "atr": market.get("atr"),
             "momentum_pattern": market.get("momentum_pattern"),
         },
-        "real_5m": _first(signal, "real_5m", "real_mtf", "mtf_snapshot", default=_first(market, "real_5m", "real_mtf", "mtf_snapshot", default={})),
+        "real_5m": _first(
+            signal,
+            "real_5m",
+            "real_mtf",
+            "mtf_snapshot",
+            default=_first(
+                market,
+                "real_5m",
+                "real_mtf",
+                "mtf_snapshot",
+                default={},
+            ),
+        ),
         "option": {
             "symbol": resolved.get("symbol"),
             "token": resolved.get("token"),
@@ -319,7 +397,6 @@ def _entry_snapshot(
             "broker": health,
         },
     }
-    return snapshot
 
 
 def _summary_text(snapshot: dict[str, Any]) -> str:
@@ -328,12 +405,14 @@ def _summary_text(snapshot: dict[str, Any]) -> str:
     market = snapshot.get("market") or {}
     return (
         f"{PATCH_VERSION}"
-        f" | score={snapshot.get('decision_score')}/{snapshot.get('minimum_required_score')}"
+        f" | score={snapshot.get('decision_score')}/"
+        f"{snapshot.get('minimum_required_score')}"
         f" | core={snapshot.get('core_score')}"
         f" | regime={snapshot.get('market_regime')}"
         f" | adx={_f(market.get('adx')):.2f}"
         f" | fake={snapshot.get('fake_breakout_probability')}"
-        f" | premium={momentum.get('previous_price')}->{momentum.get('current_price')}"
+        f" | premium={momentum.get('previous_price')}->"
+        f"{momentum.get('current_price')}"
         f" | quote={option.get('quote_source')} age=0s"
     )[:480]
 
@@ -388,7 +467,10 @@ def _audit_event(
     throttle_key = (int(user_id), event_name, symbol, _text(reason)[:80])
     now = time.time()
     with _lock:
-        if not force and now - _last_audit.get(throttle_key, 0.0) < AUDIT_REPEAT_SECONDS:
+        if (
+            not force
+            and now - _last_audit.get(throttle_key, 0.0) < AUDIT_REPEAT_SECONDS
+        ):
             return
         _last_audit[throttle_key] = now
 
@@ -449,6 +531,20 @@ def _persist_open_snapshot(conn, trade_id: int, snapshot: dict[str, Any]) -> Non
     conn.commit()
 
 
+def _quality_transport_state(
+    user_id: int,
+    broker_name: str,
+    quality: dict[str, Any],
+) -> dict[str, Any]:
+    reason = _text(quality.get("reason")).upper()
+    warning = _text(quality.get("warning"))
+    if "FETCH_WARNING" in reason and _transport_error(warning):
+        _record_failure(user_id, broker_name, "option_candles", warning)
+    elif "FETCH_WARNING" not in reason:
+        _record_success(user_id, broker_name, "option_candles")
+    return _health_snapshot(user_id, broker_name, "option_candles")
+
+
 def _guard_reason(health: dict[str, Any], candle: dict[str, Any]) -> str | None:
     if health.get("blocked"):
         return "BROKER_DNS_TRANSPORT_UNHEALTHY"
@@ -475,26 +571,47 @@ def apply_entry_execution_safety_v1_patch() -> None:
 
     def scan_angel_guarded(user_id, obj, settings, profile, streak):
         scans = base_scan_angel(user_id, obj, settings, profile, streak)
-        transport_errors = [scan.get("error") for scan in scans if scan.get("status") == "ERROR" and _transport_error(scan.get("error"))]
-        if transport_errors:
-            for error in transport_errors:
+        errors = [
+            scan.get("error")
+            for scan in scans
+            if scan.get("status") == "ERROR"
+            and _transport_error(scan.get("error"))
+        ]
+        if errors:
+            for error in errors:
                 _record_failure(user_id, "angelone", "candles", error)
-        else:
-            fresh = any(scan.get("status") == "OK" and _candle_freshness(scan).get("fresh") for scan in scans)
-            if fresh:
-                _record_success(user_id, "angelone", "candles")
+        elif any(
+            scan.get("status") == "OK"
+            and _candle_freshness(scan).get("fresh")
+            for scan in scans
+        ):
+            _record_success(user_id, "angelone", "candles")
         return scans
 
     def scan_multi_guarded(user_id, broker_name, obj, settings, profile, streak):
-        scans = base_scan_multi(user_id, broker_name, obj, settings, profile, streak)
-        transport_errors = [scan.get("error") for scan in scans if scan.get("status") == "ERROR" and _transport_error(scan.get("error"))]
-        if transport_errors:
-            for error in transport_errors:
+        scans = base_scan_multi(
+            user_id,
+            broker_name,
+            obj,
+            settings,
+            profile,
+            streak,
+        )
+        errors = [
+            scan.get("error")
+            for scan in scans
+            if scan.get("status") == "ERROR"
+            and _transport_error(scan.get("error"))
+        ]
+        if errors:
+            for error in errors:
                 _record_failure(user_id, broker_name, "candles", error)
-        else:
-            fresh = any(scan.get("status") == "OK" and _candle_freshness(scan).get("fresh") for scan in scans)
-            if fresh:
-                _record_success(user_id, broker_name, "candles")
+        elif any(
+            scan.get("status") == "OK"
+            and _candle_freshness(scan).get("fresh")
+            for scan in scans
+        ):
+            _record_success(user_id, broker_name, "candles")
         return scans
 
     def ltp_angel_guarded(obj, trade):
@@ -503,7 +620,12 @@ def apply_entry_execution_safety_v1_patch() -> None:
         if result.get("success"):
             _record_success(user_id, "angelone", "quote")
         else:
-            _record_failure(user_id, "angelone", "quote", result.get("message"))
+            _record_failure(
+                user_id,
+                "angelone",
+                "quote",
+                result.get("message"),
+            )
         return result
 
     def ltp_multi_guarded(broker_name, obj, trade):
@@ -512,7 +634,12 @@ def apply_entry_execution_safety_v1_patch() -> None:
         if result.get("success"):
             _record_success(user_id, broker_name, "quote")
         else:
-            _record_failure(user_id, broker_name, "quote", result.get("message"))
+            _record_failure(
+                user_id,
+                broker_name,
+                "quote",
+                result.get("message"),
+            )
         return result
 
     def open_common_guarded(
@@ -531,16 +658,37 @@ def apply_entry_execution_safety_v1_patch() -> None:
     ):
         _ensure_audit_schema(conn)
         symbol = _text(resolved.get("symbol"))
+        quality_copy = dict(quality or {})
+
+        # Reaching _open_common proves a direct option LTP was just fetched by
+        # the existing broker-specific wrapper. Preserve that wrapper and mark
+        # only the successful quote channel here.
+        _record_success(user_id, broker_name, "quote")
+
         candle = _candle_freshness(selected)
+        option_candle_health = _quality_transport_state(
+            user_id,
+            broker_name,
+            quality_copy,
+        )
         candle_health = _health_snapshot(user_id, broker_name, "candles")
         quote_health = _health_snapshot(user_id, broker_name, "quote")
         health = {
-            "blocked": bool(candle_health.get("blocked") or quote_health.get("blocked")),
+            "blocked": bool(
+                candle_health.get("blocked")
+                or quote_health.get("blocked")
+                or option_candle_health.get("blocked")
+            ),
             "candles": candle_health,
+            "option_candles": option_candle_health,
             "quote": quote_health,
         }
-        momentum = _momentum_check(user_id, broker_name, symbol, quote_price)
-        quality_copy = dict(quality or {})
+        momentum = _momentum_check(
+            user_id,
+            broker_name,
+            symbol,
+            quote_price,
+        )
         snapshot = _entry_snapshot(
             broker_name,
             selected,
@@ -554,11 +702,20 @@ def apply_entry_execution_safety_v1_patch() -> None:
 
         reason = _guard_reason(health, candle)
         if reason is None and not quality_copy.get("allowed", True):
-            reason = _text(quality_copy.get("reason"), "OPTION_QUALITY_BLOCKED")
+            reason = _text(
+                quality_copy.get("reason"),
+                "OPTION_QUALITY_BLOCKED",
+            )
         if reason is None and not momentum.get("allowed"):
-            reason = _text(momentum.get("reason"), "OPTION_PREMIUM_MOMENTUM_WEAK")
+            reason = _text(
+                momentum.get("reason"),
+                "OPTION_PREMIUM_MOMENTUM_WEAK",
+            )
 
-        state["entry_data_health"] = {"candle": candle, "broker": health}
+        state["entry_data_health"] = {
+            "candle": candle,
+            "broker": health,
+        }
         state["option_premium_momentum"] = momentum
         state["entry_audit_preview"] = snapshot
 
@@ -568,7 +725,10 @@ def apply_entry_execution_safety_v1_patch() -> None:
                 "reason": reason,
                 "quality": quality_copy,
                 "premium_momentum": momentum,
-                "data_health": {"candle": candle, "broker": health},
+                "data_health": {
+                    "candle": candle,
+                    "broker": health,
+                },
                 "version": PATCH_VERSION,
             }
             _audit_event(conn, user_id, "BLOCKED", reason, snapshot)
@@ -578,7 +738,10 @@ def apply_entry_execution_safety_v1_patch() -> None:
             {
                 "allowed": True,
                 "premium_momentum": momentum,
-                "data_health": {"candle": candle, "broker": health},
+                "data_health": {
+                    "candle": candle,
+                    "broker": health,
+                },
                 "entry_audit_version": PATCH_VERSION,
             }
         )
@@ -598,96 +761,34 @@ def apply_entry_execution_safety_v1_patch() -> None:
             state,
         )
         if not opened:
-            _audit_event(conn, user_id, "NOT_OPENED", "DOWNSTREAM_ENTRY_GUARD", snapshot)
+            _audit_event(
+                conn,
+                user_id,
+                "NOT_OPENED",
+                "DOWNSTREAM_ENTRY_GUARD",
+                snapshot,
+            )
             return False
 
-        trade_id = _i((state.get("last_opened_trade") or {}).get("trade_id"), 0)
+        trade_id = _i(
+            (state.get("last_opened_trade") or {}).get("trade_id"),
+            0,
+        )
         if trade_id > 0:
             _persist_open_snapshot(conn, trade_id, snapshot)
-            _audit_event(conn, user_id, "OPENED", "ENTRY_APPROVED", snapshot, trade_id=trade_id, force=True)
+            _audit_event(
+                conn,
+                user_id,
+                "OPENED",
+                "ENTRY_APPROVED",
+                snapshot,
+                trade_id=trade_id,
+                force=True,
+            )
             state["last_opened_trade"]["entry_snapshot"] = snapshot
+
         _clear_momentum(user_id, broker_name, symbol)
         return True
-
-    def open_angel_guarded(conn, user_id, obj, selected, settings, state):
-        underlying = selected["underlying"]
-        signal = selected["signal_data"]
-        market = selected["market_data"]
-        resolved = runtime._legacy().resolve_option(underlying, market["price"], signal["signal"])
-        if not resolved:
-            state["entry_guard"] = {"allowed": False, "reason": "OPTION_RESOLUTION_FAILED", "version": PATCH_VERSION}
-            return False
-        resolved = dict(resolved)
-        resolved["exchange"] = resolved.get("exch_seg") or resolved.get("exchange")
-        try:
-            payload = obj.ltpData(resolved["exch_seg"], resolved["symbol"], resolved["token"])
-            quote_price = _f(payload["data"]["ltp"], 0.0)
-            if quote_price <= 0:
-                raise ValueError("Angel option LTP invalid")
-            _record_success(user_id, "angelone", "quote")
-        except Exception as exc:
-            _record_failure(user_id, "angelone", "quote", exc)
-            state["entry_guard"] = {"allowed": False, "reason": "OPTION_QUOTE_FETCH_FAILED", "error": _text(exc)[:160], "version": PATCH_VERSION}
-            return False
-        quality = runtime._legacy()._option_entry_quality_angel(obj, resolved, quote_price)
-        return runtime._open_common(
-            conn,
-            user_id,
-            "angelone",
-            selected,
-            settings,
-            resolved,
-            quote_price,
-            quality,
-            runtime._legacy().LOT_SIZES.get(underlying, 1),
-            lambda r, a, q, p: runtime._place_angel(obj, r, a, q, p),
-            lambda: runtime._angel_cash(obj),
-            state,
-        )
-
-    def open_multi_guarded(conn, user_id, broker_name, obj, selected, settings, state):
-        underlying = selected["underlying"]
-        signal = selected["signal_data"]
-        market = selected["market_data"]
-        resolved = obj.search_option(
-            underlying,
-            "current_week",
-            runtime._legacy()._dynamic_atm_strike(underlying, market["price"]),
-            signal["signal"],
-        )
-        if not resolved.get("success"):
-            state["entry_guard"] = {"allowed": False, "reason": "OPTION_RESOLUTION_FAILED", "error": _text(resolved.get("message"))[:160], "version": PATCH_VERSION}
-            return False
-        try:
-            if broker_name == "upstox":
-                quote = obj.get_ltp(resolved.get("token") or resolved["symbol"], exchange=resolved.get("exchange", "NSE_FO"))
-            else:
-                quote = obj.get_ltp(resolved["symbol"], exchange=resolved.get("exchange", "NFO"))
-            if not quote.get("success"):
-                raise RuntimeError(quote.get("message") or "Option quote failed")
-            quote_price = _f(quote.get("ltp"), 0.0)
-            if quote_price <= 0:
-                raise ValueError("Option LTP invalid")
-            _record_success(user_id, broker_name, "quote")
-        except Exception as exc:
-            _record_failure(user_id, broker_name, "quote", exc)
-            state["entry_guard"] = {"allowed": False, "reason": "OPTION_QUOTE_FETCH_FAILED", "error": _text(exc)[:160], "version": PATCH_VERSION}
-            return False
-        quality = runtime._legacy()._option_entry_quality_multi(broker_name, obj, resolved, quote_price)
-        return runtime._open_common(
-            conn,
-            user_id,
-            broker_name,
-            selected,
-            settings,
-            resolved,
-            quote_price,
-            quality,
-            resolved.get("lot_size") or runtime._legacy().LOT_SIZES.get(underlying, 1),
-            lambda r, a, q, p: runtime._place_multi(obj, r, a, q, p),
-            lambda: runtime._multi_cash(obj),
-            state,
-        )
 
     runtime._ensure_schema = ensure_schema_with_audit
     runtime._scan_angel = scan_angel_guarded
@@ -695,6 +796,4 @@ def apply_entry_execution_safety_v1_patch() -> None:
     runtime._ltp_angel = ltp_angel_guarded
     runtime._ltp_multi = ltp_multi_guarded
     runtime._open_common = open_common_guarded
-    runtime._open_angel = open_angel_guarded
-    runtime._open_multi = open_multi_guarded
     runtime._okai_entry_execution_safety_v1 = True
