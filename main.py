@@ -79,6 +79,9 @@ from bot.live_quote_runtime_recovery import (
     apply_live_quote_timestamp_patch,
     recover_persisted_open_trade_engines,
 )
+from bot.admin_morning_trade_cleanup_20260804 import (
+    delete_admin_morning_paper_trades_20260804,
+)
 import os
 
 # Preserve the proven runtime patch order. The sector-rotation API is display-only
@@ -120,7 +123,7 @@ apply_active_strategy_score_patch()
 apply_decision_score_display_consistency_patch()
 apply_live_quote_timestamp_patch()
 
-RELEASE_VERSION = "live-quote-runtime-recovery-v1"
+RELEASE_VERSION = "admin-morning-trade-cleanup-20260804-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
@@ -210,6 +213,14 @@ def startup():
             conn.commit()
             print(f"Admin created: {admin_email}")
         conn.close()
+
+    morning_cleanup = delete_admin_morning_paper_trades_20260804()
+    print(
+        "Admin 04-Aug 09:15-09:38 permanent cleanup | "
+        f"removed={morning_cleanup['removed']} | "
+        f"users={morning_cleanup['affected_users']} | "
+        f"already_applied={morning_cleanup['already_applied']}"
+    )
 
     admin_broker_repaired = repair_admin_angel_selection_once()
     if admin_broker_repaired:
