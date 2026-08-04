@@ -1,0 +1,289 @@
+"""Minimal balanced momentum and SEBI CAS safety for AUTO runtime.
+
+- Neutral/doji candles never count as PE momentum.
+- A trend-aligned pullback/reclaim is accepted symmetrically for CE and PE.
+- From 03-Aug-2026, AUTO positions exit at 15:12 IST before CAS starts at 15:15.
+
+The protected score threshold, MTF, ADX, anti-chase, sizing, cooldown, broker
+orders, ATR SL and profit-lock logic are not changed.
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta, timezone
+
+from bot import angel_fetcher
+from bot import auto_portfolio_runtime as runtime
+
+
+PATCH_VERSION = "BULLISH_BALANCE_CAS_GUARD_V2"
+CAS_EFFECTIVE_DATE = date(2026, 8, 3)
+CAS_SAFE_EXIT_MINUTE = 15 * 60 + 12
+CAS_START_MINUTE = 15 * 60 + 15
+CAS_END_MINUTE = 15 * 60 + 35
+DERIVATIVES_CLOSE_MINUTE = 15 * 60 + 40
+LEGACY_EOD_EXIT_MINUTE = 15 * 60 + 25
+
+
+def _f(value, default=0.0):
+    try:
+        number = float(value)
+        return number if number == number else float(default)
+    except Exception:
+        return float(default)
+
+
+def _value(row, key, default=None):
+    try:
+        value = row.get(key, default)
+    except Exception:
+        try:
+            value = row[key]
+        except Exception:
+            value = default
+    return default if value is None else value
+
+
+def _now_ist():
+    return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+
+
+def _minute(value):
+    return value.hour * 60 + value.minute
+
+
+def _cas_day(value=None):
+    current = value or _now_ist()
+    return current.weekday() < 5 and current.date() >= CAS_EFFECTIVE_DATE
+
+
+def eod_exit_minute_for(value=None):
+    return CAS_SAFE_EXIT_MINUTE if _cas_day(value) else LEGACY_EOD_EXIT_MINUTE
+
+
+def classify_completed_candle(row, atr=0.0):
+    open_price = _f(_value(row, "open"), 0.0)
+    high = _f(_value(row, "high"), open_price)
+    low = _f(_value(row, "low"), open_price)
+    close = _f(_value(row, "close"), open_price)
+    body = close - open_price
+    candle_range = max(0.01, high - low)
+    threshold = max(0.5, candle_range * 0.15, max(0.0, _f(atr)) * 0.04)
+
+    if body > threshold:
+        direction = "UP"
+    elif body < -threshold:
+        direction = "DOWN"
+    else:
+        direction = "NEUTRAL"
+
+    return {
+        "direction": direction,
+        "body_points": round(body, 4),
+        "range_points": round(candle_range, 4),
+        "neutral_threshold": round(threshold, 4),
+        "open": open_price,
+        "close": close,
+    }
+
+
+def momentum_pattern(first, second, market):
+    first_direction = str(first.get("direction") or "NEUTRAL").upper()
+    second_direction = str(second.get("direction") or "NEUTRAL").upper()
+
+    if first_direction == "UP" and second_direction == "UP":
+        return "TWO_CLEAR_BULLISH"
+    if first_direction == "DOWN" and second_direction == "DOWN":
+        return "TWO_CLEAR_BEARISH"
+
+    trend = str(market.get("trend") or "SIDEWAYS").upper()
+    supertrend = str(market.get("supertrend_dir") or "NEUTRAL").upper()
+    close = _f(second.get("close"), _f(market.get("price"), 0.0))
+    ema9 = _f(market.get("ema9"), close)
+    vwap = _f(market.get("vwap"), close)
+    vwap_fallback = bool(market.get("vwap_fallback_used", False))
+
+    if (
+        first_direction in {"DOWN", "NEUTRAL"}
+        and second_direction == "UP"
+        and trend == "UPTREND"
+        and supertrend == "UP"
+        and close > ema9
+        and (vwap_fallback or close > vwap)
+    ):
+        return "BULLISH_PULLBACK_RECLAIM"
+
+    if (
+        first_direction in {"UP", "NEUTRAL"}
+        and second_direction == "DOWN"
+        and trend == "DOWNTREND"
+        and supertrend == "DOWN"
+        and close < ema9
+        and (vwap_fallback or close < vwap)
+    ):
+        return "BEARISH_PULLBACK_REJECTION"
+
+    return "NO_MOMENTUM"
+
+
+def momentum_score_flags(pattern):
+    value = str(pattern or "NO_MOMENTUM").upper()
+    if value in {"TWO_CLEAR_BULLISH", "BULLISH_PULLBACK_RECLAIM"}:
+        return True, True
+    if value in {"TWO_CLEAR_BEARISH", "BEARISH_PULLBACK_REJECTION"}:
+        return False, False
+    # Mixed flags award neither CE nor PE momentum in the legacy interface.
+    return True, False
+
+
+def apply_balanced_momentum_patch():
+    if getattr(runtime, "_okai_balanced_momentum_v2", False):
+        return
+
+    original_build_scan = runtime._build_scan
+
+    def build_scan_balanced(user_id, underlying, frame, profile, loss_streak):
+        scan = original_build_scan(
+            user_id,
+            underlying,
+            frame,
+            profile,
+            loss_streak,
+        )
+        if not isinstance(scan, dict) or scan.get("status") != "OK":
+            return scan
+
+        try:
+            if frame is None or len(frame) < 3:
+                return scan
+
+            market = dict(scan.get("market_data") or {})
+            first_row = frame.iloc[-3]
+            second_row = frame.iloc[-2]
+            atr = _f(market.get("atr"), _f(_value(second_row, "ATR"), 0.0))
+            first = classify_completed_candle(first_row, atr)
+            second = classify_completed_candle(second_row, atr)
+            pattern = momentum_pattern(first, second, market)
+            score_c1_bullish, score_c2_bullish = momentum_score_flags(pattern)
+
+            # Keep explicit real directions, while the two legacy booleans carry
+            # only the balanced momentum result used by existing score code.
+            market.update(
+                {
+                    "c1_direction": first["direction"],
+                    "c2_direction": second["direction"],
+                    "c1_bullish_actual": first["direction"] == "UP",
+                    "c2_bullish_actual": second["direction"] == "UP",
+                    "c1_bearish_actual": first["direction"] == "DOWN",
+                    "c2_bearish_actual": second["direction"] == "DOWN",
+                    "c1_neutral": first["direction"] == "NEUTRAL",
+                    "c2_neutral": second["direction"] == "NEUTRAL",
+                    "c1_bullish": score_c1_bullish,
+                    "c2_bullish": score_c2_bullish,
+                    "c1_body_points": first["body_points"],
+                    "c2_body_points": second["body_points"],
+                    "candle_neutral_threshold": max(
+                        first["neutral_threshold"],
+                        second["neutral_threshold"],
+                    ),
+                    "momentum_pattern": pattern,
+                    "momentum_balance_version": PATCH_VERSION,
+                }
+            )
+
+            fixed_signal = angel_fetcher.get_full_signal(
+                market,
+                consecutive_losses=loss_streak,
+                profile=profile,
+            )
+            if not isinstance(fixed_signal, dict):
+                return scan
+
+            previous_signal = dict(scan.get("signal_data") or {})
+            fixed_signal = dict(fixed_signal)
+            for key, value in previous_signal.items():
+                fixed_signal.setdefault(key, value)
+
+            fixed_signal.update(
+                {
+                    "momentum_pattern": pattern,
+                    "c1_direction": first["direction"],
+                    "c2_direction": second["direction"],
+                    "neutral_candle_pe_bias_removed": True,
+                }
+            )
+            warnings = list(fixed_signal.get("warnings") or [])
+            if (
+                pattern == "NO_MOMENTUM"
+                and "NEUTRAL" in {first["direction"], second["direction"]}
+                and "NEUTRAL_CANDLE_NOT_COUNTED_AS_PE" not in warnings
+            ):
+                warnings.append("NEUTRAL_CANDLE_NOT_COUNTED_AS_PE")
+            if pattern == "BULLISH_PULLBACK_RECLAIM":
+                warnings.append("BULLISH_PULLBACK_RECLAIM_CONFIRMED")
+            elif pattern == "BEARISH_PULLBACK_REJECTION":
+                warnings.append("BEARISH_PULLBACK_REJECTION_CONFIRMED")
+            fixed_signal["warnings"] = list(dict.fromkeys(warnings))
+
+            market["signal"] = fixed_signal.get("signal", "WAIT")
+            market["signal_score"] = fixed_signal.get("score", 0)
+            market["signal_min_score"] = fixed_signal.get("min_score", 82)
+
+            fixed_scan = dict(scan)
+            fixed_scan["market_data"] = market
+            fixed_scan["signal_data"] = fixed_signal
+            return fixed_scan
+        except Exception as exc:
+            scan.setdefault("momentum_balance_warning", str(exc)[:160])
+            return scan
+
+    runtime._build_scan = build_scan_balanced
+    runtime._okai_balanced_momentum_v2 = True
+
+
+def apply_cas_closing_guard_patch():
+    if getattr(runtime, "_okai_cas_closing_guard_v2", False):
+        return
+
+    original_evaluate_exit = runtime._evaluate_exit
+    original_state_update = runtime._state_update
+
+    def evaluate_exit_cas_safe(trade, ltp, market_data, candle_id):
+        result = original_evaluate_exit(trade, ltp, market_data, candle_id)
+        if not isinstance(result, dict):
+            return result
+
+        current = _now_ist()
+        if (
+            _cas_day(current)
+            and _minute(current) >= CAS_SAFE_EXIT_MINUTE
+            and not result.get("reason")
+        ):
+            result = dict(result)
+            result["reason"] = "CAS SAFETY EXIT 15:12 IST"
+            result["cas_guard"] = {
+                "version": PATCH_VERSION,
+                "safe_exit_ist": "15:12",
+                "cas_window_ist": "15:15-15:35",
+                "derivatives_close_ist": "15:40",
+            }
+        return result
+
+    def state_update_cas_safe(state, scans, selected, settings, rows):
+        original_state_update(state, scans, selected, settings, rows)
+        if _cas_day():
+            state.update(
+                {
+                    "closing_system": "SEBI_CLOSING_AUCTION_SESSION",
+                    "cas_guard_active": True,
+                    "cas_effective_date": CAS_EFFECTIVE_DATE.isoformat(),
+                    "cas_window_ist": "15:15-15:35",
+                    "derivatives_close_ist": "15:40",
+                    "hard_eod_exit_ist": "15:12",
+                    "cas_feed_mode": "NO_INDICATIVE_AUCTION_FEED_PRE_CLOSE_EXIT",
+                }
+            )
+
+    runtime._evaluate_exit = evaluate_exit_cas_safe
+    runtime._state_update = state_update_cas_safe
+    runtime._okai_cas_closing_guard_v2 = True
