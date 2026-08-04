@@ -16,6 +16,7 @@ No signal, entry, exit, SL, quantity, broker-fill or strategy rule is changed.
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -28,6 +29,9 @@ from database import get_db
 
 VERSION = "LIVE_QUOTE_RUNTIME_RECOVERY_V1"
 LIVE_PATHS = {"/bot/trade-live"}
+_QUOTE_COLUMNS = {"quote_updated_at", "quote_source"}
+_quote_columns_ready = False
+_quote_columns_lock = threading.Lock()
 
 
 def _utc_now() -> str:
@@ -39,16 +43,46 @@ def _utc_now() -> str:
     )
 
 
-def _ensure_quote_columns(conn) -> None:
-    for name, kind in [
-        ("quote_updated_at", "TEXT"),
-        ("quote_source", "TEXT"),
-    ]:
+def _column_names(conn) -> set[str]:
+    try:
+        rows = conn.execute("PRAGMA table_info(paper_trades)").fetchall()
+    except Exception:
+        return set()
+
+    names: set[str] = set()
+    for row in rows:
         try:
-            conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {name} {kind}")
+            names.add(str(row["name"]))
         except Exception:
-            pass
-    conn.commit()
+            try:
+                names.add(str(row[1]))
+            except Exception:
+                pass
+    return names
+
+
+def _ensure_quote_columns(conn) -> None:
+    global _quote_columns_ready
+    if _quote_columns_ready:
+        return
+
+    with _quote_columns_lock:
+        if _quote_columns_ready:
+            return
+
+        existing = _column_names(conn)
+        for name, kind in [
+            ("quote_updated_at", "TEXT"),
+            ("quote_source", "TEXT"),
+        ]:
+            if name in existing:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {name} {kind}")
+            except Exception:
+                pass
+        conn.commit()
+        _quote_columns_ready = _QUOTE_COLUMNS.issubset(_column_names(conn))
 
 
 def apply_live_quote_timestamp_patch() -> None:
