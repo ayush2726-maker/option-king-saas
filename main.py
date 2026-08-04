@@ -46,6 +46,10 @@ from bot.default_strategy_patch import (
     apply_default_strategy_patch,
     migrate_default_strategy_profiles,
 )
+from bot.bullish_balance_cas_guard_patch import (
+    apply_balanced_momentum_patch,
+    apply_cas_closing_guard_patch,
+)
 from bot.fresh_entry_guard_patch import apply_fresh_entry_guard_patch
 from bot.expiry_entry_diagnostics_patch import apply_expiry_entry_diagnostics_patch
 from bot.feed_safety_consistency_patch import apply_feed_safety_consistency_patch
@@ -91,6 +95,8 @@ apply_score_history_patch()
 apply_upstox_live_candle_patch()
 apply_live_scan_history_fallback_patch()
 apply_default_strategy_patch()
+# Correct candle-direction asymmetry before all final entry/score guards attach.
+apply_balanced_momentum_patch()
 apply_fresh_entry_guard_patch()
 apply_expiry_entry_diagnostics_patch()
 apply_feed_safety_consistency_patch()
@@ -122,8 +128,10 @@ apply_consecutive_loss_cooldown_patch()
 apply_active_strategy_score_patch()
 apply_decision_score_display_consistency_patch()
 apply_live_quote_timestamp_patch()
+# Final date-aware exit layer: from 03-Aug-2026 close before the 15:15 CAS.
+apply_cas_closing_guard_patch()
 
-RELEASE_VERSION = "admin-morning-trade-cleanup-20260804-v1"
+RELEASE_VERSION = "bullish-balance-cas-guard-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
