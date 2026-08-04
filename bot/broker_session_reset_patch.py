@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fastapi import Header
+
 from bot import angel_fetcher
 from bot import shared_trial_paper_feed_patch as shared_paper_feed
 from bot.completed_candle_direction_patch import (
@@ -52,6 +54,151 @@ def _install_shared_paper_owner_first_policy() -> None:
         owner_first_selected_personal_broker
     )
     shared_paper_feed._okai_shared_paper_owner_first_v1 = True
+
+
+def _install_shared_paper_owner_first_start_route() -> None:
+    """Start normal users' PAPER engines directly from the owner broker.
+
+    The older route first called the legacy PAPER start function. That legacy
+    function queried the user's saved broker again, so an expired Upstox token
+    could still be attempted before the shared owner feed. This route bypasses
+    that personal-token attempt entirely for eligible PAPER users.
+    """
+    from database import get_db
+    from bot import routes
+
+    if getattr(routes, "_okai_shared_paper_owner_first_start_v1", False):
+        return
+
+    previous_start = routes.bot_start
+
+    def owner_first_paper_start(authorization: str = Header(None)):
+        user = routes.get_current_user(authorization)
+        user_id = int(user["id"])
+        owner = None
+        settings = None
+        trading_mode = "paper"
+
+        conn = get_db()
+        try:
+            routes.ensure_tables(conn)
+            settings = routes.get_strategy_settings(conn, user_id)
+            trading_mode = str(
+                settings.get("trading_mode", "paper") or "paper"
+            ).lower()
+            if (
+                trading_mode == "paper"
+                and shared_paper_feed._eligible_shared_user(conn, user_id)
+            ):
+                owner = shared_paper_feed._selected_owner_broker(conn, user_id)
+        finally:
+            conn.close()
+
+        # Admin PAPER and every LIVE account keep their existing personal-broker
+        # behaviour. Also preserve the old error when the owner feed is absent.
+        if trading_mode == "live" or not owner:
+            return previous_start(authorization)
+
+        conn = get_db()
+        try:
+            routes.ensure_tables(conn)
+            routes.save_bot_status(conn, user_id, 1, "PAPER_MODE")
+        finally:
+            conn.close()
+
+        try:
+            # Remove a stale runtime that may have been created with the user's
+            # expired personal token by an older server build.
+            try:
+                angel_fetcher.stop_user_bot(user_id)
+            except Exception:
+                pass
+
+            result, broker_name = shared_paper_feed._start_from_row(
+                angel_fetcher,
+                user_id,
+                owner,
+                "shared_owner_paper",
+            )
+            state = shared_paper_feed._mark_shared_state(
+                angel_fetcher,
+                user_id,
+                broker_name,
+            )
+            started = bool(state.get("running")) or bool(
+                isinstance(result, dict)
+                and (
+                    result.get("success")
+                    or result.get("message") == "Bot already running"
+                )
+            )
+            if not started:
+                raise RuntimeError(
+                    str(
+                        (result or {}).get("message")
+                        or "Shared engine start failed"
+                    )
+                )
+        except Exception as exc:
+            shared_paper_feed._set_persisted_stopped(routes, user_id)
+            return {
+                "success": False,
+                "message": "Shared PAPER feed start failed: " + str(exc)[:160],
+                "mode": "paper",
+                "shared_paper_feed": False,
+                "real_orders": False,
+            }
+
+        try:
+            routes.notify_user(
+                user_id,
+                "\n".join(
+                    [
+                        "📝 <b>Paper Bot Started</b>",
+                        "Mode: PAPER",
+                        f"Market Data: Shared {broker_name.upper()} feed",
+                        f"Paper Capital: ₹{settings.get('paper_capital', 100000)}",
+                        "Real orders OFF.",
+                    ]
+                ),
+            )
+        except Exception:
+            pass
+
+        return {
+            "success": True,
+            "message": (
+                f"PAPER bot started on shared {broker_name.upper()} market data. "
+                "User ka personal token use nahi hua; real orders OFF."
+            ),
+            "mode": "paper",
+            "paper_capital": settings.get("paper_capital", 100000),
+            "primary_instrument": settings.get("primary_instrument", "NIFTY"),
+            "enabled_instruments": settings.get(
+                "enabled_instruments",
+                ["NIFTY"],
+            ),
+            "shared_paper_feed": True,
+            "market_data_source": "shared_owner_paper_feed",
+            "data_broker": broker_name,
+            "real_orders": False,
+            "personal_broker_required": False,
+        }
+
+    routes.bot_start = owner_first_paper_start
+
+    # FastAPI's decorator has already created the APIRoute object. Replace both
+    # call references before main.py includes the router in the application.
+    for route in routes.router.routes:
+        if (
+            getattr(route, "path", None) == "/bot/start"
+            and "POST" in getattr(route, "methods", set())
+        ):
+            route.endpoint = owner_first_paper_start
+            if getattr(route, "dependant", None) is not None:
+                route.dependant.call = owner_first_paper_start
+
+    routes._okai_shared_paper_owner_first_start_v1 = True
 
 
 def _install_shared_paper_owner_first_recovery() -> None:
@@ -164,6 +311,7 @@ def apply_broker_session_reset_patch() -> None:
     # already-created wrapper during hot reloads.
     _install_shared_paper_owner_first_policy()
     apply_shared_trial_paper_feed_patch()
+    _install_shared_paper_owner_first_start_route()
     _install_shared_paper_owner_first_recovery()
 
     if getattr(angel_fetcher, "_okai_broker_session_reset_v2", False):
