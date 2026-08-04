@@ -74,6 +74,11 @@ from bot.decision_score_display_consistency_patch import (
     apply_decision_score_display_consistency_patch,
 )
 from bot.breakeven_4pct_patch import apply_breakeven_4pct_patch
+from bot.live_quote_runtime_recovery import (
+    TradeLiveRuntimeRecoveryMiddleware,
+    apply_live_quote_timestamp_patch,
+    recover_persisted_open_trade_engines,
+)
 import os
 
 # Preserve the proven runtime patch order. The sector-rotation API is display-only
@@ -113,8 +118,9 @@ apply_eod_entry_guard_patch()
 apply_consecutive_loss_cooldown_patch()
 apply_active_strategy_score_patch()
 apply_decision_score_display_consistency_patch()
+apply_live_quote_timestamp_patch()
 
-RELEASE_VERSION = "decision-score-display-consistency-v1"
+RELEASE_VERSION = "live-quote-runtime-recovery-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
@@ -128,6 +134,7 @@ app.add_middleware(BacktestActiveStrategyMiddleware)
 app.add_middleware(StrictSignalHistoryMiddleware)
 app.add_middleware(SafeRegistrationEmailVerificationMiddleware)
 app.add_middleware(TestingFullAccessAndFreshDataMiddleware)
+app.add_middleware(TradeLiveRuntimeRecoveryMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -212,6 +219,15 @@ def startup():
         )
 
     migrate_default_strategy_profiles()
+
+    quote_recovery = recover_persisted_open_trade_engines()
+    print(
+        "Live quote runtime recovery | "
+        f"eligible={quote_recovery['eligible_users']} | "
+        f"running={quote_recovery['running_or_started']} | "
+        f"failed={len(quote_recovery['failed'])}"
+    )
+
     print(f"Option King AI SaaS Server started | {RELEASE_VERSION}")
 
 
