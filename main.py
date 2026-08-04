@@ -83,6 +83,9 @@ from bot.live_quote_runtime_recovery import (
     apply_live_quote_timestamp_patch,
     recover_persisted_open_trade_engines,
 )
+from bot.entry_execution_safety_v1_patch import (
+    apply_entry_execution_safety_v1_patch,
+)
 from bot.admin_morning_trade_cleanup_20260804 import (
     delete_admin_morning_paper_trades_20260804,
 )
@@ -128,10 +131,12 @@ apply_consecutive_loss_cooldown_patch()
 apply_active_strategy_score_patch()
 apply_decision_score_display_consistency_patch()
 apply_live_quote_timestamp_patch()
+# Final entry execution layer: fresh data + option premium confirmation + audit.
+apply_entry_execution_safety_v1_patch()
 # Final date-aware exit layer: from 03-Aug-2026 close before the 15:15 CAS.
 apply_cas_closing_guard_patch()
 
-RELEASE_VERSION = "bullish-balance-cas-guard-v1"
+RELEASE_VERSION = "entry-execution-safety-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
