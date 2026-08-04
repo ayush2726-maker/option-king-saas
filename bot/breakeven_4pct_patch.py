@@ -4,6 +4,11 @@ The active runtime and backtest profit-lock functions are already wrapped by the
 expectancy engine. This patch is therefore applied after that engine: it changes
 the underlying exact-cost solvers to 4% and normalises the final metadata without
 removing any runner/trailing behaviour.
+
+The first runtime lock is triggered by the exact charges-plus-4% price itself.
+It must not wait for a second hidden 1R condition, because that can leave the
+original ATR stop unchanged even after the agreed net-profit threshold was seen.
+Higher runner stages remain R-based and unchanged.
 """
 
 from __future__ import annotations
@@ -11,15 +16,19 @@ from __future__ import annotations
 from backtest import cost_safe_breakeven_risk_patch as backtest_cost
 from backtest import routes as backtest_routes
 from bot import angel_fetcher
+from bot import authoritative_profit_lock_runtime_patch as authoritative_runtime
 from bot import dynamic_exit
 from bot import live_net_pnl_breakeven_patch as live_cost
 from bot import strategy
-from bot.authoritative_profit_lock_runtime_patch import (
-    apply_authoritative_profit_lock_runtime_patch,
-)
 
 
 NET_PROFIT_LOCK_PERCENT = 4.0
+FIRST_LOCK_TRIGGER_R = 0.0
+
+# The authoritative helper reads this module global every time it evaluates an
+# open trade. Set it at import time as well as during apply() so repeated wrapper
+# installation or hot module reuse cannot restore the old hidden 1R gate.
+authoritative_runtime.FIRST_LOCK_TRIGGER_R = FIRST_LOCK_TRIGGER_R
 
 
 def _normalise(result):
@@ -64,6 +73,10 @@ def _wrap(base):
 
 
 def apply_breakeven_4pct_patch() -> None:
+    # Keep the exact 4% trigger authoritative even when apply() is called again
+    # after another runtime wrapper has already been installed.
+    authoritative_runtime.FIRST_LOCK_TRIGGER_R = FIRST_LOCK_TRIGGER_R
+
     if getattr(angel_fetcher, "_okai_breakeven_4pct_v1", False):
         return
 
@@ -91,8 +104,9 @@ def apply_breakeven_4pct_patch() -> None:
         backtest_routes.update_option_profit_lock = backtest_lock
 
     # Final runtime authority: recalculate the stop from the actual broker, index,
-    # quantity and PAPER/LIVE mode. This repairs any stale legacy helper chain while
-    # keeping the agreed 0.75R / 1.35R / 2.20R / 3.20R schedule unchanged.
-    apply_authoritative_profit_lock_runtime_patch()
+    # quantity and PAPER/LIVE mode. The first stop now latches immediately at the
+    # exact charges-plus-4% threshold; later 0.50R/1.00R/smooth runner stages are
+    # unchanged.
+    authoritative_runtime.apply_authoritative_profit_lock_runtime_patch()
 
     angel_fetcher._okai_breakeven_4pct_v1 = True
