@@ -1,0 +1,128 @@
+name: Apply Paper Relaxed Execution V7
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/apply-paper-relaxed-execution-v7.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Relax execution blockers only for paper mode
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          safety = Path("bot/entry_execution_safety_v1_patch.py")
+          text = safety.read_text(encoding="utf-8")
+
+          old = '''        # Premium momentum and premium-candle quality are audit-only.\n        # A qualified strategy entry is blocked here only for stale index data\n        # or repeated broker quote/candle transport failure.\n        reason = _guard_reason(health, candle)\n\n        state["entry_data_health"] = {\n'''
+          new = '''        # Premium momentum and premium-candle quality are audit-only.\n        # PAPER mode is an observation/testing environment: stale-candle and\n        # broker-health warnings are recorded but do not block a qualified\n        # strategy entry. LIVE mode keeps these protections.\n        current_mode = (\n            "live"\n            if str(settings.get("trading_mode", "paper")).lower() == "live"\n            else "paper"\n        )\n        reason = (\n            _guard_reason(health, candle)\n            if current_mode == "live"\n            else None\n        )\n\n        state["paper_execution_safety_bypass"] = {\n            "active": current_mode == "paper",\n            "stale_candle_block_disabled": current_mode == "paper",\n            "broker_health_block_disabled": current_mode == "paper",\n            "warnings_recorded": True,\n        }\n        state["entry_data_health"] = {\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif '"stale_candle_block_disabled": current_mode == "paper"' not in text:
+              raise SystemExit("Safety guard anchor not found")
+          safety.write_text(text, encoding="utf-8")
+
+          runtime = Path("bot/auto_portfolio_runtime.py")
+          text = runtime.read_text(encoding="utf-8")
+
+          text = text.replace(
+              'SLOT_ALLOCATIONS = {1: 0.50, 2: 0.40}\nRESERVE_ALLOCATION = 0.10\nMAX_OPEN_POSITIONS = 2',
+              'SLOT_ALLOCATIONS = {1: 0.50, 2: 0.40, 3: 0.00}\nRESERVE_ALLOCATION = 0.10\n# One position per enabled index; removes the old hard two-position cap.\nMAX_OPEN_POSITIONS = len(ALLOWED_INSTRUMENTS)',
+              1,
+          )
+          text = text.replace(
+              'if _i(_v(row, "capital_slot", 0)) in (1, 2)',
+              'if _i(_v(row, "capital_slot", 0)) in tuple(range(1, MAX_OPEN_POSITIONS + 1))',
+          )
+          text = text.replace(
+              'free = [slot for slot in (1, 2) if slot not in used]',
+              'free = [slot for slot in range(1, MAX_OPEN_POSITIONS + 1) if slot not in used]',
+              1,
+          )
+          text = text.replace(
+              'if _i(_v(row, "capital_slot", 0)) in (1, 2):',
+              'if _i(_v(row, "capital_slot", 0)) in tuple(range(1, MAX_OPEN_POSITIONS + 1)):',
+              1,
+          )
+          text = text.replace(
+              '    for slot in (1, 2):\n        if slot not in used:\n            return slot',
+              '    for slot in range(1, MAX_OPEN_POSITIONS + 1):\n        if slot not in used:\n            return slot',
+              1,
+          )
+          text = text.replace(
+              '                "max_open_positions": 2,',
+              '                "max_open_positions": MAX_OPEN_POSITIONS,',
+              1,
+          )
+          text = text.replace(
+              '                "different_index_required": True,\n                "lot_aware_flex": True,',
+              '                "different_index_required": True,\n                "paper_hard_position_cap_removed": True,\n                "lot_aware_flex": True,',
+              1,
+          )
+
+          # Retry contract resolution and LTP for transient Upstox/API failures.
+          old_contract = '''    resolved = obj.search_option(\n        underlying,\n        "current_week",\n        _legacy()._dynamic_atm_strike(underlying, market["price"]),\n        signal["signal"],\n    )\n    if not resolved.get("success"):\n        return _record_preopen_failure(\n            state,\n            broker_name,\n            selected,\n            resolved.get("message") or "OPTION_CONTRACT_NOT_RESOLVED",\n            "OPTION_CONTRACT",\n            {\n                "reason": resolved.get("reason"),\n                "errors": resolved.get("errors"),\n                "requested_expiry": "current_week",\n            },\n        )\n'''
+          new_contract = '''    resolved = {}\n    contract_errors = []\n    for expiry_request in ("current_week", "nearest", None):\n        resolved = obj.search_option(\n            underlying,\n            expiry_request,\n            _legacy()._dynamic_atm_strike(underlying, market["price"]),\n            signal["signal"],\n        )\n        if resolved.get("success"):\n            break\n        contract_errors.append(\n            resolved.get("message")\n            or resolved.get("reason")\n            or "OPTION_CONTRACT_NOT_RESOLVED"\n        )\n        time.sleep(0.5)\n    if not resolved.get("success"):\n        return _record_preopen_failure(\n            state,\n            broker_name,\n            selected,\n            resolved.get("message") or "OPTION_CONTRACT_NOT_RESOLVED",\n            "OPTION_CONTRACT",\n            {\n                "reason": resolved.get("reason"),\n                "errors": (resolved.get("errors") or []) + contract_errors[-3:],\n                "requested_expiry": "nearest/current_week",\n                "retry_count": 3,\n            },\n        )\n'''
+          if old_contract in text:
+              text = text.replace(old_contract, new_contract, 1)
+          elif 'contract_errors = []' not in text:
+              raise SystemExit("Contract resolver anchor not found")
+
+          old_quote = '''    if broker_name == "upstox":\n        quote = obj.get_ltp(\n            resolved.get("token") or resolved["symbol"],\n            exchange=resolved.get("exchange", "NSE_FO"),\n        )\n    else:\n        quote = obj.get_ltp(\n            resolved["symbol"],\n            exchange=resolved.get("exchange", "NFO"),\n        )\n    if not quote.get("success"):\n'''
+          new_quote = '''    quote = {}\n    quote_errors = []\n    for _quote_attempt in range(3):\n        if broker_name == "upstox":\n            quote = obj.get_ltp(\n                resolved.get("token") or resolved["symbol"],\n                exchange=resolved.get("exchange", "NSE_FO"),\n            )\n        else:\n            quote = obj.get_ltp(\n                resolved["symbol"],\n                exchange=resolved.get("exchange", "NFO"),\n            )\n        if quote.get("success") and _f(quote.get("ltp"), 0) > 0:\n            break\n        quote_errors.append(quote.get("message") or "OPTION_LTP_FAILED")\n        time.sleep(1)\n    if not quote.get("success"):\n'''
+          if old_quote in text:
+              text = text.replace(old_quote, new_quote, 1)
+          elif 'quote_errors = []' not in text:
+              raise SystemExit("Quote retry anchor not found")
+
+          text = text.replace(
+              '                "exchange": resolved.get("exchange"),\n            },',
+              '                "exchange": resolved.get("exchange"),\n                "retry_count": 3,\n                "errors": quote_errors[-3:],\n            },',
+              1,
+          )
+
+          if 'MAX_OPEN_POSITIONS = len(ALLOWED_INSTRUMENTS)' not in text:
+              raise SystemExit("Position-cap relaxation not applied")
+          runtime.write_text(text, encoding="utf-8")
+
+          test = Path("tests/test_paper_relaxed_execution_v7.py")
+          test.write_text('''from pathlib import Path\n\nfrom bot import auto_portfolio_runtime as runtime\n\n\ndef test_old_two_position_cap_removed():\n    assert runtime.MAX_OPEN_POSITIONS == len(runtime.ALLOWED_INSTRUMENTS)\n    assert runtime.MAX_OPEN_POSITIONS == 3\n    assert runtime.SLOT_ALLOCATIONS[3] == 0.0\n\n\ndef test_paper_stale_and_dns_guards_are_audit_only():\n    source = Path("bot/entry_execution_safety_v1_patch.py").read_text(encoding="utf-8")\n    assert 'if current_mode == "live"' in source\n    assert '"stale_candle_block_disabled": current_mode == "paper"' in source\n    assert '"broker_health_block_disabled": current_mode == "paper"' in source\n\n\ndef test_contract_and_quote_have_retries_without_fabricated_price():\n    source = Path("bot/auto_portfolio_runtime.py").read_text(encoding="utf-8")\n    assert 'for expiry_request in ("current_week", "nearest", None)' in source\n    assert 'for _quote_attempt in range(3)' in source\n    assert 'OPTION_LTP_FAILED' in source\n''', encoding="utf-8")
+          PY
+
+      - name: Validate changes
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m py_compile bot/entry_execution_safety_v1_patch.py bot/auto_portfolio_runtime.py
+          python -m pip install -q -r requirements.txt
+          python -m pip install -q pytest
+          pytest -q tests/test_paper_relaxed_execution_v7.py tests/test_upstox_candle_order_entry_v6.py tests/test_qualified_candidate_fallback.py tests/test_upstox_final_entry_reason_visibility.py
+          git diff --check
+
+      - name: Commit fix
+        run: |
+          if git diff --quiet; then
+            echo "Paper relaxed execution already applied"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot/entry_execution_safety_v1_patch.py bot/auto_portfolio_runtime.py tests/test_paper_relaxed_execution_v7.py
+          git commit -m "Relax paper entry blockers without weakening live safety"
+          git push origin HEAD:main
