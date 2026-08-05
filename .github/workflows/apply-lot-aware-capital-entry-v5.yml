@@ -1,0 +1,53 @@
+name: Apply Lot-Aware Capital Entry V5
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/apply-lot-aware-capital-entry-v5.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Apply lot-aware capital sizing
+        run: python scripts/apply_lot_aware_capital_entry_v5.py
+
+      - name: Validate sizing and entry flow
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m py_compile bot/auto_portfolio_runtime.py bot/routes.py scripts/apply_lot_aware_capital_entry_v5.py
+          python -m pip install -q -r requirements.txt
+          python -m pip install -q pytest
+          pytest -q \
+            tests/test_lot_aware_capital_entry_v5.py \
+            tests/test_qualified_paper_entry_permission_v4.py \
+            tests/test_qualified_candidate_fallback.py \
+            tests/test_upstox_final_entry_reason_visibility.py
+          git diff --check
+
+      - name: Commit fix
+        run: |
+          if git diff --quiet; then
+            echo "Lot-aware entry fix already present"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot/auto_portfolio_runtime.py bot/routes.py tests/test_lot_aware_capital_entry_v5.py
+          git commit -m "Allow complete lots with flexible portfolio allocation"
+          git push origin HEAD:main
