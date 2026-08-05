@@ -1,0 +1,253 @@
+name: Apply Qualified Candidate Fallback Fix
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/apply-qualified-candidate-fallback.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Try every qualified index until one entry opens
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("bot/auto_portfolio_runtime.py")
+          text = path.read_text(encoding="utf-8")
+
+          old_selector = '''def _best_candidate(scans, blocked_underlyings):
+    candidates = []
+    for scan in scans:
+        if scan.get("status") != "OK":
+            continue
+        if scan.get("underlying") in blocked_underlyings:
+            continue
+
+        signal = scan.get("signal_data", {})
+        if signal.get("signal") not in ("CE", "PE"):
+            continue
+        if not signal.get("trade_allowed", False):
+            continue
+        candidates.append(scan)
+
+    candidates.sort(
+        key=lambda scan: (
+            _i(scan["signal_data"].get("score", 0)),
+            _i(scan["signal_data"].get("base_score", 0)),
+            _f(scan["market_data"].get("adx", 0)),
+            _f(scan["market_data"].get("volume_ratio", 0)),
+        ),
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+'''
+          new_selector = '''def _eligible_candidates(scans, blocked_underlyings):
+    """Return every qualified setup in execution priority order.
+
+    A high-score candidate can still fail later at contract, LTP, premium
+    momentum, option-quality or sizing gates. Do not let that one candidate
+    starve another index that is also fully qualified in the same scan.
+    """
+    candidates = []
+    for scan in scans:
+        if scan.get("status") != "OK":
+            continue
+        if scan.get("underlying") in blocked_underlyings:
+            continue
+
+        signal = scan.get("signal_data", {})
+        if signal.get("signal") not in ("CE", "PE"):
+            continue
+        if not signal.get("trade_allowed", False):
+            continue
+        candidates.append(scan)
+
+    candidates.sort(
+        key=lambda scan: (
+            _i(scan["signal_data"].get("score", 0)),
+            _i(scan["signal_data"].get("base_score", 0)),
+            _f(scan["market_data"].get("adx", 0)),
+            _f(scan["market_data"].get("volume_ratio", 0)),
+        ),
+        reverse=True,
+    )
+    return candidates
+
+
+def _best_candidate(scans, blocked_underlyings):
+    candidates = _eligible_candidates(scans, blocked_underlyings)
+    return candidates[0] if candidates else None
+
+
+def _attempt_entry_candidates(candidates, opener, state):
+    """Attempt qualified candidates in order and return the one that opened."""
+    attempts = []
+    state["entry_candidate_attempts"] = attempts
+
+    for candidate in candidates:
+        state.pop("last_entry_attempt", None)
+        state.pop("entry_attempt", None)
+        state.pop("entry_block_reason", None)
+        state.pop("last_entry_block_reason", None)
+
+        opened = bool(opener(candidate))
+        guard = dict(
+            state.get("last_entry_attempt")
+            or state.get("entry_attempt")
+            or state.get("entry_guard")
+            or {}
+        )
+        signal = dict(candidate.get("signal_data") or {})
+        attempts.append(
+            {
+                "underlying": candidate.get("underlying"),
+                "side": signal.get("signal"),
+                "score": signal.get("score"),
+                "opened": opened,
+                "reason": guard.get("reason") or (
+                    "ENTRY_OPENED" if opened else "ENTRY_NOT_OPENED"
+                ),
+                "stage": guard.get("stage"),
+            }
+        )
+
+        if opened:
+            return candidate
+
+        # Never dispatch another live order while an order/mode lock exists.
+        if state.get("live_order_lock") or state.get("mode_change_blocked"):
+            break
+
+    return None
+'''
+          if old_selector in text:
+              text = text.replace(old_selector, new_selector, 1)
+          elif "def _attempt_entry_candidates(" not in text:
+              raise SystemExit("Expected candidate selector was not found")
+
+          old_angel = '''            selected = None
+
+            if _can_enter(conn, user_id, settings, rows, state):
+                selected = _best_candidate(scans, blocked)
+                if selected:
+                    _open_angel(conn, user_id, obj, selected, settings, state)
+
+            rows = _open_rows(conn, user_id)
+'''
+          new_angel = '''            selected = None
+
+            if _can_enter(conn, user_id, settings, rows, state):
+                candidates = _eligible_candidates(scans, blocked)
+                opened_candidate = _attempt_entry_candidates(
+                    candidates,
+                    lambda candidate: _open_angel(
+                        conn, user_id, obj, candidate, settings, state
+                    ),
+                    state,
+                )
+                selected = opened_candidate or (
+                    candidates[0] if candidates else None
+                )
+            else:
+                state["entry_candidate_attempts"] = []
+
+            rows = _open_rows(conn, user_id)
+'''
+          if old_angel in text:
+              text = text.replace(old_angel, new_angel, 1)
+          elif "lambda candidate: _open_angel(" not in text:
+              raise SystemExit("Expected Angel candidate block was not found")
+
+          old_multi = '''            selected = None
+
+            if _can_enter(conn, user_id, settings, rows, state):
+                selected = _best_candidate(scans, blocked)
+                if selected:
+                    _open_multi(
+                        conn,
+                        user_id,
+                        broker_name,
+                        obj,
+                        selected,
+                        settings,
+                        state,
+                    )
+
+            rows = _open_rows(conn, user_id)
+'''
+          new_multi = '''            selected = None
+
+            if _can_enter(conn, user_id, settings, rows, state):
+                candidates = _eligible_candidates(scans, blocked)
+                opened_candidate = _attempt_entry_candidates(
+                    candidates,
+                    lambda candidate: _open_multi(
+                        conn,
+                        user_id,
+                        broker_name,
+                        obj,
+                        candidate,
+                        settings,
+                        state,
+                    ),
+                    state,
+                )
+                selected = opened_candidate or (
+                    candidates[0] if candidates else None
+                )
+            else:
+                state["entry_candidate_attempts"] = []
+
+            rows = _open_rows(conn, user_id)
+'''
+          if old_multi in text:
+              text = text.replace(old_multi, new_multi, 1)
+          elif "lambda candidate: _open_multi(" not in text:
+              raise SystemExit("Expected multi-broker candidate block was not found")
+
+          path.write_text(text, encoding="utf-8")
+
+          test_path = Path("tests/test_qualified_candidate_fallback.py")
+          test_path.write_text(
+              '''from bot import auto_portfolio_runtime as runtime\n\n\ndef _candidate(name, score):\n    return {\n        "underlying": name,\n        "status": "OK",\n        "signal_data": {\n            "signal": "PE",\n            "trade_allowed": True,\n            "score": score,\n            "base_score": score,\n        },\n        "market_data": {"adx": 30, "volume_ratio": 0},\n    }\n\n\ndef test_second_qualified_candidate_is_tried_when_first_is_blocked():\n    candidates = [_candidate("NIFTY", 88), _candidate("SENSEX", 82)]\n    state = {}\n    seen = []\n\n    def opener(candidate):\n        name = candidate["underlying"]\n        seen.append(name)\n        state["last_entry_attempt"] = {\n            "reason": "OPTION_PREMIUM_MOMENTUM_WEAK" if name == "NIFTY" else "ENTRY_OPENED",\n            "stage": "FINAL_EXECUTION_GUARD",\n        }\n        return name == "SENSEX"\n\n    opened = runtime._attempt_entry_candidates(candidates, opener, state)\n    assert seen == ["NIFTY", "SENSEX"]\n    assert opened["underlying"] == "SENSEX"\n    assert state["entry_candidate_attempts"][0]["opened"] is False\n    assert state["entry_candidate_attempts"][1]["opened"] is True\n\n\ndef test_candidate_priority_is_preserved():\n    scans = [_candidate("SENSEX", 82), _candidate("NIFTY", 88)]\n    ordered = runtime._eligible_candidates(scans, set())\n    assert [row["underlying"] for row in ordered] == ["NIFTY", "SENSEX"]\n''',
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Validate fallback behavior
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m py_compile bot/auto_portfolio_runtime.py
+          python -m pip install -q -r requirements.txt
+          python -m pip install -q pytest
+          pytest -q tests/test_qualified_candidate_fallback.py tests/test_entry_execution_safety_v1.py tests/test_entry_momentum_scan_cycle_fix.py
+          git diff --check
+
+      - name: Commit repaired runtime
+        run: |
+          if git diff --quiet; then
+            echo "Candidate fallback already present"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot/auto_portfolio_runtime.py tests/test_qualified_candidate_fallback.py
+          git commit -m "Try all qualified indices before skipping entry"
+          git push origin HEAD:main
