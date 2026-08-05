@@ -974,7 +974,14 @@ def _open_common(
     rows = _open_rows(conn, user_id)
     slot = _free_slot(rows)
     if slot is None or len(rows) >= MAX_OPEN_POSITIONS:
-        return False
+        return _record_preopen_failure(
+            state,
+            broker_name,
+            selected,
+            "MAX_OPEN_POSITIONS_REACHED",
+            "POSITION_LIMIT",
+            {"open_positions": len(rows)},
+        )
 
     current_mode = (
         "live"
@@ -986,7 +993,14 @@ def _open_common(
         state["mode_change_blocked"] = (
             "Existing position close hone ke baad mode change apply hoga."
         )
-        return False
+        return _record_preopen_failure(
+            state,
+            broker_name,
+            selected,
+            "TRADING_MODE_CHANGE_BLOCKED",
+            "MODE_GUARD",
+            {"existing_modes": sorted(modes), "requested_mode": current_mode},
+        )
 
     if current_mode == "paper":
         capital_base = _paper_base(conn, user_id, settings)
@@ -994,7 +1008,13 @@ def _open_common(
         capital_base = _live_base_from_rows(rows) or live_cash()
         if capital_base <= 0:
             state["live_order_error"] = "Broker available funds read nahi hue."
-            return False
+            return _record_preopen_failure(
+                state,
+                broker_name,
+                selected,
+                "BROKER_FUNDS_UNAVAILABLE",
+                "CAPITAL",
+            )
 
     sizing = _size(capital_base, slot, quote_price, lot_size)
     if sizing["lots"] < 1:
@@ -1004,14 +1024,27 @@ def _open_common(
             "one_lot_cost": round(quote_price * sizing["lot_size"], 2),
             "reason": "Slot budget one lot se kam hai",
         }
-        return False
+        return _record_preopen_failure(
+            state,
+            broker_name,
+            selected,
+            "POSITION_SIZE_BLOCK",
+            "CAPITAL",
+            dict(state["position_size_block"]),
+        )
 
     entry = quote_price
     entry_order_id = None
 
     if current_mode == "live":
         if state.get("live_order_lock"):
-            return False
+            return _record_preopen_failure(
+                state,
+                broker_name,
+                selected,
+                "LIVE_ORDER_PENDING_LOCK",
+                "LIVE_ORDER",
+            )
         order = live_order(resolved, "BUY", sizing["qty"], quote_price)
         if not order.get("success"):
             status = "PENDING" if order.get("pending") else "FAILED"
@@ -1027,7 +1060,14 @@ def _open_common(
             state["live_order_error"] = order.get("message") or "Live BUY failed"
             if order.get("pending"):
                 state["live_order_lock"] = True
-            return False
+            return _record_preopen_failure(
+                state,
+                broker_name,
+                selected,
+                order.get("message") or "LIVE_BUY_FAILED",
+                "LIVE_ORDER",
+                {"status": status, "order_id": order.get("order_id")},
+            )
 
         entry = _f(order.get("avg_price"), quote_price)
         entry_order_id = order.get("order_id")
@@ -1057,7 +1097,14 @@ def _open_common(
         entry_order_id,
     )
     if not trade_id:
-        return False
+        return _record_preopen_failure(
+            state,
+            broker_name,
+            selected,
+            "ATR_LEVELS_OR_TRADE_INSERT_FAILED",
+            "TRADE_INSERT",
+            {"spot_atr": market.get("atr"), "option_ltp": quote_price},
+        )
 
     if current_mode == "live":
         _record_event(
@@ -1105,6 +1152,34 @@ def _open_common(
     return True
 
 
+def _record_preopen_failure(
+    state,
+    broker_name,
+    selected,
+    reason,
+    stage,
+    details=None,
+):
+    signal = dict((selected or {}).get("signal_data") or {})
+    attempt = {
+        "allowed": False,
+        "reason": str(reason or "ENTRY_NOT_OPENED")[:240],
+        "stage": str(stage or "PRE_OPEN"),
+        "broker": str(broker_name or "unknown").lower(),
+        "underlying": (selected or {}).get("underlying"),
+        "side": signal.get("signal"),
+        "score": signal.get("score"),
+        "details": details or {},
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    state["entry_guard"] = dict(attempt)
+    state["entry_attempt"] = dict(attempt)
+    state["last_entry_attempt"] = dict(attempt)
+    state["entry_block_reason"] = attempt["reason"]
+    state["last_entry_block_reason"] = attempt["reason"]
+    return False
+
+
 def _open_angel(conn, user_id, obj, selected, settings, state):
     underlying = selected["underlying"]
     signal = selected["signal_data"]
@@ -1116,7 +1191,13 @@ def _open_angel(conn, user_id, obj, selected, settings, state):
         signal["signal"],
     )
     if not resolved:
-        return False
+        return _record_preopen_failure(
+            state,
+            "angelone",
+            selected,
+            "OPTION_CONTRACT_NOT_RESOLVED",
+            "OPTION_CONTRACT",
+        )
 
     resolved = dict(resolved)
     resolved["exchange"] = resolved.get("exch_seg") or resolved.get("exchange")
@@ -1128,8 +1209,15 @@ def _open_angel(conn, user_id, obj, selected, settings, state):
             resolved["token"],
         )
         quote_price = float(q["data"]["ltp"])
-    except Exception:
-        return False
+    except Exception as exc:
+        return _record_preopen_failure(
+            state,
+            "angelone",
+            selected,
+            "OPTION_LTP_FAILED",
+            "OPTION_QUOTE",
+            {"message": str(exc)[:180]},
+        )
 
     quality = _legacy()._option_entry_quality_angel(
         obj, resolved, quote_price
@@ -1163,7 +1251,18 @@ def _open_multi(conn, user_id, broker_name, obj, selected, settings, state):
         signal["signal"],
     )
     if not resolved.get("success"):
-        return False
+        return _record_preopen_failure(
+            state,
+            broker_name,
+            selected,
+            resolved.get("message") or "OPTION_CONTRACT_NOT_RESOLVED",
+            "OPTION_CONTRACT",
+            {
+                "reason": resolved.get("reason"),
+                "errors": resolved.get("errors"),
+                "requested_expiry": "current_week",
+            },
+        )
 
     if broker_name == "upstox":
         quote = obj.get_ltp(
@@ -1176,11 +1275,29 @@ def _open_multi(conn, user_id, broker_name, obj, selected, settings, state):
             exchange=resolved.get("exchange", "NFO"),
         )
     if not quote.get("success"):
-        return False
+        return _record_preopen_failure(
+            state,
+            broker_name,
+            selected,
+            quote.get("message") or "OPTION_LTP_FAILED",
+            "OPTION_QUOTE",
+            {
+                "symbol": resolved.get("symbol"),
+                "token": resolved.get("token"),
+                "exchange": resolved.get("exchange"),
+            },
+        )
 
     quote_price = _f(quote.get("ltp"), 0)
     if quote_price <= 0:
-        return False
+        return _record_preopen_failure(
+            state,
+            broker_name,
+            selected,
+            "INVALID_OPTION_LTP",
+            "OPTION_QUOTE",
+            {"ltp": quote.get("ltp")},
+        )
 
     quality = _legacy()._option_entry_quality_multi(
         broker_name, obj, resolved, quote_price
@@ -1270,12 +1387,82 @@ def _state_update(state, scans, selected, settings, rows):
         state["signal"] = "HOLD_MULTI" if len(rows) > 1 else "HOLD"
 
 
+def _setting_truthy(value, default=False):
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in {
+        "1", "true", "yes", "on", "enabled", "unlimited"
+    }
+
+
 def _can_enter(conn, user_id, settings, rows, state):
-    if len(rows) >= MAX_OPEN_POSITIONS or state.get("live_order_lock"):
+    current_mode = (
+        "live"
+        if str(settings.get("trading_mode", "paper")).lower() == "live"
+        else "paper"
+    )
+    today_count = _today_count(conn, user_id)
+    raw_daily = _i(settings.get("max_trades_per_day", 5), 5)
+
+    if len(rows) >= MAX_OPEN_POSITIONS:
+        state["entry_permission"] = {
+            "allowed": False,
+            "reason": "MAX_OPEN_POSITIONS_REACHED",
+            "open_positions": len(rows),
+            "max_open_positions": MAX_OPEN_POSITIONS,
+            "today_count": today_count,
+            "mode": current_mode,
+        }
         return False
 
-    max_daily = max(1, _i(settings.get("max_trades_per_day", 5), 5))
-    return _today_count(conn, user_id) < max_daily
+    # A pending live-order lock must never starve paper trading after a mode
+    # change or Railway restart. It remains enforced only in actual live mode.
+    if current_mode == "live" and state.get("live_order_lock"):
+        state["entry_permission"] = {
+            "allowed": False,
+            "reason": "LIVE_ORDER_PENDING_LOCK",
+            "today_count": today_count,
+            "mode": current_mode,
+        }
+        return False
+    if current_mode == "paper":
+        state.pop("live_order_lock", None)
+
+    # Paper is the SaaS testing mode. Unless explicitly disabled, do not stop
+    # qualified entries at the old five-trade default. Live keeps its limit.
+    explicit_unlimited = _setting_truthy(
+        settings.get("unlimited_trades"),
+        default=_setting_truthy(
+            settings.get("paper_unlimited_trades"),
+            default=(current_mode == "paper"),
+        ),
+    )
+    unlimited = raw_daily <= 0 or explicit_unlimited
+    max_daily = max(1, raw_daily) if raw_daily > 0 else None
+
+    if not unlimited and today_count >= max_daily:
+        state["entry_permission"] = {
+            "allowed": False,
+            "reason": "DAILY_TRADE_LIMIT_REACHED",
+            "today_count": today_count,
+            "max_trades_per_day": max_daily,
+            "mode": current_mode,
+        }
+        return False
+
+    state["entry_permission"] = {
+        "allowed": True,
+        "reason": "ENTRY_PERMISSION_OK",
+        "today_count": today_count,
+        "max_trades_per_day": None if unlimited else max_daily,
+        "unlimited": unlimited,
+        "mode": current_mode,
+    }
+    return True
 
 
 def run_user_bot_auto(user_id, creds, state):
