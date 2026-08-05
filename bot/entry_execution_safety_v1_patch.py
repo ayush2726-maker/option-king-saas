@@ -22,7 +22,7 @@ from typing import Any
 from bot import auto_portfolio_runtime as runtime
 
 
-PATCH_VERSION = "ENTRY_EXECUTION_SAFETY_V1"
+PATCH_VERSION = "ENTRY_EXECUTION_SAFETY_V2_BALANCED_PREMIUM"
 # AUTO rescans entry candidates about once per minute. Keep the latest option quote long enough for the next scan to compare real premium momentum.
 MOMENTUM_WINDOW_SECONDS = 180.0
 MOMENTUM_MIN_SAMPLE_GAP_SECONDS = 1.0
@@ -267,6 +267,50 @@ def _momentum_check(
         "sample_age_seconds": round(now - previous[0], 3),
         "window_seconds": MOMENTUM_WINDOW_SECONDS,
     }
+
+
+def _balanced_momentum_policy(
+    momentum: dict[str, Any],
+    quality: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep premium safety without requiring an arbitrary large uptick.
+
+    The option-candle quality guard already blocks spike reversal, bearish
+    reversal after a run and extreme extension. Therefore a fully qualified
+    strategy entry should not be starved merely because the latest premium is
+    flat or its increase is smaller than Rs 0.50 / 0.25%. A clearly falling
+    premium remains blocked. On the first sample, a healthy option-candle
+    confirmation is sufficient; missing/failed candle data still waits for a
+    second real quote.
+    """
+    result = dict(momentum or {})
+    if result.get("allowed"):
+        return result
+
+    reason = _text(result.get("reason")).upper()
+    quality_reason = _text((quality or {}).get("reason")).upper()
+
+    if (
+        reason == "OPTION_PREMIUM_MOMENTUM_WARMUP"
+        and quality_reason == "OPTION_PREMIUM_ENTRY_OK"
+    ):
+        result.update({
+            "allowed": True,
+            "reason": "OPTION_PREMIUM_CANDLE_CONFIRMED",
+            "balanced_policy": True,
+        })
+        return result
+
+    if reason == "OPTION_PREMIUM_MOMENTUM_WEAK":
+        move = _f(result.get("move_points"), 0.0)
+        if move >= -1e-9:
+            result.update({
+                "allowed": True,
+                "reason": "OPTION_PREMIUM_NOT_FALLING",
+                "balanced_policy": True,
+            })
+
+    return result
 
 
 def _clear_momentum(user_id: int, broker_name: str, symbol: str) -> None:
@@ -689,6 +733,10 @@ def apply_entry_execution_safety_v1_patch() -> None:
             broker_name,
             symbol,
             quote_price,
+        )
+        momentum = _balanced_momentum_policy(
+            momentum,
+            quality_copy,
         )
         snapshot = _entry_snapshot(
             broker_name,
