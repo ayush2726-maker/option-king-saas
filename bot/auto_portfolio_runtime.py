@@ -248,20 +248,69 @@ def _multi_cash(obj):
     return 0.0
 
 
-def _size(capital_base, slot, premium, lot_size):
+def _row_capital_used(row):
+    saved = _f(_v(row, "capital_used", 0), 0)
+    if saved > 0:
+        return saved
+    return max(
+        0.0,
+        _f(_v(row, "entry_price", 0), 0)
+        * max(0, _i(_v(row, "qty", 0), 0)),
+    )
+
+
+def _size(capital_base, slot, premium, lot_size, rows=None):
+    """Lot-aware sizing with a hard 10% reserve.
+
+    Slot 1/2 percentages are target allocations, not a reason to reject an
+    otherwise affordable complete exchange lot. When one lot is above the
+    target slot budget but still fits after preserving the reserve and existing
+    positions, allow exactly that lot. Never create fractional lots.
+    """
     lot_size = max(1, _i(lot_size, 1))
     premium = max(0.0, _f(premium, 0))
-    budget = max(0.0, capital_base * SLOT_ALLOCATIONS.get(slot, 0))
+    capital_base = max(0.0, _f(capital_base, 0))
+    target_budget = max(0.0, capital_base * SLOT_ALLOCATIONS.get(slot, 0))
+    reserve_floor = max(0.0, capital_base * RESERVE_ALLOCATION)
+    committed = sum(_row_capital_used(row) for row in (rows or []))
+    available_after_reserve = max(0.0, capital_base - reserve_floor - committed)
     one_lot = premium * lot_size
 
-    lots = int(math.floor(budget / one_lot)) if one_lot > 0 else 0
+    flex_used = bool(
+        one_lot > target_budget + 1e-9
+        and one_lot <= available_after_reserve + 1e-9
+    )
+    if flex_used:
+        # Permit the minimum complete lot only; do not consume the whole
+        # remaining portfolio merely because the target slot was too small.
+        budget = one_lot
+        sizing_mode = "LOT_AWARE_FLEX_ONE_LOT"
+    else:
+        budget = min(target_budget, available_after_reserve)
+        sizing_mode = "TARGET_SLOT_BUDGET"
+
+    lots = int(math.floor((budget + 1e-9) / one_lot)) if one_lot > 0 else 0
     qty = lots * lot_size
+    capital_used = premium * qty
+    actual_pct = (
+        capital_used / capital_base * 100.0
+        if capital_base > 0
+        else 0.0
+    )
     return {
         "lot_size": lot_size,
         "lots": lots,
         "qty": qty,
+        "target_slot_budget": round(target_budget, 2),
         "slot_budget": round(budget, 2),
-        "capital_used": round(premium * qty, 2),
+        "reserve_floor": round(reserve_floor, 2),
+        "committed_capital": round(committed, 2),
+        "available_after_reserve": round(available_after_reserve, 2),
+        "one_lot_cost": round(one_lot, 2),
+        "capital_used": round(capital_used, 2),
+        "actual_allocation_pct": round(actual_pct, 2),
+        "flex_used": flex_used,
+        "sizing_mode": sizing_mode,
     }
 
 
@@ -940,7 +989,7 @@ def _insert(
             underlying,
             mode,
             slot,
-            SLOT_ALLOCATIONS[slot] * 100,
+            sizing.get("actual_allocation_pct", SLOT_ALLOCATIONS[slot] * 100),
             capital_base,
             sizing["lot_size"],
             sizing["lots"],
@@ -1016,13 +1065,19 @@ def _open_common(
                 "CAPITAL",
             )
 
-    sizing = _size(capital_base, slot, quote_price, lot_size)
+    sizing = _size(capital_base, slot, quote_price, lot_size, rows=rows)
+    state["entry_sizing"] = dict(sizing)
     if sizing["lots"] < 1:
         state["position_size_block"] = {
             "slot": slot,
             "slot_budget": sizing["slot_budget"],
-            "one_lot_cost": round(quote_price * sizing["lot_size"], 2),
-            "reason": "Slot budget one lot se kam hai",
+            "target_slot_budget": sizing.get("target_slot_budget"),
+            "available_after_reserve": sizing.get("available_after_reserve"),
+            "reserve_floor": sizing.get("reserve_floor"),
+            "committed_capital": sizing.get("committed_capital"),
+            "one_lot_cost": sizing.get("one_lot_cost"),
+            "capital_base": round(capital_base, 2),
+            "reason": "10% reserve bachane ke baad ek complete lot afford nahi hota",
         }
         return _record_preopen_failure(
             state,
@@ -1122,7 +1177,9 @@ def _open_common(
         "underlying": selected["underlying"],
         "side": signal["signal"],
         "slot": slot,
-        "allocation_percent": int(SLOT_ALLOCATIONS[slot] * 100),
+        "allocation_percent": sizing.get("actual_allocation_pct", int(SLOT_ALLOCATIONS[slot] * 100)),
+        "sizing_mode": sizing.get("sizing_mode"),
+        "flex_used": bool(sizing.get("flex_used")),
         "lots": sizing["lots"],
         "qty": sizing["qty"],
         "capital_used": sizing["capital_used"],
@@ -1375,6 +1432,8 @@ def _state_update(state, scans, selected, settings, rows):
                 "reserve_percent": 10,
                 "max_open_positions": 2,
                 "different_index_required": True,
+                "lot_aware_flex": True,
+                "allocation_note": "50/40 target; complete lot can flex while 10% reserve stays protected",
             },
             "open_trade_monitor_seconds": 5,
             "hero": _legacy().is_hero_window_active(),

@@ -1060,6 +1060,26 @@ def get_signal(authorization: str = Header(None)):
             if is_running
             else None
         ),
+        "entry_permission": (
+            engine_state.get("entry_permission")
+            if is_running
+            else None
+        ),
+        "entry_sizing": (
+            engine_state.get("entry_sizing")
+            if is_running
+            else None
+        ),
+        "position_size_block": (
+            engine_state.get("position_size_block")
+            if is_running
+            else None
+        ),
+        "entry_candidate_attempts": (
+            engine_state.get("entry_candidate_attempts", [])
+            if is_running
+            else []
+        ),
         "message": "Signal view-only. App refresh trade create/exit nahi karega. Button se trade start/close hoga."
     }
 
