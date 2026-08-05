@@ -55,7 +55,8 @@ jobs:
         run: |
           python -m py_compile bot/entry_execution_safety_v1_patch.py
           python -m py_compile tests/test_entry_momentum_scan_cycle_fix.py
-          pip install -q pytest
+          python -m pip install -q -r requirements.txt
+          python -m pip install -q pytest
           pytest -q tests/test_entry_execution_safety_v1.py tests/test_entry_momentum_scan_cycle_fix.py
           git diff --check
 
