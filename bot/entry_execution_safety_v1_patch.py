@@ -721,9 +721,15 @@ def apply_entry_execution_safety_v1_patch() -> None:
         state["entry_audit_preview"] = snapshot
 
         if reason:
-            state["entry_guard"] = {
+            attempt = {
                 "allowed": False,
                 "reason": reason,
+                "stage": "FINAL_EXECUTION_GUARD",
+                "broker": _text(broker_name).lower(),
+                "underlying": selected.get("underlying"),
+                "side": snapshot.get("side"),
+                "symbol": symbol,
+                "option_ltp": round(_f(quote_price), 2),
                 "quality": quality_copy,
                 "premium_momentum": momentum,
                 "data_health": {
@@ -731,7 +737,13 @@ def apply_entry_execution_safety_v1_patch() -> None:
                     "broker": health,
                 },
                 "version": PATCH_VERSION,
+                "updated_at": _iso_now(),
             }
+            state["entry_guard"] = dict(attempt)
+            state["last_entry_attempt"] = dict(attempt)
+            state["entry_attempt"] = dict(attempt)
+            state["entry_block_reason"] = reason
+            state["last_entry_block_reason"] = reason
             _audit_event(conn, user_id, "BLOCKED", reason, snapshot)
             return False
 

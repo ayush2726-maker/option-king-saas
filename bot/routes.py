@@ -1043,6 +1043,23 @@ def get_signal(authorization: str = Header(None)):
         "total_trades": total_trades,
         "total_pnl": round(float(total_pnl or 0), 2),
         "updated_at": datetime.utcnow().isoformat(),
+        "entry_guard": (
+            engine_state.get("entry_guard")
+            if is_running
+            else None
+        ),
+        "entry_attempt": (
+            engine_state.get("entry_attempt")
+            or engine_state.get("last_entry_attempt")
+            if is_running
+            else None
+        ),
+        "entry_block_reason": (
+            engine_state.get("entry_block_reason")
+            or engine_state.get("last_entry_block_reason")
+            if is_running
+            else None
+        ),
         "message": "Signal view-only. App refresh trade create/exit nahi karega. Button se trade start/close hoga."
     }
 
