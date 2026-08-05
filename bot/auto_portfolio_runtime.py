@@ -25,9 +25,10 @@ def _legacy():
 
 AUTO_ENGINE_MODE = "AUTO_PORTFOLIO_V1"
 ALLOWED_INSTRUMENTS = ("NIFTY", "BANKNIFTY", "SENSEX")
-SLOT_ALLOCATIONS = {1: 0.50, 2: 0.40}
+SLOT_ALLOCATIONS = {1: 0.50, 2: 0.40, 3: 0.00}
 RESERVE_ALLOCATION = 0.10
-MAX_OPEN_POSITIONS = 2
+# One position per enabled index; removes the old hard two-position cap.
+MAX_OPEN_POSITIONS = len(ALLOWED_INSTRUMENTS)
 COMPLETE_STATUSES = {"complete", "completed", "filled", "success"}
 REJECT_STATUSES = {"rejected", "cancelled", "canceled", "failed"}
 
@@ -143,12 +144,12 @@ def _open_rows(conn, user_id):
     used = {
         _i(_v(row, "capital_slot", 0))
         for row in rows
-        if _i(_v(row, "capital_slot", 0)) in (1, 2)
+        if _i(_v(row, "capital_slot", 0)) in tuple(range(1, MAX_OPEN_POSITIONS + 1))
     }
-    free = [slot for slot in (1, 2) if slot not in used]
+    free = [slot for slot in range(1, MAX_OPEN_POSITIONS + 1) if slot not in used]
 
     for row in rows:
-        if _i(_v(row, "capital_slot", 0)) in (1, 2):
+        if _i(_v(row, "capital_slot", 0)) in tuple(range(1, MAX_OPEN_POSITIONS + 1)):
             continue
         if not free:
             break
@@ -179,7 +180,7 @@ def _open_rows(conn, user_id):
 
 def _free_slot(rows):
     used = {_i(_v(row, "capital_slot", 0)) for row in rows}
-    for slot in (1, 2):
+    for slot in range(1, MAX_OPEN_POSITIONS + 1):
         if slot not in used:
             return slot
     return None
@@ -1301,12 +1302,23 @@ def _open_multi(conn, user_id, broker_name, obj, selected, settings, state):
     signal = selected["signal_data"]
     market = selected["market_data"]
 
-    resolved = obj.search_option(
-        underlying,
-        "current_week",
-        _legacy()._dynamic_atm_strike(underlying, market["price"]),
-        signal["signal"],
-    )
+    resolved = {}
+    contract_errors = []
+    for expiry_request in ("current_week", "nearest", None):
+        resolved = obj.search_option(
+            underlying,
+            expiry_request,
+            _legacy()._dynamic_atm_strike(underlying, market["price"]),
+            signal["signal"],
+        )
+        if resolved.get("success"):
+            break
+        contract_errors.append(
+            resolved.get("message")
+            or resolved.get("reason")
+            or "OPTION_CONTRACT_NOT_RESOLVED"
+        )
+        time.sleep(0.5)
     if not resolved.get("success"):
         return _record_preopen_failure(
             state,
@@ -1316,21 +1328,29 @@ def _open_multi(conn, user_id, broker_name, obj, selected, settings, state):
             "OPTION_CONTRACT",
             {
                 "reason": resolved.get("reason"),
-                "errors": resolved.get("errors"),
-                "requested_expiry": "current_week",
+                "errors": (resolved.get("errors") or []) + contract_errors[-3:],
+                "requested_expiry": "nearest/current_week",
+                "retry_count": 3,
             },
         )
 
-    if broker_name == "upstox":
-        quote = obj.get_ltp(
-            resolved.get("token") or resolved["symbol"],
-            exchange=resolved.get("exchange", "NSE_FO"),
-        )
-    else:
-        quote = obj.get_ltp(
-            resolved["symbol"],
-            exchange=resolved.get("exchange", "NFO"),
-        )
+    quote = {}
+    quote_errors = []
+    for _quote_attempt in range(3):
+        if broker_name == "upstox":
+            quote = obj.get_ltp(
+                resolved.get("token") or resolved["symbol"],
+                exchange=resolved.get("exchange", "NSE_FO"),
+            )
+        else:
+            quote = obj.get_ltp(
+                resolved["symbol"],
+                exchange=resolved.get("exchange", "NFO"),
+            )
+        if quote.get("success") and _f(quote.get("ltp"), 0) > 0:
+            break
+        quote_errors.append(quote.get("message") or "OPTION_LTP_FAILED")
+        time.sleep(1)
     if not quote.get("success"):
         return _record_preopen_failure(
             state,
@@ -1342,6 +1362,8 @@ def _open_multi(conn, user_id, broker_name, obj, selected, settings, state):
                 "symbol": resolved.get("symbol"),
                 "token": resolved.get("token"),
                 "exchange": resolved.get("exchange"),
+                "retry_count": 3,
+                "errors": quote_errors[-3:],
             },
         )
 
@@ -1430,8 +1452,9 @@ def _state_update(state, scans, selected, settings, rows):
                 "slot_1_percent": 50,
                 "slot_2_percent": 40,
                 "reserve_percent": 10,
-                "max_open_positions": 2,
+                "max_open_positions": MAX_OPEN_POSITIONS,
                 "different_index_required": True,
+                "paper_hard_position_cap_removed": True,
                 "lot_aware_flex": True,
                 "allocation_note": "50/40 target; complete lot can flex while 10% reserve stays protected",
             },

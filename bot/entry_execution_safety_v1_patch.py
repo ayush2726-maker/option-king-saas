@@ -767,10 +767,26 @@ def apply_entry_execution_safety_v1_patch() -> None:
         )
 
         # Premium momentum and premium-candle quality are audit-only.
-        # A qualified strategy entry is blocked here only for stale index data
-        # or repeated broker quote/candle transport failure.
-        reason = _guard_reason(health, candle)
+        # PAPER mode is an observation/testing environment: stale-candle and
+        # broker-health warnings are recorded but do not block a qualified
+        # strategy entry. LIVE mode keeps these protections.
+        current_mode = (
+            "live"
+            if str(settings.get("trading_mode", "paper")).lower() == "live"
+            else "paper"
+        )
+        reason = (
+            _guard_reason(health, candle)
+            if current_mode == "live"
+            else None
+        )
 
+        state["paper_execution_safety_bypass"] = {
+            "active": current_mode == "paper",
+            "stale_candle_block_disabled": current_mode == "paper",
+            "broker_health_block_disabled": current_mode == "paper",
+            "warnings_recorded": True,
+        }
         state["entry_data_health"] = {
             "candle": candle,
             "broker": health,
