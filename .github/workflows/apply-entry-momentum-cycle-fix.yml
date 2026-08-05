@@ -1,0 +1,72 @@
+name: Apply AUTO Entry Momentum Cycle Fix
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/apply-entry-momentum-cycle-fix.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Align premium momentum window with AUTO scan cycle
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("bot/entry_execution_safety_v1_patch.py")
+          text = path.read_text(encoding="utf-8")
+          old = "MOMENTUM_WINDOW_SECONDS = 45.0"
+          new = (
+              "# AUTO rescans entry candidates about once per minute. Keep the latest "
+              "option quote long enough for the next scan to compare real premium momentum.\n"
+              "MOMENTUM_WINDOW_SECONDS = 180.0"
+          )
+          if old in text:
+              text = text.replace(old, new, 1)
+              path.write_text(text, encoding="utf-8")
+          elif "MOMENTUM_WINDOW_SECONDS = 180.0" not in text:
+              raise SystemExit("Expected momentum-window constant was not found")
+
+          test_path = Path("tests/test_entry_momentum_scan_cycle_fix.py")
+          test_path.write_text(
+              '''from bot import entry_execution_safety_v1_patch as patch\n\n\ndef setup_function():\n    with patch._lock:\n        patch._quote_samples.clear()\n\n\ndef test_previous_minute_quote_survives_auto_scan_cycle():\n    first = patch._momentum_check(7, "upstox", "SENSEXTESTPE", 100.0, now_ts=100.0)\n    assert first["allowed"] is False\n    assert first["reason"] == "OPTION_PREMIUM_MOMENTUM_WARMUP"\n\n    second = patch._momentum_check(7, "upstox", "SENSEXTESTPE", 100.6, now_ts=165.0)\n    assert second["allowed"] is True\n    assert second["reason"] == "OPTION_PREMIUM_MOMENTUM_OK"\n''',
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Validate focused entry safety tests
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m py_compile bot/entry_execution_safety_v1_patch.py
+          python -m py_compile tests/test_entry_momentum_scan_cycle_fix.py
+          pip install -q pytest
+          pytest -q tests/test_entry_execution_safety_v1.py tests/test_entry_momentum_scan_cycle_fix.py
+          git diff --check
+
+      - name: Commit repaired runtime
+        run: |
+          if git diff --quiet; then
+            echo "Runtime already repaired"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot/entry_execution_safety_v1_patch.py tests/test_entry_momentum_scan_cycle_fix.py
+          git commit -m "Fix AUTO option momentum warmup across scan cycles"
+          git push origin HEAD:main
