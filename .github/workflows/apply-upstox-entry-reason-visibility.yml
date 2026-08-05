@@ -1,0 +1,77 @@
+name: Apply Upstox Entry Reason Visibility Fix
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/apply-upstox-entry-reason-visibility.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Persist final execution guard reason in runtime state and API
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          safety = Path("bot/entry_execution_safety_v1_patch.py")
+          text = safety.read_text(encoding="utf-8")
+          old = '''        if reason:\n            state["entry_guard"] = {\n                "allowed": False,\n                "reason": reason,\n                "quality": quality_copy,\n                "premium_momentum": momentum,\n                "data_health": {\n                    "candle": candle,\n                    "broker": health,\n                },\n                "version": PATCH_VERSION,\n            }\n            _audit_event(conn, user_id, "BLOCKED", reason, snapshot)\n            return False\n'''
+          new = '''        if reason:\n            attempt = {\n                "allowed": False,\n                "reason": reason,\n                "stage": "FINAL_EXECUTION_GUARD",\n                "broker": _text(broker_name).lower(),\n                "underlying": selected.get("underlying"),\n                "side": snapshot.get("side"),\n                "symbol": symbol,\n                "option_ltp": round(_f(quote_price), 2),\n                "quality": quality_copy,\n                "premium_momentum": momentum,\n                "data_health": {\n                    "candle": candle,\n                    "broker": health,\n                },\n                "version": PATCH_VERSION,\n                "updated_at": _iso_now(),\n            }\n            state["entry_guard"] = dict(attempt)\n            state["last_entry_attempt"] = dict(attempt)\n            state["entry_attempt"] = dict(attempt)\n            state["entry_block_reason"] = reason\n            state["last_entry_block_reason"] = reason\n            _audit_event(conn, user_id, "BLOCKED", reason, snapshot)\n            return False\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+              safety.write_text(text, encoding="utf-8")
+          elif '"stage": "FINAL_EXECUTION_GUARD"' not in text:
+              raise SystemExit("Expected final execution guard block was not found")
+
+          routes = Path("bot/routes.py")
+          route_text = routes.read_text(encoding="utf-8")
+          old_route = '''        "updated_at": datetime.utcnow().isoformat(),\n        "message": "Signal view-only. App refresh trade create/exit nahi karega. Button se trade start/close hoga."\n'''
+          new_route = '''        "updated_at": datetime.utcnow().isoformat(),\n        "entry_guard": (\n            engine_state.get("entry_guard")\n            if is_running\n            else None\n        ),\n        "entry_attempt": (\n            engine_state.get("entry_attempt")\n            or engine_state.get("last_entry_attempt")\n            if is_running\n            else None\n        ),\n        "entry_block_reason": (\n            engine_state.get("entry_block_reason")\n            or engine_state.get("last_entry_block_reason")\n            if is_running\n            else None\n        ),\n        "message": "Signal view-only. App refresh trade create/exit nahi karega. Button se trade start/close hoga."\n'''
+          if old_route in route_text:
+              route_text = route_text.replace(old_route, new_route, 1)
+              routes.write_text(route_text, encoding="utf-8")
+          elif '"entry_block_reason": (' not in route_text:
+              raise SystemExit("Expected signal response tail was not found")
+
+          test_path = Path("tests/test_upstox_final_entry_reason_visibility.py")
+          test_path.write_text(
+              '''from pathlib import Path\n\n\ndef test_final_execution_guard_persists_visible_reason():\n    source = Path("bot/entry_execution_safety_v1_patch.py").read_text(encoding="utf-8")\n    assert '"stage": "FINAL_EXECUTION_GUARD"' in source\n    assert 'state["last_entry_attempt"] = dict(attempt)' in source\n    assert 'state["entry_block_reason"] = reason' in source\n\n\ndef test_signal_api_exposes_entry_reason():\n    source = Path("bot/routes.py").read_text(encoding="utf-8")\n    assert '"entry_guard": (' in source\n    assert '"entry_attempt": (' in source\n    assert '"entry_block_reason": (' in source\n''',
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Validate backend
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m py_compile bot/entry_execution_safety_v1_patch.py bot/routes.py
+          python -m pip install -q pytest
+          pytest -q tests/test_upstox_final_entry_reason_visibility.py
+          git diff --check
+
+      - name: Commit fix
+        run: |
+          if git diff --quiet; then
+            echo "Visibility fix already present"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot/entry_execution_safety_v1_patch.py bot/routes.py tests/test_upstox_final_entry_reason_visibility.py
+          git commit -m "Expose final Upstox entry block reason"
+          git push origin HEAD:main
