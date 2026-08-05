@@ -1,0 +1,78 @@
+name: Fix Upstox Candle Order Entry V6
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/fix-upstox-candle-order-entry-v6.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Remove double reversal from Upstox candles
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("bot/angel_fetcher.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''        df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume", "oi"])
+        df = df[["time", "open", "high", "low", "close", "volume"]]
+        df = df.iloc[::-1].reset_index(drop=True)  # Upstox returns newest-first
+'''
+          new = '''        df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume", "oi"])
+        df = df[["time", "open", "high", "low", "close", "volume"]]
+        # UpstoxBroker.get_candles already normalizes rows oldest-first.
+        # Reversing here again made the AUTO engine read the morning candle as
+        # the latest completed candle, so the final freshness guard blocked
+        # every qualified entry as INDEX_CANDLE_STALE.
+        df = df.sort_values("time").reset_index(drop=True)
+'''
+          if old in text:
+              text = text.replace(old, new, 1)
+              path.write_text(text, encoding="utf-8")
+          elif 'made the AUTO engine read the morning candle' not in text:
+              raise SystemExit("Expected Upstox double-reversal block not found")
+
+          test_path = Path("tests/test_upstox_candle_order_entry_v6.py")
+          test_path.write_text(
+              '''from datetime import datetime, timedelta, timezone\n\nfrom bot import angel_fetcher\nfrom bot.entry_execution_safety_v1_patch import _candle_freshness\n\n\nclass FakeUpstox:\n    def get_candles(self, **kwargs):\n        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)\n        rows = []\n        for index in range(35):\n            stamp = (now - timedelta(minutes=34-index)).isoformat()\n            price = 24000 + index\n            rows.append([stamp, price, price+2, price-2, price+1, 0, 0])\n        return {"success": True, "candles": rows}\n\n\ndef test_upstox_normalized_candles_remain_oldest_first():\n    df = angel_fetcher.get_candles_multi("upstox", FakeUpstox(), "NIFTY")\n    assert df is not None\n    assert str(df.iloc[0]["time"]) < str(df.iloc[-1]["time"])\n    assert float(df.iloc[-1]["close"]) > float(df.iloc[0]["close"])\n\n\ndef test_auto_selected_completed_candle_is_fresh():\n    df = angel_fetcher.get_candles_multi("upstox", FakeUpstox(), "NIFTY")\n    selected = {"candle_id": str(df.iloc[-2]["time"])}\n    freshness = _candle_freshness(selected)\n    assert freshness["fresh"] is True\n    assert freshness["age_seconds"] <= 120\n''',
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Validate Upstox AUTO entry path
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m py_compile bot/angel_fetcher.py
+          python -m pip install -q -r requirements.txt
+          python -m pip install -q pytest
+          pytest -q tests/test_upstox_candle_order_entry_v6.py tests/test_qualified_candidate_fallback.py tests/test_upstox_final_entry_reason_visibility.py
+          git diff --check
+
+      - name: Commit fix
+        run: |
+          if git diff --quiet; then
+            echo "Upstox candle-order fix already present"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot/angel_fetcher.py tests/test_upstox_candle_order_entry_v6.py
+          git commit -m "Fix Upstox AUTO candle order and stale entry blocks"
+          git push origin HEAD:main
