@@ -450,41 +450,124 @@ def _fetch_angel_quotes(user_id, creds, universe):
     if not token_by_symbol:
         raise RuntimeError("Angel One equity instruments could not be resolved")
 
-    payload = obj.getMarketData(
-        "FULL",
-        {"NSE": [token for _, token in token_by_symbol.values()]},
-    )
-    if not isinstance(payload, dict) or not payload.get("status"):
-        raise RuntimeError(
-            str((payload or {}).get("message", "Angel full market data unavailable"))[:220]
-            if isinstance(payload, dict)
-            else "Angel full market data unavailable"
-        )
+    # SmartAPI Python versions differ: newer builds expose the FULL
+    # batch quote helper, while older/proven builds only expose
+    # ltpData(). Prefer batch quotes when available and transparently
+    # fall back to ltpData so Sector Rotation works on both versions.
+    batch_method = getattr(obj, "getMarketData", None)
+    if callable(batch_method):
+        try:
+            payload = batch_method(
+                "FULL",
+                {"NSE": [token for _, token in token_by_symbol.values()]},
+            )
+            if isinstance(payload, dict) and payload.get("status"):
+                data = payload.get("data") or {}
+                fetched = data.get("fetched") if isinstance(data, dict) else data
+                fetched = fetched if isinstance(fetched, list) else []
+                by_token = {}
+                for item in fetched:
+                    if not isinstance(item, dict):
+                        continue
+                    token = str(
+                        item.get("symbolToken")
+                        or item.get("symboltoken")
+                        or ""
+                    ).strip()
+                    if token:
+                        by_token[token] = item
 
-    data = payload.get("data") or {}
-    fetched = data.get("fetched") if isinstance(data, dict) else data
-    fetched = fetched if isinstance(fetched, list) else []
-    by_token = {}
-    for item in fetched:
-        if not isinstance(item, dict):
-            continue
-        token = str(item.get("symbolToken") or item.get("symboltoken") or "").strip()
-        if token:
-            by_token[token] = item
+                output = {}
+                connected = 0
+                for row in universe:
+                    symbol = row["symbol"]
+                    resolved = token_by_symbol.get(symbol)
+                    item = by_token.get(resolved[1]) if resolved else None
+                    item = item or {}
+                    quote = _quote_row(
+                        symbol,
+                        row["name"],
+                        row["sector"],
+                        item.get("ltp")
+                        or item.get("lastPrice")
+                        or item.get("last_price"),
+                        item.get("close")
+                        or item.get("closePrice")
+                        or item.get("previousClose"),
+                        item.get("percentChange")
+                        or item.get("percent_change"),
+                    )
+                    output[symbol] = quote
+                    if quote.get("change_percent") is not None:
+                        connected += 1
+                if connected:
+                    return output
+        except Exception:
+            # Continue to the SDK-compatible per-symbol fallback.
+            pass
 
     output = {}
+    failures = []
+    connected = 0
     for row in universe:
         symbol = row["symbol"]
         resolved = token_by_symbol.get(symbol)
-        item = by_token.get(resolved[1]) if resolved else None
-        item = item or {}
-        output[symbol] = _quote_row(
-            symbol,
-            row["name"],
-            row["sector"],
-            item.get("ltp") or item.get("lastPrice") or item.get("last_price"),
-            item.get("close") or item.get("closePrice") or item.get("previousClose"),
-            item.get("percentChange") or item.get("percent_change"),
+        if not resolved:
+            output[symbol] = _quote_row(
+                symbol,
+                row["name"],
+                row["sector"],
+                None,
+                None,
+                status="instrument_unresolved",
+            )
+            continue
+
+        trading_symbol, token = resolved
+        try:
+            payload = obj.ltpData("NSE", trading_symbol, token)
+            data = (
+                payload.get("data") or {}
+                if isinstance(payload, dict)
+                else {}
+            )
+            quote = _quote_row(
+                symbol,
+                row["name"],
+                row["sector"],
+                data.get("ltp")
+                or data.get("lastPrice")
+                or data.get("last_price"),
+                data.get("close")
+                or data.get("closePrice")
+                or data.get("previousClose"),
+                data.get("percentChange")
+                or data.get("percent_change"),
+            )
+            output[symbol] = quote
+            if quote.get("change_percent") is not None:
+                connected += 1
+            else:
+                failures.append(f"{symbol}: change unavailable")
+        except Exception as exc:
+            failures.append(f"{symbol}: {str(exc)[:80]}")
+            output[symbol] = _quote_row(
+                symbol,
+                row["name"],
+                row["sector"],
+                None,
+                None,
+                status="quote_failed",
+            )
+
+        # Keep the fallback friendly to Angel One request limits.
+        time.sleep(0.12)
+
+    if not connected:
+        detail = "; ".join(failures[:3])
+        raise RuntimeError(
+            "Angel One sector quotes unavailable"
+            + (f": {detail}" if detail else "")
         )
     return output
 
