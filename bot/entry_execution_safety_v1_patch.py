@@ -23,7 +23,8 @@ from bot import auto_portfolio_runtime as runtime
 
 
 PATCH_VERSION = "ENTRY_EXECUTION_SAFETY_V1"
-MOMENTUM_WINDOW_SECONDS = 45.0
+# AUTO rescans entry candidates about once per minute. Keep the latest option quote long enough for the next scan to compare real premium momentum.
+MOMENTUM_WINDOW_SECONDS = 180.0
 MOMENTUM_MIN_SAMPLE_GAP_SECONDS = 1.0
 MIN_PREMIUM_UPTICK_POINTS = 0.50
 MIN_PREMIUM_UPTICK_PERCENT = 0.25
