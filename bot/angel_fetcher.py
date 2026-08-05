@@ -1368,7 +1368,11 @@ def get_candles_multi(broker_name, broker_obj, underlying):
             return None
         df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume", "oi"])
         df = df[["time", "open", "high", "low", "close", "volume"]]
-        df = df.iloc[::-1].reset_index(drop=True)  # Upstox returns newest-first
+        # UpstoxBroker.get_candles already normalizes rows oldest-first.
+        # Reversing here again made the AUTO engine read the morning candle as
+        # the latest completed candle, so the final freshness guard blocked
+        # every qualified entry as INDEX_CANDLE_STALE.
+        df = df.sort_values("time").reset_index(drop=True)
     else:
         raise ValueError(f"get_candles_multi: unsupported broker {broker_name}")
 
