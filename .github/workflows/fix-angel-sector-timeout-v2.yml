@@ -1,0 +1,110 @@
+name: Fix Angel Sector Timeout V2
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fix-angel-sector-timeout-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Use fast Angel batch quotes and parallel token resolution
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('bot/sector_rotation_routes.py')
+          text = path.read_text()
+
+          old_tokens = '''    token_by_symbol = {}
+              for row in universe:
+                  resolved = _resolve_angel_token(obj, row["symbol"])
+                  if not resolved:
+                      continue
+                  trading_symbol, token = resolved
+                  token_by_symbol[row["symbol"]] = (trading_symbol, token)
+          '''
+          new_tokens = '''    token_by_symbol = {}
+              # First load previously resolved tokens immediately. Resolve only the
+              # remaining symbols concurrently so a 50-stock index does not exceed
+              # the mobile request timeout after a Railway restart.
+              pending_rows = []
+              for row in universe:
+                  symbol = row["symbol"]
+                  cached = _get_resolution(("angelone", symbol))
+                  if cached:
+                      token_by_symbol[symbol] = cached
+                  else:
+                      pending_rows.append(row)
+
+              if pending_rows:
+                  from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                  def _resolve_row(row):
+                      symbol = row["symbol"]
+                      return symbol, _resolve_angel_token(obj, symbol)
+
+                  workers = min(5, len(pending_rows))
+                  with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+                      futures = [pool.submit(_resolve_row, row) for row in pending_rows]
+                      for future in as_completed(futures):
+                          try:
+                              symbol, resolved = future.result()
+                          except Exception:
+                              continue
+                          if resolved:
+                              token_by_symbol[symbol] = resolved
+          '''
+          if old_tokens not in text:
+              raise SystemExit('token resolution block not found')
+          text = text.replace(old_tokens, new_tokens, 1)
+
+          old_batch = '    batch_method = getattr(obj, "getMarketData", None)\n'
+          new_batch = '''    batch_method = getattr(obj, "getMarketData", None)
+              if not callable(batch_method):
+                  # smartapi-python 1.3.x may expose the authenticated route but
+                  # omit the public getMarketData wrapper. Call that same official
+                  # batch endpoint through the SDK request layer instead of making
+                  # 50 separate ltpData requests.
+                  direct_post = getattr(obj, "_postRequest", None)
+                  routes = getattr(obj, "_routes", {}) or {}
+                  if callable(direct_post) and "api.market.data" in routes:
+                      def batch_method(mode, exchange_tokens):
+                          return direct_post(
+                              "api.market.data",
+                              {"mode": mode, "exchangeTokens": exchange_tokens},
+                          )
+          '''
+          if old_batch not in text:
+              raise SystemExit('batch method line not found')
+          text = text.replace(old_batch, new_batch, 1)
+
+          path.write_text(text)
+          PY
+      - name: Validate backend
+        run: |
+          python -m py_compile bot/sector_rotation_routes.py
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('bot/sector_rotation_routes.py').read_text()
+          assert 'ThreadPoolExecutor' in text
+          assert '"api.market.data"' in text
+          assert 'direct_post(' in text
+          assert 'payload = obj.ltpData("NSE", trading_symbol, token)' in text
+          print('Angel sector timeout compatibility checks passed')
+          PY
+      - name: Commit fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add bot/sector_rotation_routes.py
+          git commit -m 'Fix Angel sector rotation timeout with batch quotes'
+          git push
