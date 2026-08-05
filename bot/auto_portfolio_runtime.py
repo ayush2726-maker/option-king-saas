@@ -383,7 +383,13 @@ def _summary(scan):
     }
 
 
-def _best_candidate(scans, blocked_underlyings):
+def _eligible_candidates(scans, blocked_underlyings):
+    """Return every qualified setup in execution priority order.
+
+    A high-score candidate can still fail later at contract, LTP, premium
+    momentum, option-quality or sizing gates. Do not let that one candidate
+    starve another index that is also fully qualified in the same scan.
+    """
     candidates = []
     for scan in scans:
         if scan.get("status") != "OK":
@@ -407,7 +413,53 @@ def _best_candidate(scans, blocked_underlyings):
         ),
         reverse=True,
     )
+    return candidates
+
+
+def _best_candidate(scans, blocked_underlyings):
+    candidates = _eligible_candidates(scans, blocked_underlyings)
     return candidates[0] if candidates else None
+
+
+def _attempt_entry_candidates(candidates, opener, state):
+    """Attempt qualified candidates in order and return the one that opened."""
+    attempts = []
+    state["entry_candidate_attempts"] = attempts
+
+    for candidate in candidates:
+        state.pop("last_entry_attempt", None)
+        state.pop("entry_attempt", None)
+        state.pop("entry_block_reason", None)
+        state.pop("last_entry_block_reason", None)
+
+        opened = bool(opener(candidate))
+        guard = dict(
+            state.get("last_entry_attempt")
+            or state.get("entry_attempt")
+            or state.get("entry_guard")
+            or {}
+        )
+        signal = dict(candidate.get("signal_data") or {})
+        attempts.append(
+            {
+                "underlying": candidate.get("underlying"),
+                "side": signal.get("signal"),
+                "score": signal.get("score"),
+                "opened": opened,
+                "reason": guard.get("reason") or (
+                    "ENTRY_OPENED" if opened else "ENTRY_NOT_OPENED"
+                ),
+                "stage": guard.get("stage"),
+            }
+        )
+
+        if opened:
+            return candidate
+
+        if state.get("live_order_lock") or state.get("mode_change_blocked"):
+            break
+
+    return None
 
 
 def _display_scan(scans, selected, settings):
@@ -1257,9 +1309,19 @@ def run_user_bot_auto(user_id, creds, state):
             selected = None
 
             if _can_enter(conn, user_id, settings, rows, state):
-                selected = _best_candidate(scans, blocked)
-                if selected:
-                    _open_angel(conn, user_id, obj, selected, settings, state)
+                candidates = _eligible_candidates(scans, blocked)
+                opened_candidate = _attempt_entry_candidates(
+                    candidates,
+                    lambda candidate: _open_angel(
+                        conn, user_id, obj, candidate, settings, state
+                    ),
+                    state,
+                )
+                selected = opened_candidate or (
+                    candidates[0] if candidates else None
+                )
+            else:
+                state["entry_candidate_attempts"] = []
 
             rows = _open_rows(conn, user_id)
             _state_update(state, scans, selected, settings, rows)
@@ -1335,17 +1397,25 @@ def run_user_bot_multi_auto(user_id, broker_name, creds, state):
             selected = None
 
             if _can_enter(conn, user_id, settings, rows, state):
-                selected = _best_candidate(scans, blocked)
-                if selected:
-                    _open_multi(
+                candidates = _eligible_candidates(scans, blocked)
+                opened_candidate = _attempt_entry_candidates(
+                    candidates,
+                    lambda candidate: _open_multi(
                         conn,
                         user_id,
                         broker_name,
                         obj,
-                        selected,
+                        candidate,
                         settings,
                         state,
-                    )
+                    ),
+                    state,
+                )
+                selected = opened_candidate or (
+                    candidates[0] if candidates else None
+                )
+            else:
+                state["entry_candidate_attempts"] = []
 
             rows = _open_rows(conn, user_id)
             _state_update(state, scans, selected, settings, rows)
