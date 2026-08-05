@@ -440,12 +440,35 @@ def _resolve_angel_token(obj, symbol):
 def _fetch_angel_quotes(user_id, creds, universe):
     obj = _get_ltp_session(user_id, creds)
     token_by_symbol = {}
+    # First load previously resolved tokens immediately. Resolve only the
+    # remaining symbols concurrently so a 50-stock index does not exceed
+    # the mobile request timeout after a Railway restart.
+    pending_rows = []
     for row in universe:
-        resolved = _resolve_angel_token(obj, row["symbol"])
-        if not resolved:
-            continue
-        trading_symbol, token = resolved
-        token_by_symbol[row["symbol"]] = (trading_symbol, token)
+        symbol = row["symbol"]
+        cached = _get_resolution(("angelone", symbol))
+        if cached:
+            token_by_symbol[symbol] = cached
+        else:
+            pending_rows.append(row)
+
+    if pending_rows:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _resolve_row(row):
+            symbol = row["symbol"]
+            return symbol, _resolve_angel_token(obj, symbol)
+
+        workers = min(5, len(pending_rows))
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            futures = [pool.submit(_resolve_row, row) for row in pending_rows]
+            for future in as_completed(futures):
+                try:
+                    symbol, resolved = future.result()
+                except Exception:
+                    continue
+                if resolved:
+                    token_by_symbol[symbol] = resolved
 
     if not token_by_symbol:
         raise RuntimeError("Angel One equity instruments could not be resolved")
@@ -455,6 +478,19 @@ def _fetch_angel_quotes(user_id, creds, universe):
     # ltpData(). Prefer batch quotes when available and transparently
     # fall back to ltpData so Sector Rotation works on both versions.
     batch_method = getattr(obj, "getMarketData", None)
+    if not callable(batch_method):
+        # smartapi-python 1.3.x may expose the authenticated route but
+        # omit the public getMarketData wrapper. Call that same official
+        # batch endpoint through the SDK request layer instead of making
+        # 50 separate ltpData requests.
+        direct_post = getattr(obj, "_postRequest", None)
+        routes = getattr(obj, "_routes", {}) or {}
+        if callable(direct_post) and "api.market.data" in routes:
+            def batch_method(mode, exchange_tokens):
+                return direct_post(
+                    "api.market.data",
+                    {"mode": mode, "exchangeTokens": exchange_tokens},
+                )
     if callable(batch_method):
         try:
             payload = batch_method(
