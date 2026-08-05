@@ -3,7 +3,7 @@
 Adds three upgrades without changing strategy scores, MTF, ORB, ATR exits,
 cooldowns, sizing, broker routing or any previously installed wrapper:
 
-1. Selected option premium must show a real uptick before BUY.
+1. Qualified strategy entries do not use a premium momentum/quality gate.
 2. Completed index data and broker/DNS transport must be fresh and healthy.
 3. Opened and blocked entries receive explainable JSON audit snapshots.
 """
@@ -22,7 +22,7 @@ from typing import Any
 from bot import auto_portfolio_runtime as runtime
 
 
-PATCH_VERSION = "ENTRY_EXECUTION_SAFETY_V2_BALANCED_PREMIUM"
+PATCH_VERSION = "ENTRY_EXECUTION_SAFETY_V3_NO_PREMIUM_GATE"
 # AUTO rescans entry candidates about once per minute. Keep the latest option quote long enough for the next scan to compare real premium momentum.
 MOMENTUM_WINDOW_SECONDS = 180.0
 MOMENTUM_MIN_SAMPLE_GAP_SECONDS = 1.0
@@ -311,6 +311,22 @@ def _balanced_momentum_policy(
             })
 
     return result
+
+
+def _premium_gate_disabled(
+    quote_price: float,
+    observed_quality: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Audit-only premium snapshot; never blocks a qualified strategy entry."""
+    quality = dict(observed_quality or {})
+    return {
+        "allowed": True,
+        "reason": "OPTION_PREMIUM_GATE_DISABLED",
+        "gate_enabled": False,
+        "current_price": round(_f(quote_price), 4),
+        "observed_quality_allowed": bool(quality.get("allowed", True)),
+        "observed_quality_reason": quality.get("reason"),
+    }
 
 
 def _clear_momentum(user_id: int, broker_name: str, symbol: str) -> None:
@@ -703,7 +719,15 @@ def apply_entry_execution_safety_v1_patch() -> None:
     ):
         _ensure_audit_schema(conn)
         symbol = _text(resolved.get("symbol"))
-        quality_copy = dict(quality or {})
+        quality_observed = dict(quality or {})
+        quality_copy = dict(quality_observed)
+        quality_copy.update({
+            "allowed": True,
+            "reason": "OPTION_PREMIUM_GATE_DISABLED",
+            "premium_gate_disabled": True,
+            "observed_allowed": bool(quality_observed.get("allowed", True)),
+            "observed_reason": quality_observed.get("reason"),
+        })
 
         # Reaching _open_common proves a direct option LTP was just fetched by
         # the existing broker-specific wrapper. Preserve that wrapper and mark
@@ -714,7 +738,7 @@ def apply_entry_execution_safety_v1_patch() -> None:
         option_candle_health = _quality_transport_state(
             user_id,
             broker_name,
-            quality_copy,
+            quality_observed,
         )
         candle_health = _health_snapshot(user_id, broker_name, "candles")
         quote_health = _health_snapshot(user_id, broker_name, "quote")
@@ -722,21 +746,14 @@ def apply_entry_execution_safety_v1_patch() -> None:
             "blocked": bool(
                 candle_health.get("blocked")
                 or quote_health.get("blocked")
-                or option_candle_health.get("blocked")
             ),
             "candles": candle_health,
             "option_candles": option_candle_health,
             "quote": quote_health,
         }
-        momentum = _momentum_check(
-            user_id,
-            broker_name,
-            symbol,
+        momentum = _premium_gate_disabled(
             quote_price,
-        )
-        momentum = _balanced_momentum_policy(
-            momentum,
-            quality_copy,
+            quality_observed,
         )
         snapshot = _entry_snapshot(
             broker_name,
@@ -749,17 +766,10 @@ def apply_entry_execution_safety_v1_patch() -> None:
             health,
         )
 
+        # Premium momentum and premium-candle quality are audit-only.
+        # A qualified strategy entry is blocked here only for stale index data
+        # or repeated broker quote/candle transport failure.
         reason = _guard_reason(health, candle)
-        if reason is None and not quality_copy.get("allowed", True):
-            reason = _text(
-                quality_copy.get("reason"),
-                "OPTION_QUALITY_BLOCKED",
-            )
-        if reason is None and not momentum.get("allowed"):
-            reason = _text(
-                momentum.get("reason"),
-                "OPTION_PREMIUM_MOMENTUM_WEAK",
-            )
 
         state["entry_data_health"] = {
             "candle": candle,
