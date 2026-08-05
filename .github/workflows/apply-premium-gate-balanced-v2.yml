@@ -1,0 +1,87 @@
+name: Apply Balanced Premium Entry Gate V2
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/apply-premium-gate-balanced-v2.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Balance premium confirmation without missing qualified entries
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("bot/entry_execution_safety_v1_patch.py")
+          text = path.read_text(encoding="utf-8")
+
+          text = text.replace(
+              'PATCH_VERSION = "ENTRY_EXECUTION_SAFETY_V1"',
+              'PATCH_VERSION = "ENTRY_EXECUTION_SAFETY_V2_BALANCED_PREMIUM"',
+              1,
+          )
+
+          anchor = '''def _clear_momentum(user_id: int, broker_name: str, symbol: str) -> None:\n'''
+          helper = '''def _balanced_momentum_policy(\n    momentum: dict[str, Any],\n    quality: dict[str, Any],\n) -> dict[str, Any]:\n    """Keep premium safety without requiring an arbitrary large uptick.\n\n    The option-candle quality guard already blocks spike reversal, bearish\n    reversal after a run and extreme extension. Therefore a fully qualified\n    strategy entry should not be starved merely because the latest premium is\n    flat or its increase is smaller than Rs 0.50 / 0.25%. A clearly falling\n    premium remains blocked. On the first sample, a healthy option-candle\n    confirmation is sufficient; missing/failed candle data still waits for a\n    second real quote.\n    """\n    result = dict(momentum or {})\n    if result.get("allowed"):\n        return result\n\n    reason = _text(result.get("reason")).upper()\n    quality_reason = _text((quality or {}).get("reason")).upper()\n\n    if (\n        reason == "OPTION_PREMIUM_MOMENTUM_WARMUP"\n        and quality_reason == "OPTION_PREMIUM_ENTRY_OK"\n    ):\n        result.update({\n            "allowed": True,\n            "reason": "OPTION_PREMIUM_CANDLE_CONFIRMED",\n            "balanced_policy": True,\n        })\n        return result\n\n    if reason == "OPTION_PREMIUM_MOMENTUM_WEAK":\n        move = _f(result.get("move_points"), 0.0)\n        if move >= -1e-9:\n            result.update({\n                "allowed": True,\n                "reason": "OPTION_PREMIUM_NOT_FALLING",\n                "balanced_policy": True,\n            })\n\n    return result\n\n\n'''
+          if "def _balanced_momentum_policy(" not in text:
+              if anchor not in text:
+                  raise SystemExit("Momentum helper insertion anchor not found")
+              text = text.replace(anchor, helper + anchor, 1)
+
+          old_call = '''        momentum = _momentum_check(\n            user_id,\n            broker_name,\n            symbol,\n            quote_price,\n        )\n        snapshot = _entry_snapshot(\n'''
+          new_call = '''        momentum = _momentum_check(\n            user_id,\n            broker_name,\n            symbol,\n            quote_price,\n        )\n        momentum = _balanced_momentum_policy(\n            momentum,\n            quality_copy,\n        )\n        snapshot = _entry_snapshot(\n'''
+          if old_call in text:
+              text = text.replace(old_call, new_call, 1)
+          elif "momentum = _balanced_momentum_policy(" not in text:
+              raise SystemExit("Momentum policy call anchor not found")
+
+          path.write_text(text, encoding="utf-8")
+
+          test_path = Path("tests/test_balanced_premium_entry_gate_v2.py")
+          test_path.write_text(
+              '''from bot import entry_execution_safety_v1_patch as patch\n\n\ndef test_first_quote_can_pass_when_option_candles_confirm_entry():\n    raw = {\n        "allowed": False,\n        "reason": "OPTION_PREMIUM_MOMENTUM_WARMUP",\n        "current_price": 100.0,\n    }\n    result = patch._balanced_momentum_policy(\n        raw,\n        {"allowed": True, "reason": "OPTION_PREMIUM_ENTRY_OK"},\n    )\n    assert result["allowed"] is True\n    assert result["reason"] == "OPTION_PREMIUM_CANDLE_CONFIRMED"\n\n\ndef test_small_positive_move_is_not_hard_blocked():\n    raw = {\n        "allowed": False,\n        "reason": "OPTION_PREMIUM_MOMENTUM_WEAK",\n        "move_points": 0.10,\n    }\n    result = patch._balanced_momentum_policy(\n        raw,\n        {"allowed": True, "reason": "OPTION_PREMIUM_ENTRY_OK"},\n    )\n    assert result["allowed"] is True\n    assert result["reason"] == "OPTION_PREMIUM_NOT_FALLING"\n\n\ndef test_falling_premium_stays_blocked():\n    raw = {\n        "allowed": False,\n        "reason": "OPTION_PREMIUM_MOMENTUM_WEAK",\n        "move_points": -0.10,\n    }\n    result = patch._balanced_momentum_policy(\n        raw,\n        {"allowed": True, "reason": "OPTION_PREMIUM_ENTRY_OK"},\n    )\n    assert result["allowed"] is False\n\n\ndef test_warmup_without_option_candles_still_waits():\n    raw = {\n        "allowed": False,\n        "reason": "OPTION_PREMIUM_MOMENTUM_WARMUP",\n    }\n    result = patch._balanced_momentum_policy(\n        raw,\n        {"allowed": True, "reason": "OPTION_GUARD_FETCH_WARNING"},\n    )\n    assert result["allowed"] is False\n''',
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Validate entry behavior
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m py_compile bot/entry_execution_safety_v1_patch.py
+          python -m pip install -q -r requirements.txt
+          python -m pip install -q pytest
+          pytest -q \
+            tests/test_balanced_premium_entry_gate_v2.py \
+            tests/test_entry_execution_safety_v1.py \
+            tests/test_entry_momentum_scan_cycle_fix.py \
+            tests/test_qualified_candidate_fallback.py
+          git diff --check
+
+      - name: Commit balanced gate
+        run: |
+          if git diff --quiet; then
+            echo "Balanced premium gate already present"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot/entry_execution_safety_v1_patch.py tests/test_balanced_premium_entry_gate_v2.py
+          git commit -m "Balance option premium confirmation for qualified entries"
+          git push origin HEAD:main
