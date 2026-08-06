@@ -1,0 +1,26 @@
+name: Validate Supertrend Replay Final
+
+on:
+  pull_request:
+    paths:
+      - "bot/supertrend_replay_final_patch.py"
+      - "bot/__init__.py"
+      - "tests/test_supertrend_replay_final_patch.py"
+      - ".github/workflows/validate-supertrend-replay-final.yml"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+      - name: Compile patch
+        run: python -m py_compile bot/supertrend_replay_final_patch.py bot/__init__.py
+      - name: Run focused regressions
+        env:
+          PYTHONPATH: .
+        run: pytest -q tests/test_supertrend_replay_final_patch.py
