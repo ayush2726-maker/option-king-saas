@@ -133,3 +133,12 @@ try:
     apply_supertrend_completed_candle_consistency_patch()
 except Exception:
     pass
+
+try:
+    from bot.supertrend_replay_final_patch import (
+        apply_supertrend_replay_final_patch,
+    )
+
+    apply_supertrend_replay_final_patch()
+except Exception:
+    pass
