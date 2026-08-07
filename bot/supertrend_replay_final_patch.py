@@ -1,13 +1,14 @@
 """Final Supertrend repair for the authoritative replay-first AUTO scan.
 
-The older neutral-line fallback wrapped ``runtime._build_scan``. Production AUTO
-now uses ``live_scan_history_fallback_patch._replay_scan`` instead, so a valid
-completed-candle Supertrend could be calculated but the replay payload still
-exposed ``NEUTRAL`` and the mandatory gate blocked the trade.
+Production AUTO can receive an already-populated replay ``supertrend_dir`` that
+is stale relative to the completed candle.  The older V2 repair only corrected
+NEUTRAL values, so a stale UP/DOWN payload could survive and incorrectly block a
+fully qualified opposite-side setup.
 
-This patch derives direction only from the completed indicator candle produced by
-the existing standard Supertrend implementation. It never guesses without a valid
-numeric line/price and does not change threshold, score weights, orders or risk.
+This patch always validates replay Supertrend against the completed indicator
+candle produced by the existing standard implementation.  When a valid numeric
+Supertrend line and completed close are available, close-vs-line is authoritative
+for direction.  Thresholds, score weights, order routing and risk are unchanged.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from bot import angel_fetcher
 from bot import live_scan_history_fallback_patch as replay
 from bot import mandatory_trend_structure_patch as mandatory
 
-VERSION = "SUPERTREND_REPLAY_FINAL_V2"
+VERSION = "SUPERTREND_REPLAY_FINAL_V3"
 _STALE_REASON = "SUPERTREND_DIRECTION_REQUIRED"
 
 
@@ -51,13 +52,17 @@ def _direction_from_completed_frame(frame):
             if row.get("SUPERTREND") is not None
             else row.get("supertrend")
         )
-        direction = str(row.get("ST_DIR") or "NEUTRAL").upper()
+        raw_direction = str(row.get("ST_DIR") or "NEUTRAL").upper()
 
-        if direction not in {"UP", "DOWN"} and close and line and close != line:
+        # Numeric completed close vs numeric Supertrend line is authoritative.
+        # This also catches stale UP/DOWN labels left on a replay payload/frame.
+        if close is not None and line is not None and close != line:
             direction = "UP" if close > line else "DOWN"
+        elif raw_direction in {"UP", "DOWN"}:
+            direction = raw_direction
+        else:
+            direction = "NEUTRAL"
 
-        if direction not in {"UP", "DOWN"}:
-            return "NEUTRAL", line, close, row.get("time")
         return direction, line, close, row.get("time")
     except Exception:
         return "NEUTRAL", None, None, None
@@ -84,21 +89,30 @@ def _repair_replay_scan(scan, frame):
         return scan
 
     current = str(market.get("supertrend_dir") or "NEUTRAL").upper()
-    if current in {"UP", "DOWN"}:
-        market.setdefault("supertrend_source", "REPLAY_PAYLOAD")
-        return scan
-
     direction, line, close, candle_time = _direction_from_completed_frame(frame)
+
     if direction not in {"UP", "DOWN"}:
-        market["supertrend_source"] = "COMPLETED_CANDLE_UNAVAILABLE"
+        # If completed-candle recomputation is genuinely unavailable, retain a
+        # valid replay direction rather than inventing a replacement.
+        if current in {"UP", "DOWN"}:
+            market.setdefault("supertrend_source", "REPLAY_PAYLOAD_UNVERIFIED")
+        else:
+            market["supertrend_source"] = "COMPLETED_CANDLE_UNAVAILABLE"
         market["supertrend_repair_version"] = VERSION
         return scan
 
+    corrected = current != direction
     market["supertrend_dir"] = direction
     market["supertrend_value"] = line
     market["supertrend_completed_close"] = close
     market["supertrend_completed_candle"] = str(candle_time or scan.get("candle_id") or "")
-    market["supertrend_source"] = "COMPLETED_STANDARD_SUPERTREND"
+    market["supertrend_source"] = (
+        "COMPLETED_STANDARD_SUPERTREND_OVERRIDE"
+        if corrected and current in {"UP", "DOWN"}
+        else "COMPLETED_STANDARD_SUPERTREND"
+    )
+    market["supertrend_previous_dir"] = current
+    market["supertrend_direction_corrected"] = bool(corrected)
     market["supertrend_repair_version"] = VERSION
 
     cleaned = dict(signal)
@@ -109,6 +123,10 @@ def _repair_replay_scan(scan, frame):
         cleaned.get("fresh_entry_block_reasons")
     )
     cleaned["warnings"] = _without_stale_supertrend_reason(cleaned.get("warnings"))
+    if corrected and current in {"UP", "DOWN"}:
+        cleaned["warnings"].append(
+            f"SUPERTREND_COMPLETED_CANDLE_CORRECTED:{current}->{direction}"
+        )
 
     repaired_signal = mandatory._normalize(cleaned, market)
     scan["signal_data"] = repaired_signal
@@ -125,17 +143,20 @@ def _repair_replay_scan(scan, frame):
             continue
         candle["supertrend_dir"] = direction
         candle["supertrend"] = line
-        candle["supertrend_source"] = "COMPLETED_STANDARD_SUPERTREND"
+        candle["supertrend_source"] = market["supertrend_source"]
         break
 
     note = str(scan.get("data_note") or "")
-    marker = f"st={direction} source=completed_standard"
+    marker = (
+        f"st={direction} source=completed_standard"
+        + (f" corrected_from={current}" if corrected else "")
+    )
     scan["data_note"] = (note + " | " + marker).strip(" |")[:500]
     return scan
 
 
 def apply_supertrend_replay_final_patch() -> None:
-    if getattr(replay, "_okai_supertrend_replay_final_v2", False):
+    if getattr(replay, "_okai_supertrend_replay_final_v3", False):
         return
 
     original_replay_scan = replay._replay_scan
@@ -159,5 +180,6 @@ def apply_supertrend_replay_final_patch() -> None:
         return _repair_replay_scan(scan, frame)
 
     replay._replay_scan = replay_scan_with_final_supertrend
+    replay._okai_supertrend_replay_final_v3 = True
     replay._okai_supertrend_replay_final_v2 = True
     replay._okai_supertrend_replay_final_version = VERSION
