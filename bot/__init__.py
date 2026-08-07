@@ -142,3 +142,19 @@ try:
     apply_supertrend_replay_final_patch()
 except Exception:
     pass
+
+# Do not let two losses in any instruments freeze every otherwise-qualified
+# setup for 15 minutes. Keep the safer same-index + same-side cooldown intact so
+# an exited losing trade is not immediately reopened in the same direction.
+# opening_orb_loss_circuit_patch resolves _global_block from its module globals
+# at call time, so this remains effective when main.py installs that final guard.
+try:
+    from bot import opening_orb_loss_circuit_patch as _opening_loss_circuit
+
+    def _no_global_loss_block(conn, user_id):
+        return None
+
+    _opening_loss_circuit._global_block = _no_global_loss_block
+    _opening_loss_circuit.GLOBAL_LOSS_BLOCK_DISABLED = True
+except Exception:
+    pass
