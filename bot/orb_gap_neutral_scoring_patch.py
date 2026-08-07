@@ -1,10 +1,12 @@
-"""ORB gap/unavailable neutral scoring for OKAI Default 82.
+"""Adaptive ORB neutral scoring for OKAI Default 82.
 
-ORB is a quality confirmation, not a mandatory entry gate.  When ORB data is
-missing (high/low are zero) or when a gap day puts the active price far away from
-the ORB zone, the ORB leg should be treated as not-applicable instead of a failed
-0/11 confirmation.  The fixed protected threshold remains 82; only the base-score
-denominator changes from 5 to 4 when ORB is not applicable.
+ORB is a quality confirmation, not a mandatory entry gate. When ORB data is
+missing (high/low are zero) or when the active price is materially far away from
+the ORB zone, the ORB leg is treated as not-applicable instead of a failed 0/11
+confirmation. This is especially important on gap-up/gap-down and strong opening
+move days where a later valid reversal/continuation setup can be far from the
+opening range. The protected threshold remains 82; only the base-score
+denominator changes from 5 to 4 while ORB is not applicable.
 """
 from __future__ import annotations
 
@@ -34,13 +36,22 @@ def _orb_available(orb_high: float, orb_low: float) -> bool:
     return bool(orb_high > 0 and orb_low > 0 and orb_high > orb_low)
 
 
-def _orb_far_due_to_gap(price: float, orb_high: float, orb_low: float, gap_day: bool, spot_atr: float) -> bool:
-    if not gap_day or not _orb_available(orb_high, orb_low):
+def _orb_far_from_active_price(price: float, orb_high: float, orb_low: float, spot_atr: float) -> bool:
+    """Return True when ORB is too far away to be a useful current confirmation.
+
+    Do not require an explicit ``gap_day`` flag here. The replay-first live path
+    historically hard-coded that flag to False, which made the old gap-specific
+    protection ineffective even when the opening range was obviously far away.
+    Distance itself is the reliable runtime fact we need for scoring.
+    """
+    if not _orb_available(orb_high, orb_low):
         return False
-    if _orb_breakout_direction(price, orb_high, orb_low) != "WAIT":
-        return False
+
     nearest_distance = min(abs(price - orb_high), abs(price - orb_low))
-    far_threshold = max(ORB_FAR_MIN_POINTS, max(0.0, spot_atr) * ORB_FAR_ATR_MULTIPLIER)
+    far_threshold = max(
+        ORB_FAR_MIN_POINTS,
+        max(0.0, spot_atr) * ORB_FAR_ATR_MULTIPLIER,
+    )
     return nearest_distance > far_threshold
 
 
@@ -89,7 +100,7 @@ def calculate_base_score_orb_neutral(
     spot_atr = _f(spot_atr)
     orb_available = _orb_available(orb_high, orb_low)
     orb_direction = _orb_breakout_direction(price, orb_high, orb_low) if orb_available else "NA"
-    orb_far = _orb_far_due_to_gap(price, orb_high, orb_low, bool(gap_day), spot_atr)
+    orb_far = _orb_far_from_active_price(price, orb_high, orb_low, spot_atr)
     orb_applicable = bool(orb_available and not orb_far)
 
     if orb_applicable:
@@ -119,7 +130,7 @@ def calculate_base_score_orb_neutral(
     if not orb_available:
         reasons.append("ORB_NOT_APPLICABLE_UNAVAILABLE")
     elif orb_far:
-        reasons.append("ORB_NOT_APPLICABLE_GAP_FAR")
+        reasons.append("ORB_NOT_APPLICABLE_FAR")
     elif orb_direction == "WAIT":
         reasons.append("ORB_NEUTRAL_NO_BREAKOUT")
 
@@ -134,6 +145,7 @@ def calculate_base_score_orb_neutral(
         "orb_direction": orb_direction,
         "orb_score_denominator": denominator,
         "orb_neutral_reasons": reasons,
+        "gap_day": bool(gap_day),
     }
 
 
