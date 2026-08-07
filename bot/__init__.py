@@ -158,3 +158,15 @@ try:
     _opening_loss_circuit.GLOBAL_LOSS_BLOCK_DISABLED = True
 except Exception:
     pass
+
+# Mirror the concrete runtime entry failure (contract/LTP/sizing/cooldown/order,
+# etc.) into the warning stream that the mobile Final Decision card already
+# renders. This changes diagnostics only, never entry logic.
+try:
+    from bot.execution_reason_visibility_patch import (
+        apply_execution_reason_visibility_patch,
+    )
+
+    apply_execution_reason_visibility_patch()
+except Exception:
+    pass
