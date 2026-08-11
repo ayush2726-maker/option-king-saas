@@ -580,7 +580,6 @@ def get_signal(authorization: str = Header(None)):
     user = get_current_user(authorization)
 
     conn = get_db()
-    ensure_tables(conn)
 
     settings = get_strategy_settings(conn, user["id"])
 
@@ -716,8 +715,9 @@ def get_signal(authorization: str = Header(None)):
         )
 
         if engine_ready:
+            # Score history is persisted by apply_score_history_patch during the
+            # engine state update. Keep this high-frequency GET path read-only.
             score = int(engine_state.get("score", 0))
-            log_signal_snapshot(conn, user["id"], engine_state)
             adx = float(engine_state.get("adx", 0))
             volume_ratio = float(engine_state.get("volume_ratio", 0))
             mtf_ok = bool(engine_state.get("mtf_confirmed", False))
@@ -1891,4 +1891,3 @@ def get_signal_history(
         "instrument": requested_instrument or None,
         "points": points,
     }
-

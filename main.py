@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from database import init_db
+from database import init_db, get_db as open_database
 from auth.routes import router as auth_router
 from auth.recovery_routes import router as recovery_router, ensure_recovery_schema
 from auth.registration_email_middleware import SafeRegistrationEmailVerificationMiddleware
@@ -14,7 +14,7 @@ from broker.selected_broker_control import (
 )
 from subscription.routes import router as subscription_router
 from admin.routes import router as admin_router
-from bot.routes import router as bot_router
+from bot.routes import router as bot_router, ensure_tables as ensure_bot_tables
 from bot.trade_live_routes import router as trade_live_router
 from telegram.routes import router as telegram_router
 from user_panel.routes import router as user_panel_router
@@ -163,6 +163,16 @@ app.add_middleware(
 @app.on_event("startup")
 def startup():
     init_db()
+
+    # Complete the bot schema once when the process starts. /bot/signal is a
+    # high-frequency read endpoint and must not retry every CREATE/ALTER on each
+    # mobile refresh.
+    bot_conn = open_database()
+    try:
+        ensure_bot_tables(bot_conn)
+    finally:
+        bot_conn.close()
+
     ensure_recovery_schema()
     ensure_local_gateway_schema()
 
