@@ -1,4 +1,6 @@
 from bot.live_score_breakdown_patch import _score_payload
+from bot.entry_quality_v2_patch import _apply_entry_quality_v2
+from bot.fresh_entry_guard_patch import _apply_fresh_entry_guard
 from bot.strategy import calculate_tqu_score, get_full_signal
 
 
@@ -94,3 +96,42 @@ def test_full_signal_and_breakdown_show_same_normalized_decision_score():
     assert payload["enabled_weight_total"] == 100
     assert payload["availability_normalized"] is True
 
+
+def test_missing_volume_score_is_never_normalized_twice_by_entry_guards():
+    market = {
+        "price": 24450.25,
+        "vwap": 24459.12,
+        "ema9": 24450.36,
+        "ema21": 24451.50,
+        "adx": 10.0,
+        "volume_ratio": 0.0,
+        "volume_available": False,
+        "vwap_fallback_used": True,
+        "supertrend_dir": "DOWN",
+        "trend": "DOWNTREND",
+        "mtf_confirmed": False,
+        "orb_high": 24576.85,
+        "orb_low": 24478.60,
+        "c1_bullish": False,
+        "c2_bullish": False,
+        "gap_day": False,
+        "atr": 10.0,
+    }
+
+    canonical = get_full_signal(market)
+    fresh = _apply_fresh_entry_guard(canonical, market, None)
+    fresh["mandatory_confirmations_passed"] = True
+    guarded = _apply_entry_quality_v2(fresh, market, None)
+    payload = _score_payload(market, guarded)
+
+    assert canonical["score"] == 67
+    assert fresh["score"] == 67
+    assert guarded["score"] == 67
+    assert guarded["volume_normalization_corrected"] is False
+    assert guarded["volume_normalization_owner"] == "TQU_CANONICAL_V1"
+    assert payload["score"] == 67
+    assert payload["display_score"] == 67
+    assert payload["decision_score"] == 67
+    assert payload["component_total"] == 67
+    assert payload["decision_component_total"] == 67
+    assert payload["component_score_matches_decision"] is True

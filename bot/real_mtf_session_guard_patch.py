@@ -21,13 +21,14 @@ rule is changed.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from bot import angel_fetcher
 from bot import auto_portfolio_runtime as runtime
 
 
-PATCH_VERSION = "REAL_5M_MTF_SESSION_GUARD_V1"
+PATCH_VERSION = "REAL_5M_MTF_SESSION_GUARD_V2_CANONICAL"
 NORMAL_AUTO_CUTOFF_MINUTE = 14 * 60 + 45
 MIN_COMPLETE_5M_BARS = 12
 ORB_BUFFER_POINTS = 5.0
@@ -240,8 +241,6 @@ def _clean_dynamic_reasons(values: Any) -> list[str]:
         if not text:
             continue
         upper = text.upper()
-        if upper.startswith("SCORE_BELOW_"):
-            continue
         if upper.startswith("REAL_5M_MTF_"):
             continue
         if upper.startswith("SESSION_COUNTER_TREND_"):
@@ -249,6 +248,83 @@ def _clean_dynamic_reasons(values: Any) -> list[str]:
         if text not in result:
             result.append(text)
     return result
+
+
+def _entry_window_state(now_ist: datetime | None = None) -> dict[str, Any]:
+    """Return the normal AUTO entry window without changing strategy score."""
+    value = now_ist or datetime.now(timezone.utc).astimezone(
+        timezone(timedelta(hours=5, minutes=30))
+    )
+    minute = value.hour * 60 + value.minute
+
+    if value.weekday() >= 5:
+        reason = "AUTO_ENTRY_BLOCKED_MARKET_CLOSED"
+    elif minute < 9 * 60 + 15:
+        reason = "AUTO_ENTRY_BLOCKED_BEFORE_0915_IST"
+    elif minute >= 15 * 60 + 30:
+        reason = "MARKET_CLOSED_AFTER_1530_IST"
+    elif minute >= NORMAL_AUTO_CUTOFF_MINUTE:
+        reason = "AUTO_ENTRY_CUTOFF_1445_IST"
+    else:
+        reason = ""
+
+    return {
+        "open": not bool(reason),
+        "reason": reason,
+        "window_ist": "09:15-14:45",
+        "checked_at_ist": value.isoformat(),
+    }
+
+
+def _canonical_signal(market: dict, profile: dict, consecutive_losses: int) -> dict:
+    """Run the current full strategy stack once from raw market components."""
+    from bot import strategy as strategy_module
+
+    result = strategy_module.get_full_signal(
+        market,
+        consecutive_losses=max(0, _i(consecutive_losses, 0)),
+        profile=profile or None,
+    )
+    if not isinstance(result, dict):
+        raise RuntimeError("CANONICAL_STRATEGY_RESULT_INVALID")
+    return dict(result)
+
+
+def _replay_diagnostic_warnings(values: Any) -> list[str]:
+    prefixes = (
+        "REPLAY_",
+        "ORB_SESSION_",
+        "SUPERTREND_COMPLETED_",
+    )
+    result = []
+    for value in values or []:
+        text = str(value or "").strip()
+        if text.upper().startswith(prefixes) and text not in result:
+            result.append(text)
+    return result
+
+
+def _update_chart_snapshot(scan: dict, signal: dict, mtf: dict) -> None:
+    target = str(scan.get("candle_id") or "")
+    chart = scan.get("chart_candles") or []
+    for raw in reversed(chart):
+        if not isinstance(raw, dict):
+            continue
+        if target and str(raw.get("time") or "") != target:
+            continue
+        raw.update(
+            {
+                "score": _i(signal.get("score"), 0),
+                "decision_score": _i(signal.get("score"), 0),
+                "signal": signal.get("candidate_signal", signal.get("signal", "WAIT")),
+                "trade_allowed": bool(signal.get("trade_allowed", False)),
+                "mtf_confirmed": bool(signal.get("mtf_confirmed", False)),
+                "mtf_bonus": _i(signal.get("mtf_bonus"), 0),
+                "score_source": "LIVE_CANONICAL_REAL_5M",
+                "real_mtf_5m": dict(mtf),
+            }
+        )
+        break
 
 
 def _update_breakdown(signal: dict, old_bonus: int, new_bonus: int, confirmed: bool, mtf: dict) -> None:
@@ -302,21 +378,34 @@ def _repair_scan(scan: Any, frame: Any, profile: dict | None = None) -> Any:
     if not signal or not market:
         return scan
 
+    active_profile = profile or {}
     mtf = _completed_5m_snapshot(frame, scan.get("candle_id"))
-    candidate = _candidate_side(signal)
-    weight = _mtf_weight(profile or {}, signal)
-    enabled = _mtf_enabled(profile or {}, signal)
+    weight = _mtf_weight(active_profile, signal)
+    enabled = _mtf_enabled(active_profile, signal)
     old_bonus = _old_mtf_bonus(signal, market, weight)
+
+    # First derive the candidate with MTF disabled. This uses the recovered ORB
+    # and completed-candle Supertrend already present on the replay market, so a
+    # stale provisional replay candidate cannot decide its own MTF bonus.
+    probe_market = dict(market)
+    probe_market["mtf_confirmed"] = False
+    try:
+        probe = _canonical_signal(
+            probe_market,
+            active_profile,
+            signal.get("consecutive_losses", 0),
+        )
+        candidate = _candidate_side(probe)
+    except Exception:
+        probe = {}
+        candidate = _candidate_side(signal)
+
     confirmed = bool(
         enabled
         and mtf.get("available")
         and candidate in {"CE", "PE"}
         and str(mtf.get("side") or "WAIT").upper() == candidate
     )
-    new_bonus = weight if confirmed else 0
-
-    old_score = _i(signal.get("score"), 0)
-    new_score = max(0, min(100, old_score - old_bonus + new_bonus))
 
     market.update(
         {
@@ -334,11 +423,37 @@ def _repair_scan(scan: Any, frame: Any, profile: dict | None = None) -> Any:
         }
     )
 
-    warnings = [
-        warning
-        for warning in signal.get("warnings") or []
-        if "MTF" not in str(warning).upper()
-    ]
+    # Recalculate from raw components after the real completed 5m state is
+    # known. Never subtract a bonus from an already non-linearly normalised
+    # score: that was the 78 -> 92 -> 82 production inflation path.
+    try:
+        canonical = _canonical_signal(
+            market,
+            active_profile,
+            signal.get("consecutive_losses", 0),
+        )
+    except Exception as exc:
+        canonical = {
+            "signal": "WAIT",
+            "candidate_signal": candidate,
+            "score": 0,
+            "decision_score": 0,
+            "min_score": _i(signal.get("min_score"), 82),
+            "trade_allowed": False,
+            "safety_gate_passed": False,
+            "safety_gate_reasons": ["CANONICAL_SCORE_RECALCULATION_FAILED"],
+            "warnings": [
+                "CANONICAL_SCORE_RECALCULATION_FAILED:"
+                f"{type(exc).__name__}"
+            ],
+        }
+
+    signal = dict(canonical)
+    candidate = _candidate_side(signal)
+    new_score = max(0, min(100, _i(signal.get("score"), 0)))
+    new_bonus = _i(signal.get("mtf_bonus"), weight if confirmed else 0)
+    warnings = list(signal.get("warnings") or [])
+    warnings.extend(_replay_diagnostic_warnings((scan.get("signal_data") or {}).get("warnings")))
     if confirmed:
         warnings.append("REAL_5M_MTF_CONFIRMED")
     elif mtf.get("available"):
@@ -348,38 +463,23 @@ def _repair_scan(scan: Any, frame: Any, profile: dict | None = None) -> Any:
     else:
         warnings.append(f"REAL_5M_MTF_UNAVAILABLE:{mtf.get('reason', 'WAIT')}")
 
-    signal.update(
-        {
-            "score": new_score,
-            "decision_score": new_score,
-            "mtf_confirmed": confirmed,
-            "mtf_bonus": new_bonus,
-            "real_mtf_5m": dict(mtf),
-            "mtf_timeframe": "5m",
-            "fake_mtf_bonus_removed": old_bonus,
-            "warnings": list(dict.fromkeys(warnings)),
-            "safety_gate_reasons": _clean_dynamic_reasons(
-                signal.get("safety_gate_reasons")
-            ),
-            "real_mtf_patch": PATCH_VERSION,
-        }
-    )
+    signal.update({
+        "score": new_score,
+        "decision_score": new_score,
+        "mtf_confirmed": confirmed,
+        "mtf_bonus": new_bonus,
+        "real_mtf_5m": dict(mtf),
+        "mtf_timeframe": "5m",
+        "fake_mtf_bonus_removed": old_bonus,
+        "canonical_score_recomputed": True,
+        "canonical_score_owner": "STRATEGY_FULL_SIGNAL_AFTER_REAL_5M",
+        "warnings": list(dict.fromkeys(warnings)),
+        "safety_gate_reasons": _clean_dynamic_reasons(
+            signal.get("safety_gate_reasons")
+        ),
+        "real_mtf_patch": PATCH_VERSION,
+    })
     _update_breakdown(signal, old_bonus, new_bonus, confirmed, mtf)
-
-    # Re-run the existing mandatory VWAP/Supertrend/EMA normalizer with the
-    # corrected decision score.  This does not invent a new entry rule.
-    try:
-        from bot.mandatory_trend_structure_patch import _normalize
-
-        signal = _normalize(signal, market)
-    except Exception:
-        minimum = _i(signal.get("min_score"), 82)
-        signal["trade_allowed"] = bool(
-            candidate in {"CE", "PE"}
-            and new_score >= minimum
-            and signal.get("trade_allowed", False)
-        )
-        signal["signal"] = candidate if signal["trade_allowed"] else "WAIT"
 
     bias = _session_bias(market, mtf)
     conflict = bool(
@@ -400,11 +500,26 @@ def _repair_scan(scan: Any, frame: Any, profile: dict | None = None) -> Any:
     signal["score"] = new_score
     signal["decision_score"] = new_score
 
+    entry_window = _entry_window_state()
+    signal["strategy_qualified"] = bool(signal.get("trade_allowed", False))
+    signal["entry_window_open"] = bool(entry_window["open"])
+    signal["entry_window_ist"] = entry_window["window_ist"]
+    signal["execution_allowed"] = bool(
+        signal.get("trade_allowed", False) and entry_window["open"]
+    )
+    signal["execution_block_reason"] = (
+        entry_window["reason"] if not entry_window["open"] else ""
+    )
+
     payload = signal.get("live_score_breakdown")
     if isinstance(payload, dict):
         payload = dict(payload)
         payload["score"] = new_score
         payload["decision_score"] = new_score
+        payload["trade_allowed"] = bool(signal.get("trade_allowed", False))
+        payload["entry_window_open"] = bool(entry_window["open"])
+        payload["execution_allowed"] = bool(signal["execution_allowed"])
+        payload["execution_block_reason"] = signal["execution_block_reason"]
         payload["real_mtf_5m"] = dict(mtf)
         payload["session_bias"] = bias
         payload["session_counter_trend_blocked"] = conflict
@@ -414,6 +529,9 @@ def _repair_scan(scan: Any, frame: Any, profile: dict | None = None) -> Any:
     market["signal_score"] = new_score
     market["session_bias"] = bias
     market["session_counter_trend_blocked"] = conflict
+    market["entry_window_open"] = bool(entry_window["open"])
+    market["execution_allowed"] = bool(signal["execution_allowed"])
+    market["execution_block_reason"] = signal["execution_block_reason"]
 
     scan["signal_data"] = signal
     scan["market_data"] = market
@@ -422,7 +540,11 @@ def _repair_scan(scan: Any, frame: Any, profile: dict | None = None) -> Any:
     scan["real_mtf_5m"] = dict(mtf)
     scan["session_bias"] = bias
     scan["session_counter_trend_blocked"] = conflict
+    scan["entry_window_open"] = bool(entry_window["open"])
+    scan["execution_allowed"] = bool(signal["execution_allowed"])
+    scan["execution_block_reason"] = signal["execution_block_reason"]
     scan["real_mtf_patch"] = PATCH_VERSION
+    _update_chart_snapshot(scan, signal, mtf)
     return scan
 
 
@@ -465,7 +587,7 @@ def _restore_normal_auto_cutoff() -> None:
 
 
 def apply_real_mtf_session_guard_patch() -> None:
-    if getattr(runtime, "_okai_real_mtf_session_guard_v1", False):
+    if getattr(runtime, "_okai_real_mtf_session_guard_v2", False):
         _restore_normal_auto_cutoff()
         return
 
@@ -503,6 +625,7 @@ def apply_real_mtf_session_guard_patch() -> None:
             return _repair_scan(scan, frame, profile or {})
 
         replay._replay_scan = replay_scan_with_real_mtf
+        replay._okai_real_mtf_session_guard_v2 = True
         replay._okai_real_mtf_session_guard_v1 = True
     except Exception:
         pass
@@ -527,8 +650,23 @@ def apply_real_mtf_session_guard_patch() -> None:
             signal.get("safety_gate_reasons") or []
         )[:10]
         data["trade_allowed"] = bool(signal.get("trade_allowed", False))
+        data["strategy_qualified"] = bool(
+            signal.get("strategy_qualified", data["trade_allowed"])
+        )
+        data["entry_window_open"] = bool(
+            signal.get("entry_window_open", True)
+        )
+        data["execution_allowed"] = bool(
+            signal.get("execution_allowed", data["trade_allowed"])
+        )
+        data["execution_block_reason"] = str(
+            signal.get("execution_block_reason") or ""
+        )
         data["signal"] = signal.get("signal", "WAIT")
-        if data["session_counter_trend_blocked"]:
+        if data["execution_block_reason"]:
+            data["entry_status"] = "ENTRY_CLOSED"
+            data["entry_block_reason"] = data["execution_block_reason"]
+        elif data["session_counter_trend_blocked"]:
             data["status"] = "SAFETY_BLOCKED"
             data["entry_status"] = "SAFETY_BLOCKED"
             data["entry_block_reason"] = next(
@@ -542,4 +680,17 @@ def apply_real_mtf_session_guard_patch() -> None:
         return data
 
     runtime._summary = summary_with_real_mtf
+    original_eligible_candidates = runtime._eligible_candidates
+
+    def eligible_candidates_inside_entry_window(scans, blocked_underlyings):
+        candidates = original_eligible_candidates(scans, blocked_underlyings)
+        return [
+            scan
+            for scan in candidates
+            if (scan.get("signal_data") or {}).get("execution_allowed", True)
+            is not False
+        ]
+
+    runtime._eligible_candidates = eligible_candidates_inside_entry_window
+    runtime._okai_real_mtf_session_guard_v2 = True
     runtime._okai_real_mtf_session_guard_v1 = True

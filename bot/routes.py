@@ -1637,9 +1637,14 @@ def _historical_indicator_candles(rows, profile=None):
                 "adx": safe_number(row["ADX"]),
                 "volume_ratio": safe_number(row["VOL_RATIO"]),
                 "vwap_fallback_used": bool(row["VWAP_FALLBACK_USED"]),
+                "volume_available": not bool(row["VWAP_FALLBACK_USED"]),
                 "supertrend_dir": direction,
                 "trend": trend,
-                "mtf_confirmed": trend != "SIDEWAYS",
+                # A one-minute EMA direction is not multi-timeframe
+                # confirmation. The live AUTO guard adds the real completed
+                # five-minute result after replay; chart replay stays
+                # fail-closed instead of awarding a fake 10-point bonus.
+                "mtf_confirmed": False,
                 "c1_bullish": c1_bullish,
                 "c2_bullish": c2_bullish,
                 "gap_day": False,
@@ -1690,10 +1695,25 @@ def _historical_indicator_candles(rows, profile=None):
             "adx": round(safe_number(row["ADX"]), 2),
             "atr": round(safe_number(row["ATR"]), 2),
             "volume_ratio": round(safe_number(row["VOL_RATIO"]), 2),
+            "volume_available": not bool(row["VWAP_FALLBACK_USED"]),
+            "vwap_fallback_used": bool(row["VWAP_FALLBACK_USED"]),
+            "orb_high": round(safe_number(row["ORB_HIGH"]), 2),
+            "orb_low": round(safe_number(row["ORB_LOW"]), 2),
             "score": score,
             "signal": candidate,
             "trade_allowed": bool(signal_data.get("trade_allowed")) if isinstance(signal_data, dict) else False,
             "min_score": int(signal_data.get("min_score", 82)) if isinstance(signal_data, dict) else 82,
+            "base_score": int(signal_data.get("base_score", 0)) if isinstance(signal_data, dict) else None,
+            "adx_bonus": int(signal_data.get("adx_bonus", 0)) if isinstance(signal_data, dict) else None,
+            "volume_bonus": int(signal_data.get("volume_bonus", 0)) if isinstance(signal_data, dict) else None,
+            "mtf_bonus": int(signal_data.get("mtf_bonus", 0)) if isinstance(signal_data, dict) else None,
+            "mtf_confirmed": bool(signal_data.get("mtf_confirmed", False)) if isinstance(signal_data, dict) else False,
+            "pre_normalization_score": int(signal_data.get("pre_normalization_score", score or 0)) if isinstance(signal_data, dict) else None,
+            "availability_adjustment": int(signal_data.get("availability_adjustment", 0)) if isinstance(signal_data, dict) else None,
+            "availability_normalized": bool(signal_data.get("availability_normalized", False)) if isinstance(signal_data, dict) else False,
+            "effective_score_max": int(signal_data.get("effective_score_max", 100)) if isinstance(signal_data, dict) else 100,
+            "configured_score_max": int(signal_data.get("configured_score_max", 100)) if isinstance(signal_data, dict) else 100,
+            "availability_score_mode": str(signal_data.get("availability_score_mode", "STANDARD")) if isinstance(signal_data, dict) else "STANDARD",
             "score_source": "HISTORICAL_REPLAY" if score is not None else None,
             "strategy_profile_key": (
                 active_profile.get("profile_key", "okai_default_82")

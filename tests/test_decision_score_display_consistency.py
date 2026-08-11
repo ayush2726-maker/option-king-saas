@@ -34,8 +34,9 @@ def test_visual_strength_does_not_replace_entry_score():
     assert fixed["score"] == 72
     assert payload["score"] == 72
     assert payload["decision_score"] == 72
-    assert payload["display_score"] == 91
-    assert payload["visual_strength_score"] == 91
+    assert payload["display_score"] == 72
+    assert payload["visual_strength_score"] == 72
+    assert payload["diagnostic_visual_strength_score"] == 91
     assert payload["score_mode"] == SCORE_MODE
 
 

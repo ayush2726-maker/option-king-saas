@@ -6,9 +6,10 @@ Why this exists:
   near 74 and crossed 82 only after the second same-direction candle.
 - That made entries late, often near a local peak/bottom.
 
-This patch keeps the protected entry threshold at 82, treats genuinely missing
-index volume as unavailable (not weak), normalises the remaining score, and
-blocks exhausted/reversing entries using ATR-scaled freshness checks.
+This patch keeps the protected entry threshold at 82 and blocks
+exhausted/reversing entries using ATR-scaled freshness checks. Missing-volume
+normalisation is owned exclusively by ``bot.strategy.calculate_tqu_score`` so
+an already-normalised decision score can never be scaled a second time here.
 
 EMA/VWAP chase protection is owned by the shared strategy anti-chase engine:
 minimum 22/35 index points with ATR-adaptive widening.  Fresh Entry Guard must
@@ -111,18 +112,19 @@ def _apply_fresh_entry_guard(result, market_data, profile):
     )))
 
     volume_ratio = _f(market_data.get("volume_ratio"), 0)
-    vwap_fallback = bool(market_data.get("vwap_fallback_used", False))
-    volume_weight = _volume_weight(profile)
-    volume_unavailable = volume_weight > 0 and volume_ratio <= 0 and vwap_fallback
+    volume_available = bool(
+        output.get(
+            "volume_available",
+            market_data.get("volume_available", volume_ratio > 0),
+        )
+    )
+    availability_normalized = bool(output.get("availability_normalized", False))
 
+    # The strategy core has already converted the attainable 92-point score to
+    # the protected 100-point decision scale. Fresh Entry Guard is a boolean
+    # freshness/safety layer only; rescaling here caused the production
+    # 78 -> 92 double-normalisation defect.
     adjusted_score = raw_score
-    if volume_unavailable:
-        available_max = max(50, 100 - volume_weight)
-        adjusted_score = min(100, int(round(raw_score * 100.0 / available_max)))
-        if adjusted_score != raw_score:
-            warnings.append(
-                f"INDEX_VOLUME_UNAVAILABLE_NORMALIZED:{raw_score}->{adjusted_score}"
-            )
 
     core_count = state["ce_count"] if candidate == "CE" else state["pe_count"] if candidate == "PE" else 0
     atr = max(0.01, _f(market_data.get("atr"), 0.01))
@@ -181,12 +183,16 @@ def _apply_fresh_entry_guard(result, market_data, profile):
     output.update({
         "signal": candidate if trade_allowed else "WAIT",
         "candidate_signal": candidate,
-        "score_before_volume_normalize": raw_score,
+        "score_before_volume_normalize": int(round(_f(
+            output.get("pre_normalization_score", raw_score),
+            raw_score,
+        ))),
         "score": adjusted_score,
         "trade_allowed": trade_allowed,
         "min_score": required,
-        "volume_data_available": not volume_unavailable,
-        "volume_score_normalized": volume_unavailable,
+        "volume_data_available": volume_available,
+        "volume_score_normalized": availability_normalized,
+        "volume_normalization_owner": "TQU_CANONICAL_V1",
         "fresh_entry_ok": fresh_ok,
         "fresh_entry_block_reasons": fresh_block_reasons,
         "core_confirmations": core_count,

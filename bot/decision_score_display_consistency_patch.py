@@ -5,10 +5,10 @@ number for each row.  That number is useful for diagnostics, but it must never
 replace the binary/decision score used by the trading engine.  Otherwise the app
 can show an impossible state such as ``91/82`` together with ``SAFETY_BLOCKED``.
 
-This patch runs after the existing active-strategy and breakdown wrappers.  It
-keeps:
-- ``score`` / ``decision_score`` = the actual entry decision score;
-- ``display_score`` / ``visual_strength_score`` = proportional visual strength.
+This patch runs after the existing active-strategy and breakdown wrappers. Every
+public score field stays on the actual entry decision score. The proportional
+strength number remains available only as
+``diagnostic_visual_strength_score``.
 
 Trading logic, thresholds, order placement, quantity, SL, exits and cooldowns
 are unchanged.
@@ -21,7 +21,7 @@ from typing import Any
 from bot import auto_portfolio_runtime as runtime
 
 
-SCORE_MODE = "DECISION_SCORE_PRIMARY_VISUAL_STRENGTH_SECONDARY"
+SCORE_MODE = "CANONICAL_DECISION_SCORE_PUBLIC_V2"
 
 
 def _i(value: Any, default: int = 0) -> int:
@@ -54,10 +54,13 @@ def _normalise_scan(scan: Any) -> Any:
     )
     visual = _i(
         payload.get(
-            "display_score",
+            "diagnostic_visual_strength_score",
             payload.get(
-                "visual_strength_score",
-                payload.get("component_total", payload.get("score", decision)),
+                "display_score",
+                payload.get(
+                    "visual_strength_score",
+                    payload.get("component_total", payload.get("score", decision)),
+                ),
             ),
         ),
         decision,
@@ -68,23 +71,26 @@ def _normalise_scan(scan: Any) -> Any:
         {
             "score": decision,
             "decision_score": decision,
-            "display_score": visual,
-            "visual_strength_score": visual,
+            "display_score": decision,
+            "visual_strength_score": decision,
+            "diagnostic_visual_strength_score": visual,
             "score_mode": SCORE_MODE,
         }
     )
 
     signal["score"] = decision
     signal["decision_score"] = decision
-    signal["display_score"] = visual
-    signal["visual_strength_score"] = visual
+    signal["display_score"] = decision
+    signal["visual_strength_score"] = decision
+    signal["diagnostic_visual_strength_score"] = visual
     signal["live_score_breakdown"] = fixed_payload
     signal["score_mode"] = SCORE_MODE
 
     scan["score"] = decision
     scan["decision_score"] = decision
-    scan["display_score"] = visual
-    scan["visual_strength_score"] = visual
+    scan["display_score"] = decision
+    scan["visual_strength_score"] = decision
+    scan["diagnostic_visual_strength_score"] = visual
     scan["live_score_breakdown"] = fixed_payload
     scan["score_mode"] = SCORE_MODE
     return scan
@@ -140,7 +146,10 @@ def apply_decision_score_display_consistency_patch() -> None:
             _i(data.get("score"), 0),
         )
         visual = _i(
-            payload.get("display_score", data.get("display_score", decision)),
+            payload.get(
+                "diagnostic_visual_strength_score",
+                payload.get("display_score", data.get("display_score", decision)),
+            ),
             decision,
         )
 
@@ -148,8 +157,9 @@ def apply_decision_score_display_consistency_patch() -> None:
             {
                 "score": decision,
                 "decision_score": decision,
-                "display_score": visual,
-                "visual_strength_score": visual,
+                "display_score": decision,
+                "visual_strength_score": decision,
+                "diagnostic_visual_strength_score": visual,
                 "score_mode": SCORE_MODE,
             }
         )
@@ -181,14 +191,18 @@ def apply_decision_score_display_consistency_patch() -> None:
             _i(state.get("score"), 0),
         )
         visual = _i(
-            payload.get("display_score", state.get("display_score", decision)),
+            payload.get(
+                "diagnostic_visual_strength_score",
+                payload.get("display_score", state.get("display_score", decision)),
+            ),
             decision,
         )
 
         state["score"] = decision
         state["decision_score"] = decision
-        state["display_score"] = visual
-        state["visual_strength_score"] = visual
+        state["display_score"] = decision
+        state["visual_strength_score"] = decision
+        state["diagnostic_visual_strength_score"] = visual
         state["score_mode"] = SCORE_MODE
 
     runtime._build_scan = build_scan_with_decision_score

@@ -8,6 +8,7 @@ from bot.mandatory_trend_structure_patch import (
 )
 from bot.real_mtf_session_guard_patch import (
     _completed_5m_snapshot,
+    _entry_window_state,
     _repair_scan,
     _restore_normal_auto_cutoff,
 )
@@ -120,9 +121,10 @@ def test_bullish_session_blocks_one_minute_pe_pullback():
     repaired = _repair_scan(_scan("PE", 92), frame, {})
     signal = repaired["signal_data"]
 
-    # Remove the old fake 10-point MTF bonus: 92 -> 82.  Even at threshold,
-    # the clear bullish 5m + ORB session bias must block the PE pullback.
-    assert signal["score"] == 82
+    # Recalculate from raw components with real MTF false. Never subtract 10
+    # from an already-normalised replay score (the old 92 -> 82 defect).
+    assert signal["score"] == 61
+    assert signal["canonical_score_recomputed"] is True
     assert signal["mtf_confirmed"] is False
     assert signal["session_bias"] == "CE"
     assert signal["session_counter_trend_blocked"] is True
@@ -136,12 +138,82 @@ def test_matching_ce_keeps_real_mtf_bonus():
     repaired = _repair_scan(_scan("CE", 92), frame, {})
     signal = repaired["signal_data"]
 
-    assert signal["score"] == 92
+    # 55 directional + 14 ADX + 3 volume + 10 real MTF = 82.
+    assert signal["score"] == 82
     assert signal["mtf_confirmed"] is True
     assert signal["session_bias"] == "CE"
     assert signal["session_counter_trend_blocked"] is False
     assert signal["trade_allowed"] is True
     assert signal["signal"] == "CE"
+
+
+def test_screenshot_setup_recalculates_to_67_instead_of_inflated_82(monkeypatch):
+    from bot import real_mtf_session_guard_patch as guard
+
+    market = {
+        "price": 24450.25,
+        "vwap": 24459.12,
+        "ema9": 24450.36,
+        "ema21": 24451.50,
+        "supertrend_dir": "DOWN",
+        "trend": "DOWNTREND",
+        "orb_high": 24576.85,
+        "orb_low": 24478.60,
+        "adx": 10.0,
+        "volume_ratio": 0.0,
+        "volume_available": False,
+        "vwap_fallback_used": True,
+        "mtf_confirmed": True,
+        "c1_bullish": False,
+        "c2_bullish": False,
+        "gap_day": False,
+        "atr": 10.0,
+    }
+    scan = {
+        "underlying": "NIFTY",
+        "status": "OK",
+        "candle_id": "2026-08-11T15:29:00+05:30",
+        "market_data": market,
+        "signal_data": {
+            "signal": "PE",
+            "candidate_signal": "PE",
+            "score": 82,
+            "decision_score": 82,
+            "min_score": 82,
+            "trade_allowed": True,
+            "mtf_confirmed": True,
+            "mtf_bonus": 10,
+            "warnings": ["REPLAY_FIRST_LIVE_SCAN"],
+        },
+        "chart_candles": [
+            {"time": "2026-08-11T15:29:00+05:30", "score": 82}
+        ],
+    }
+    monkeypatch.setattr(
+        guard,
+        "_completed_5m_snapshot",
+        lambda *_args, **_kwargs: {
+            "available": True,
+            "reason": "REAL_5M_OK",
+            "side": "CE",
+            "trend": "UPTREND",
+            "supertrend_dir": "UP",
+            "bar_count": 20,
+            "candle_time": "2026-08-11T15:25:00+05:30",
+        },
+    )
+
+    repaired = guard._repair_scan(scan, frame=None, profile={})
+    signal = repaired["signal_data"]
+
+    assert signal["candidate_signal"] == "PE"
+    assert signal["score"] == 67
+    assert signal["decision_score"] == 67
+    assert signal["pre_normalization_score"] == 62
+    assert signal["availability_adjustment"] == 5
+    assert signal["mtf_bonus"] == 0
+    assert signal["trade_allowed"] is False
+    assert repaired["chart_candles"][-1]["score"] == 67
 
 
 def test_normal_auto_paper_cutoff_is_1445_and_eod_stays_1525():
@@ -157,3 +229,13 @@ def test_normal_auto_paper_cutoff_is_1445_and_eod_stays_1525():
 
     assert paper_cutoff.PAPER_ENTRY_CUTOFF_MINUTE == 14 * 60 + 45
     assert paper_cutoff.PAPER_EOD_MINUTE == 15 * 60 + 25
+
+
+def test_entry_window_status_distinguishes_cutoff_and_market_close():
+    assert _entry_window_state(datetime(2026, 8, 11, 14, 44))["open"] is True
+    assert _entry_window_state(datetime(2026, 8, 11, 14, 45))["reason"] == (
+        "AUTO_ENTRY_CUTOFF_1445_IST"
+    )
+    assert _entry_window_state(datetime(2026, 8, 11, 15, 30))["reason"] == (
+        "MARKET_CLOSED_AFTER_1530_IST"
+    )

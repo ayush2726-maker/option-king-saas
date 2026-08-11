@@ -1,9 +1,8 @@
 """Entry Quality V2.
 
-Fix two causes of weak one-minute entries:
-1. The balanced Default 82 profile gives volume only 5 points, but the older
-   missing-volume normalizer still removed 15 points before scaling. That could
-   inflate a raw 75 score to 88 and qualify a setup with no ORB/momentum trigger.
+Fix weak one-minute entries:
+1. Missing-volume normalisation is calculated once by the strategy core. This
+   guard must never reinterpret or rescale that canonical decision score.
 2. VWAP + Supertrend + EMA describe direction, but a fresh entry also needs an
    actual trigger. Require either ORB breakout or completed two-candle momentum.
 
@@ -97,22 +96,13 @@ def _apply_entry_quality_v2(signal, market, profile):
     ).upper()
     minimum = int(round(_number(output.get("min_score", 82), 82)))
 
-    raw_score = int(round(_number(
-        output.get("score_before_volume_normalize", output.get("score", 0)),
-        0,
-    )))
-    current_score = int(round(_number(output.get("score", raw_score), raw_score)))
+    current_score = int(round(_number(output.get("score", 0), 0)))
 
     volume_weight = _profile_volume_weight(profile)
     volume_unavailable = bool(output.get("volume_score_normalized", False))
-    if volume_unavailable and volume_weight > 0:
-        available_max = max(50, 100 - volume_weight)
-        corrected_score = min(
-            100,
-            int(round(raw_score * 100.0 / available_max)),
-        )
-    else:
-        corrected_score = current_score
+    # ENTRY_QUALITY_V2 owns only the mandatory fresh-trigger check. The score
+    # supplied by the strategy core is already on its final decision scale.
+    corrected_score = current_score
 
     trigger = _trigger_state(candidate, market or {})
     mandatory_passed = bool(
@@ -153,11 +143,6 @@ def _apply_entry_quality_v2(signal, market, profile):
     )
 
     warnings = list(output.get("warnings") or [])
-    correction_note = (
-        f"VOLUME_NORMALIZE_WEIGHT_CORRECTED:{current_score}->{corrected_score}"
-    )
-    if volume_unavailable and current_score != corrected_score:
-        warnings.append(correction_note)
     if not trigger["passed"] and candidate in ("CE", "PE"):
         warnings.append("FRESH_TRIGGER_MISSING:ORB_OR_MOMENTUM")
 
@@ -177,7 +162,10 @@ def _apply_entry_quality_v2(signal, market, profile):
         "fresh_trigger_passed": trigger["passed"],
         "fresh_trigger_required": "ORB_OR_TWO_CANDLE_MOMENTUM",
         "volume_normalization_weight": volume_weight,
-        "volume_normalization_corrected": bool(volume_unavailable),
+        "volume_normalization_corrected": False,
+        "volume_normalization_owner": str(
+            output.get("volume_normalization_owner") or "TQU_CANONICAL_V1"
+        ),
         "entry_quality_version": "ENTRY_QUALITY_V2",
         "entry_timing_mode": "MANDATORY_STRUCTURE_PLUS_FRESH_TRIGGER_V2",
         "warnings": list(dict.fromkeys(warnings)),

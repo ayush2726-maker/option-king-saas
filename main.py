@@ -136,7 +136,7 @@ apply_entry_execution_safety_v1_patch()
 # Final date-aware exit layer: from 03-Aug-2026 close before the 15:15 CAS.
 apply_cas_closing_guard_patch()
 
-RELEASE_VERSION = "volume-availability-normalization-v1"
+RELEASE_VERSION = "canonical-score-real-mtf-v2"
 
 app = FastAPI(
     title="Option King AI — SaaS API",

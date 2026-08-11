@@ -103,20 +103,56 @@ def _persist_scan_scores(state, scans):
             snapshot_key = f"AUTO:{instrument}:{candle_id}"
             existing = conn.execute(
                 """
-                SELECT id FROM signal_history
+                SELECT id, price, score, signal, adx, volume_ratio
+                FROM signal_history
                 WHERE user_id=? AND instrument=? AND engine_updated_at=?
                 LIMIT 1
                 """,
                 (user_id, instrument, snapshot_key),
             ).fetchone()
-            if existing:
-                continue
-
             display_signal = (
                 signal_data.get("signal")
                 if signal_data.get("signal") in ("CE", "PE")
                 else signal_data.get("candidate_signal", "WAIT")
             )
+
+            if existing:
+                # A candle may first be saved while replay is provisional and
+                # then receive its real completed-5m canonical score. Keep one
+                # timeline point per candle, but update that point so Live,
+                # AUTO and Score History never retain different calculations.
+                adx = _safe_float(market_data.get("adx"), 0)
+                volume_ratio = _safe_float(market_data.get("volume_ratio"), 0)
+                display_signal = str(display_signal or "WAIT")
+                unchanged = bool(
+                    _safe_int(existing["score"], 0) == score
+                    and abs(_safe_float(existing["price"], 0) - price) < 1e-6
+                    and str(existing["signal"] or "WAIT") == display_signal
+                    and abs(_safe_float(existing["adx"], 0) - adx) < 1e-6
+                    and abs(
+                        _safe_float(existing["volume_ratio"], 0)
+                        - volume_ratio
+                    ) < 1e-6
+                )
+                if unchanged:
+                    continue
+
+                conn.execute(
+                    """
+                    UPDATE signal_history
+                    SET price=?, score=?, signal=?, adx=?, volume_ratio=?
+                    WHERE id=?
+                    """,
+                    (
+                        price,
+                        score,
+                        display_signal,
+                        adx,
+                        volume_ratio,
+                        existing["id"],
+                    ),
+                )
+                continue
 
             conn.execute(
                 """

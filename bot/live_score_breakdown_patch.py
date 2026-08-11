@@ -255,17 +255,24 @@ def _score_components(market: dict, result: dict, profile: dict | None = None) -
         is_enabled = _b(enabled.get(key), True)
         selected_ok = (candidate == "CE" and ce[key]) or (candidate == "PE" and pe[key])
         visual_value = _directional_display_score(key, market or {}, candidate, max_score)
-        value = visual_value if is_enabled else 0
+        decision_value = max_score if is_enabled and selected_ok else 0
         rows.append(
             {
                 "key": key,
                 "label": LABELS[key],
-                "score": value,
-                "decision_score": max_score if is_enabled and selected_ok else 0,
+                # score is the exact contribution used by the entry engine.
+                # Keep proportional strength separately for diagnostics only.
+                "score": decision_value,
+                "display_score": decision_value,
+                "visual_score": visual_value if is_enabled else 0,
+                "decision_score": decision_value,
                 "max_score": max_score if is_enabled else 0,
                 "enabled": is_enabled,
                 "passed": bool(selected_ok and is_enabled),
-                "partial": bool(is_enabled and 0 < value < max_score),
+                "partial": False,
+                "visual_partial": bool(
+                    is_enabled and 0 < visual_value < max_score
+                ),
                 "direction": _direction(ce[key], pe[key]),
                 "selected_side": candidate,
                 "detail": detail[key],
@@ -290,12 +297,17 @@ def _score_components(market: dict, result: dict, profile: dict | None = None) -
         {
             "key": "adx",
             "label": LABELS["adx"],
-            "score": adx_display,
+            "score": adx_decision,
+            "display_score": adx_decision,
+            "visual_score": adx_display,
             "decision_score": adx_decision,
             "max_score": adx_weight if adx_enabled else 0,
             "enabled": adx_enabled,
             "passed": bool(adx_enabled and adx >= adx_threshold),
-            "partial": bool(adx_enabled and 0 < adx_display < adx_weight),
+            "partial": False,
+            "visual_partial": bool(
+                adx_enabled and 0 < adx_display < adx_weight
+            ),
             "direction": "STRENGTH",
             "selected_side": candidate,
             "detail": f"ADX {adx:.1f} / threshold {adx_threshold:.1f}",
@@ -341,19 +353,33 @@ def _score_components(market: dict, result: dict, profile: dict | None = None) -
         volume_display = _partial(volume_weight, volume_ratio / max(volume_threshold, 0.01))
     volume_decision = _i(result.get("volume_bonus"), 0)
     if volume_enabled and not volume_available and volume_decision <= 0:
-        volume_decision = _partial(volume_weight, 0.50)
+        is_protected_default = str(
+            result.get("strategy_profile_key")
+            or profile.get("profile_key")
+            or "okai_default_82"
+        ) == "okai_default_82"
+        volume_decision = min(
+            volume_weight,
+            (
+                getattr(strategy_module, "VOLUME_NEUTRAL_BONUS", 7)
+                if is_protected_default
+                else _partial(volume_weight, 0.50)
+            ),
+        )
     rows.append(
         {
             "key": "volume",
             "label": LABELS["volume"],
-            "score": volume_display,
+            "score": volume_decision if volume_enabled else 0,
+            "display_score": volume_decision if volume_enabled else 0,
+            "visual_score": volume_display,
             "decision_score": volume_decision if volume_enabled else 0,
             "max_score": effective_volume_weight if volume_enabled else 0,
             "enabled": volume_enabled,
             "passed": bool(volume_enabled and (not volume_available or volume_ratio >= volume_threshold)),
-            "partial": bool(
-                volume_enabled
-                and 0 < volume_display < effective_volume_weight
+            "partial": False,
+            "visual_partial": bool(
+                volume_enabled and 0 < volume_display < effective_volume_weight
             ),
             "direction": "CONFIRM",
             "selected_side": candidate,
@@ -402,6 +428,8 @@ def _score_components(market: dict, result: dict, profile: dict | None = None) -
                 "key": "availability_normalization",
                 "label": LABELS["availability_normalization"],
                 "score": adjustment,
+                "display_score": adjustment,
+                "visual_score": adjustment,
                 "decision_score": adjustment,
                 "max_score": adjustment_max,
                 "enabled": True,
@@ -427,7 +455,9 @@ def _score_components(market: dict, result: dict, profile: dict | None = None) -
         {
             "key": "mtf",
             "label": LABELS["mtf"],
-            "score": mtf_display,
+            "score": mtf_decision if mtf_enabled else 0,
+            "display_score": mtf_decision if mtf_enabled else 0,
+            "visual_score": mtf_display,
             "decision_score": mtf_decision if mtf_enabled else 0,
             "max_score": mtf_weight if mtf_enabled else 0,
             "enabled": mtf_enabled,
@@ -448,24 +478,36 @@ def _score_payload(market: dict, result: dict, profile: dict | None = None) -> d
     weights = _weights(profile, result)
     enabled = _enabled(profile, result)
     components = _score_components(market or {}, result, {"weights": weights, "enabled": enabled, **profile})
-    display_total = sum(_i(item.get("score"), 0) for item in components)
+    component_total = sum(_i(item.get("score"), 0) for item in components)
+    visual_total = sum(
+        _i(item.get("visual_score", item.get("score")), 0)
+        for item in components
+    )
     decision_component_total = sum(_i(item.get("decision_score"), 0) for item in components)
     raw_total = sum(_i(item.get("max_score"), 0) for item in components if _b(item.get("enabled"), True))
     final_score = _i(result.get("score"), decision_component_total)
     min_score = _i(result.get("min_score", result.get("min_score_required", 82)), 82)
     return {
-        "score": display_total,
-        "display_score": display_total,
+        "score": final_score,
+        "display_score": final_score,
         "decision_score": final_score,
-        "component_total": display_total,
+        "component_total": component_total,
         "decision_component_total": decision_component_total,
+        # Public score fields stay canonical. The proportional diagnostic is
+        # explicitly separated so no screen can mistake it for entry quality.
+        "visual_strength_score": final_score,
+        "diagnostic_visual_strength_score": visual_total,
+        "component_score_matches_decision": bool(
+            component_total == final_score
+            and decision_component_total == final_score
+        ),
         "enabled_weight_total": raw_total,
         "min_score": min_score,
         "candidate_signal": str(result.get("candidate_signal") or result.get("signal") or "WAIT"),
         "trade_allowed": _b(result.get("trade_allowed"), False),
         "components": components,
         "warnings": list(result.get("warnings", []) or [])[:8],
-        "score_mode": "ACTIVE_PROFILE_PARTIAL_DISPLAY_DECISION_UNCHANGED",
+        "score_mode": "CANONICAL_DECISION_COMPONENTS_V1",
         "availability_normalized": _b(
             result.get("availability_normalized"),
             False,

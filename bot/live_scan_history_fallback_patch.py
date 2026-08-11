@@ -321,28 +321,18 @@ def _replay_scan(user_id, underlying, frame, profile, source, notes):
     latest_index = chart_candles.index(latest)
     previous = chart_candles[max(0, latest_index - 1)]
 
-    candidate = str(latest.get("signal") or "WAIT").upper()
-    allowed = bool(latest.get("trade_allowed", False))
-    final_signal = candidate if allowed and candidate in ("CE", "PE") else "WAIT"
     ema9 = _safe_number(latest.get("ema9"), latest.get("close"))
     ema21 = _safe_number(latest.get("ema21"), latest.get("close"))
     trend = "UPTREND" if ema9 > ema21 else "DOWNTREND" if ema9 < ema21 else "SIDEWAYS"
 
-    signal_data = {
-        "signal": final_signal,
-        "candidate_signal": candidate,
-        "score": _safe_int(latest.get("score"), 0),
-        "base_score": _safe_int(latest.get("score"), 0),
-        "min_score": _safe_int(latest.get("min_score"), profile.get("entry_threshold", 82)),
-        "trade_allowed": allowed,
-        "adx": _safe_number(latest.get("adx"), 0),
-        "volume_ratio": _safe_number(latest.get("volume_ratio"), 0),
-        "mtf_confirmed": trend != "SIDEWAYS",
-        "warnings": ["REPLAY_FIRST_LIVE_SCAN"],
-        "strategy": "CUSTOM_PROFILE_V1" if profile.get("profile_key") != "okai_default_82" else "TQU_ENHANCED",
-        "strategy_profile_key": profile.get("profile_key"),
-        "strategy_profile_name": profile.get("profile_name"),
-    }
+    vwap_fallback_used = bool(latest.get("vwap_fallback_used", False))
+    volume_ratio = _safe_number(latest.get("volume_ratio"), 0)
+    volume_available = bool(
+        latest.get(
+            "volume_available",
+            volume_ratio > 0 and not vwap_fallback_used,
+        )
+    )
 
     market_data = {
         "price": _safe_number(latest.get("close"), 0),
@@ -350,21 +340,80 @@ def _replay_scan(user_id, underlying, frame, profile, source, notes):
         "ema9": ema9,
         "ema21": ema21,
         "adx": _safe_number(latest.get("adx"), 0),
-        "volume_ratio": _safe_number(latest.get("volume_ratio"), 0),
-        "vwap_fallback_used": False,
+        "volume_ratio": volume_ratio,
+        "volume_available": volume_available,
+        "vwap_fallback_used": vwap_fallback_used,
         "supertrend_dir": str(latest.get("supertrend_dir") or "NEUTRAL"),
         "trend": trend,
-        "mtf_confirmed": trend != "SIDEWAYS",
+        # Replay cannot award MTF from this same one-minute trend. The final
+        # real-MTF wrapper computes completed five-minute confirmation and then
+        # runs the canonical strategy once with that value.
+        "mtf_confirmed": False,
+        "mtf_source": "PENDING_REAL_COMPLETED_5M",
         "c1_bullish": _safe_number(previous.get("close")) > _safe_number(previous.get("open")),
         "c2_bullish": _safe_number(latest.get("close")) > _safe_number(latest.get("open")),
         "gap_day": False,
-        "orb_high": 0.0,
-        "orb_low": 0.0,
+        "orb_high": _safe_number(latest.get("orb_high"), 0),
+        "orb_low": _safe_number(latest.get("orb_low"), 0),
         "atr": _safe_number(latest.get("atr"), 0),
-        "signal": final_signal,
-        "signal_score": signal_data["score"],
-        "signal_min_score": signal_data["min_score"],
     }
+
+    try:
+        from bot import strategy as strategy_module
+
+        signal_data = strategy_module.get_full_signal(
+            market_data,
+            consecutive_losses=0,
+            profile=profile,
+        )
+        if not isinstance(signal_data, dict):
+            raise RuntimeError("CANONICAL_REPLAY_SIGNAL_INVALID")
+        signal_data = dict(signal_data)
+    except Exception:
+        # Fail closed if the canonical calculation is temporarily unavailable.
+        signal_data = {
+            "signal": "WAIT",
+            "candidate_signal": str(latest.get("signal") or "WAIT").upper(),
+            "score": _safe_int(latest.get("score"), 0),
+            "base_score": _safe_int(latest.get("base_score"), 0),
+            "min_score": _safe_int(
+                latest.get("min_score"),
+                profile.get("entry_threshold", 82),
+            ),
+            "trade_allowed": False,
+            "adx": _safe_number(latest.get("adx"), 0),
+            "volume_ratio": volume_ratio,
+            "volume_available": volume_available,
+            "mtf_confirmed": False,
+        }
+
+    warnings = list(signal_data.get("warnings") or [])
+    warnings.append("REPLAY_FIRST_LIVE_SCAN")
+    signal_data["warnings"] = list(dict.fromkeys(warnings))
+    signal_data.setdefault(
+        "strategy",
+        "CUSTOM_PROFILE_V1"
+        if profile.get("profile_key") != "okai_default_82"
+        else "TQU_ENHANCED",
+    )
+    signal_data.setdefault("strategy_profile_key", profile.get("profile_key"))
+    signal_data.setdefault("strategy_profile_name", profile.get("profile_name"))
+    signal_data["replay_provisional_mtf"] = True
+
+    candidate = str(
+        signal_data.get("candidate_signal")
+        or signal_data.get("signal")
+        or "WAIT"
+    ).upper()
+    allowed = bool(signal_data.get("trade_allowed", False))
+    final_signal = candidate if allowed and candidate in ("CE", "PE") else "WAIT"
+    signal_data["signal"] = final_signal
+    market_data["signal"] = final_signal
+    market_data["signal_score"] = _safe_int(signal_data.get("score"), 0)
+    market_data["signal_min_score"] = _safe_int(
+        signal_data.get("min_score"),
+        profile.get("entry_threshold", 82),
+    )
 
     return {
         "underlying": underlying,
