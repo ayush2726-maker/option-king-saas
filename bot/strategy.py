@@ -10,6 +10,8 @@ from datetime import datetime, timezone, timedelta
 WEIGHTED_MIN_ENTRY_SCORE = 82      # NEVER CHANGE
 ADX_THRESHOLD = 25.0
 VOLUME_RATIO_THRESHOLD = 1.2
+TQU_SCORE_MAX = 100
+VOLUME_MAX_BONUS = 15
 VOLUME_NEUTRAL_BONUS = 7  # half-weight when index volume is unavailable
 SIDEWAYS_THRESHOLD = 70
 LOSS_COOLDOWN_SECONDS = 15 * 60   # 15 min
@@ -62,7 +64,10 @@ def calculate_tqu_score(
         warnings.append("VOLUME_UNAVAILABLE_NEUTRAL")
     elif volume_ratio > 0:
         if volume_ratio >= VOLUME_RATIO_THRESHOLD:
-            volume_bonus = min(15, int((volume_ratio - 1.0) * 10))
+            volume_bonus = min(
+                VOLUME_MAX_BONUS,
+                int((volume_ratio - 1.0) * 10),
+            )
             score += volume_bonus
         else:
             warnings.append(f"VOLUME_LOW:{volume_ratio:.2f}x")
@@ -79,10 +84,62 @@ def calculate_tqu_score(
         regime_score -= 5
         warnings.append("GAP_DAY_CAUTION")
 
-    final_score = min(100, max(0, int(score)))
+    pre_normalization_score = min(
+        TQU_SCORE_MAX,
+        max(0, int(score)),
+    )
+    effective_score_max = TQU_SCORE_MAX
+    availability_adjustment = 0
+    availability_normalized = False
+
+    # Spot-index candles from the broker legitimately carry no volume.  In
+    # that case the locked 15-point volume confirmation cannot ever be earned.
+    # Compare the setup on the same 100-point quality scale by normalizing the
+    # attainable 92-point score (7 neutral volume points) back to 100.  This
+    # keeps the protected 82 entry threshold and every independent safety gate
+    # unchanged; it only removes the structural missing-data penalty.
+    if not volume_available:
+        effective_score_max = (
+            TQU_SCORE_MAX
+            - VOLUME_MAX_BONUS
+            + VOLUME_NEUTRAL_BONUS
+        )
+        normalized_score = int(
+            round(
+                pre_normalization_score
+                * TQU_SCORE_MAX
+                / max(1, effective_score_max)
+            )
+        )
+        final_score = min(
+            TQU_SCORE_MAX,
+            max(0, normalized_score),
+        )
+        availability_adjustment = max(
+            0,
+            final_score - pre_normalization_score,
+        )
+        availability_normalized = True
+        warnings.append(
+            "VOLUME_AVAILABILITY_NORMALIZED:"
+            f"{pre_normalization_score}/{effective_score_max}"
+            f"->{final_score}/{TQU_SCORE_MAX}"
+        )
+    else:
+        final_score = pre_normalization_score
 
     return {
         "score": final_score,
+        "pre_normalization_score": pre_normalization_score,
+        "availability_adjustment": availability_adjustment,
+        "availability_normalized": availability_normalized,
+        "effective_score_max": effective_score_max,
+        "configured_score_max": TQU_SCORE_MAX,
+        "availability_score_mode": (
+            "VOLUME_AVAILABILITY_NORMALIZED_V1"
+            if availability_normalized
+            else "STANDARD"
+        ),
         "base_score": int(base_score),
         "adx_bonus": adx_bonus,
         "volume_bonus": volume_bonus,
@@ -850,6 +907,24 @@ def get_full_signal(
         "volume_ratio": volume_ratio,
         "volume_available": bool(volume_available),
         "volume_bonus": tqu["volume_bonus"],
+        "pre_normalization_score": tqu[
+            "pre_normalization_score"
+        ],
+        "availability_adjustment": tqu[
+            "availability_adjustment"
+        ],
+        "availability_normalized": tqu[
+            "availability_normalized"
+        ],
+        "effective_score_max": tqu[
+            "effective_score_max"
+        ],
+        "configured_score_max": tqu[
+            "configured_score_max"
+        ],
+        "availability_score_mode": tqu[
+            "availability_score_mode"
+        ],
         "mtf_confirmed": mtf_ok,
         "mtf_bonus": tqu["mtf_bonus"],
         "regime_score": tqu["regime_score"],

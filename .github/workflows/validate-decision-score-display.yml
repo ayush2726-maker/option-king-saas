@@ -4,8 +4,11 @@ on:
   pull_request:
     paths:
       - "bot/decision_score_display_consistency_patch.py"
+      - "bot/live_score_breakdown_patch.py"
+      - "bot/strategy.py"
       - "main.py"
       - "tests/test_decision_score_display_consistency.py"
+      - "tests/test_volume_availability_normalization.py"
       - ".github/workflows/validate-decision-score-display.yml"
 
 jobs:
@@ -25,8 +28,8 @@ jobs:
           pip install pytest
       - name: Compile score consistency code
         run: |
-          python -m py_compile bot/decision_score_display_consistency_patch.py main.py
+          python -m py_compile bot/strategy.py bot/live_score_breakdown_patch.py bot/decision_score_display_consistency_patch.py main.py
       - name: Run decision/display regression tests
-        run: pytest -q tests/test_decision_score_display_consistency.py
+        run: pytest -q tests/test_decision_score_display_consistency.py tests/test_volume_availability_normalization.py
       - name: Import complete FastAPI application
         run: python -c "import main; print(main.RELEASE_VERSION)"

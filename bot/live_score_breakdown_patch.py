@@ -24,6 +24,7 @@ LABELS = {
     "momentum": "2-Candle Momentum",
     "adx": "ADX Strength",
     "volume": "Volume Confirmation",
+    "availability_normalization": "Data Availability Normalization",
     "mtf": "Trend / MTF Confirmation",
 }
 
@@ -279,7 +280,12 @@ def _score_components(market: dict, result: dict, profile: dict | None = None) -
     adx_enabled = _b(enabled.get("adx"), True)
     adx_weight = _i(weights.get("adx"), 0)
     adx_display = _partial(adx_weight, adx / max(adx_threshold, 1.0)) if adx_enabled else 0
-    adx_decision = adx_weight if adx_enabled and adx >= adx_threshold else 0
+    adx_decision = _i(
+        result.get("adx_bonus"),
+        adx_weight if adx_enabled and adx >= adx_threshold else 0,
+    )
+    if not adx_enabled:
+        adx_decision = 0
     rows.append(
         {
             "key": "adx",
@@ -307,10 +313,30 @@ def _score_components(market: dict, result: dict, profile: dict | None = None) -
     )
     volume_enabled = _b(enabled.get("volume"), True)
     volume_weight = _i(weights.get("volume"), 0)
+    availability_normalized = _b(
+        result.get("availability_normalized"),
+        False,
+    )
+    effective_volume_weight = volume_weight
+    if availability_normalized and not volume_available:
+        effective_volume_weight = min(
+            volume_weight,
+            max(
+                0,
+                _i(
+                    result.get("volume_bonus"),
+                    getattr(strategy_module, "VOLUME_NEUTRAL_BONUS", 7),
+                ),
+            ),
+        )
     if not volume_enabled:
         volume_display = 0
     elif not volume_available:
-        volume_display = _partial(volume_weight, 0.50)
+        volume_display = (
+            effective_volume_weight
+            if availability_normalized
+            else _partial(volume_weight, 0.50)
+        )
     else:
         volume_display = _partial(volume_weight, volume_ratio / max(volume_threshold, 0.01))
     volume_decision = _i(result.get("volume_bonus"), 0)
@@ -322,19 +348,75 @@ def _score_components(market: dict, result: dict, profile: dict | None = None) -
             "label": LABELS["volume"],
             "score": volume_display,
             "decision_score": volume_decision if volume_enabled else 0,
-            "max_score": volume_weight if volume_enabled else 0,
+            "max_score": effective_volume_weight if volume_enabled else 0,
             "enabled": volume_enabled,
             "passed": bool(volume_enabled and (not volume_available or volume_ratio >= volume_threshold)),
-            "partial": bool(volume_enabled and 0 < volume_display < volume_weight),
+            "partial": bool(
+                volume_enabled
+                and 0 < volume_display < effective_volume_weight
+            ),
             "direction": "CONFIRM",
             "selected_side": candidate,
             "detail": (
-                "Volume unavailable: 50% neutral display score"
+                (
+                    "Index volume unavailable: neutral 7-point contribution"
+                    if availability_normalized
+                    else "Volume unavailable: 50% neutral display score"
+                )
                 if not volume_available
                 else f"Volume {volume_ratio:.2f}x / threshold {volume_threshold:.2f}x"
             ),
+            "preserve_backend_scale": bool(
+                availability_normalized and not volume_available
+            ),
         }
     )
+
+    if availability_normalized:
+        configured_score_max = _i(
+            result.get("configured_score_max"),
+            getattr(strategy_module, "TQU_SCORE_MAX", 100),
+        )
+        effective_score_max = _i(
+            result.get("effective_score_max"),
+            configured_score_max,
+        )
+        adjustment_max = max(
+            0,
+            configured_score_max - effective_score_max,
+        )
+        adjustment = min(
+            adjustment_max,
+            max(0, _i(result.get("availability_adjustment"), 0)),
+        )
+        pre_normalization_score = _i(
+            result.get("pre_normalization_score"),
+            _i(result.get("score"), 0) - adjustment,
+        )
+        normalized_score = _i(
+            result.get("score"),
+            pre_normalization_score + adjustment,
+        )
+        rows.append(
+            {
+                "key": "availability_normalization",
+                "label": LABELS["availability_normalization"],
+                "score": adjustment,
+                "decision_score": adjustment,
+                "max_score": adjustment_max,
+                "enabled": True,
+                "passed": adjustment > 0,
+                "partial": bool(0 < adjustment < adjustment_max),
+                "direction": "NORMALIZE",
+                "selected_side": candidate,
+                "detail": (
+                    "Index volume unavailable; quality score normalized "
+                    f"{pre_normalization_score}/{effective_score_max} to "
+                    f"{normalized_score}/{configured_score_max}"
+                ),
+                "preserve_backend_scale": True,
+            }
+        )
 
     mtf_enabled = _b(enabled.get("mtf"), True)
     mtf_ok = _b(result.get("mtf_confirmed", (market or {}).get("mtf_confirmed", False)), False)
@@ -384,6 +466,29 @@ def _score_payload(market: dict, result: dict, profile: dict | None = None) -> d
         "components": components,
         "warnings": list(result.get("warnings", []) or [])[:8],
         "score_mode": "ACTIVE_PROFILE_PARTIAL_DISPLAY_DECISION_UNCHANGED",
+        "availability_normalized": _b(
+            result.get("availability_normalized"),
+            False,
+        ),
+        "availability_adjustment": _i(
+            result.get("availability_adjustment"),
+            0,
+        ),
+        "pre_normalization_score": _i(
+            result.get("pre_normalization_score"),
+            final_score,
+        ),
+        "effective_score_max": _i(
+            result.get("effective_score_max"),
+            getattr(strategy_module, "TQU_SCORE_MAX", 100),
+        ),
+        "configured_score_max": _i(
+            result.get("configured_score_max"),
+            getattr(strategy_module, "TQU_SCORE_MAX", 100),
+        ),
+        "availability_score_mode": str(
+            result.get("availability_score_mode") or "STANDARD"
+        ),
         "profile_weights": weights,
         "profile_enabled": enabled,
     }
