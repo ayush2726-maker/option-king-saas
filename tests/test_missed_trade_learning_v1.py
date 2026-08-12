@@ -207,7 +207,7 @@ def test_exact_cost_adjusted_outcomes_feed_existing_ai_dataset(monkeypatch, tmp_
         "pe": {
             "side": "PE", "strike": 24300, "symbol": "NIFTYPE",
             "token": "PE", "exchange": "NSE_FO", "ltp": 11,
-            "ask": 11, "lot_size": 25,
+            "ask": 11, "lot_size": 25, "expiry": "2026-08-25",
         },
     }
     payload = {
@@ -262,6 +262,13 @@ def test_exact_cost_adjusted_outcomes_feed_existing_ai_dataset(monkeypatch, tmp_
     assert primary["candidate_side"] == "PE"
     assert primary["candidate_net_pnl"] > 0
     assert primary["verdict"] == "MISSED_PROFIT"
+    missed_setup = report["recent_missed_setups"][0]
+    assert missed_setup["candidate_contract"]["symbol"] == "NIFTYPE"
+    assert missed_setup["candidate_contract"]["strike"] == 24300
+    assert missed_setup["candidate_contract"]["side"] == "PE"
+    assert missed_setup["candidate_contract"]["expiry"] == "2026-08-25"
+    assert missed_setup["candidate_entry_price"] == 11
+    assert missed_setup["candidate_lot_size"] == 25
 
     conn = get_db()
     snapshot = conn.execute(

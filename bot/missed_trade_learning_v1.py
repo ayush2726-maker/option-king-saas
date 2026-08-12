@@ -1002,14 +1002,42 @@ def _outcome_view(row: Mapping[str, Any], candidate_side: str) -> Dict[str, Any]
     return item
 
 
+def _contract_view(raw: Mapping[str, Any]) -> Dict[str, Any]:
+    contract = dict(raw or {})
+    symbol = str(
+        contract.get("symbol")
+        or contract.get("trading_symbol")
+        or contract.get("tradingsymbol")
+        or ""
+    )
+    token = str(contract.get("token") or contract.get("instrument_key") or "")
+    return {
+        "symbol": symbol,
+        "token": token,
+        "instrument_key": str(contract.get("instrument_key") or token),
+        "exchange": str(contract.get("exchange") or ""),
+        "side": str(contract.get("side") or "").upper(),
+        "strike": _f(contract.get("strike")),
+        "expiry": str(contract.get("expiry") or ""),
+        "lot_size": max(1, _i(contract.get("lot_size"), 1)),
+        "ltp": _f(contract.get("ltp")),
+        "bid": _f(contract.get("bid")),
+        "ask": _f(contract.get("ask")),
+    }
+
+
 def get_missed_trade_summary(user_id: int, recent_limit: int = 20) -> Dict[str, Any]:
     ensure_missed_trade_schema()
     limit = max(1, min(_i(recent_limit, 20), 50))
     conn = get_db()
     try:
         rows = conn.execute(
-            """SELECT * FROM ai_missed_trade_signals_v1
-            WHERE user_id=? ORDER BY datetime(created_at) DESC,rowid DESC LIMIT ?""",
+            """SELECT m.*,s.ce_contract_json AS snapshot_ce_contract_json,
+            s.pe_contract_json AS snapshot_pe_contract_json
+            FROM ai_missed_trade_signals_v1 m
+            LEFT JOIN ai_advanced_v2_snapshots s ON s.id=m.advanced_decision_id
+            WHERE m.user_id=?
+            ORDER BY datetime(m.created_at) DESC,m.rowid DESC LIMIT ?""",
             (int(user_id), limit),
         ).fetchall()
         all_rows = conn.execute(
@@ -1031,12 +1059,23 @@ def get_missed_trade_summary(user_id: int, recent_limit: int = 20) -> Dict[str, 
             item["market"] = _loads(item.pop("market_json"), {})
             item["signal_snapshot"] = _loads(item.pop("signal_json"), {})
             outcome_rows = []
+            candidate_contract = {}
             if item.get("advanced_decision_id"):
+                contract_column = (
+                    "snapshot_ce_contract_json"
+                    if str(item.get("candidate_side") or "").upper() == "CE"
+                    else "snapshot_pe_contract_json"
+                )
+                candidate_contract = _contract_view(
+                    _loads(item.get(contract_column), {})
+                )
                 outcome_rows = conn.execute(
                     """SELECT * FROM ai_advanced_v2_contract_outcomes
                     WHERE decision_id=? ORDER BY horizon_minutes""",
                     (item["advanced_decision_id"],),
                 ).fetchall()
+            item.pop("snapshot_ce_contract_json", None)
+            item.pop("snapshot_pe_contract_json", None)
             item["outcomes"] = [
                 _outcome_view(dict(outcome), str(item["candidate_side"]))
                 for outcome in outcome_rows
@@ -1048,6 +1087,23 @@ def get_missed_trade_summary(user_id: int, recent_limit: int = 20) -> Dict[str, 
                     if _i(outcome.get("horizon_minutes")) == PRIMARY_HORIZON
                 ),
                 item["outcomes"][-1] if item["outcomes"] else None,
+            )
+            primary_details = dict((item["primary_outcome"] or {}).get("details") or {})
+            side_details = dict(
+                primary_details.get(str(item.get("candidate_side") or "").lower()) or {}
+            )
+            candidate_entry_price = _f(
+                side_details.get("entry_price"),
+                candidate_contract.get("ask") or candidate_contract.get("ltp"),
+            )
+            item["candidate_contract"] = candidate_contract
+            item["candidate_entry_price"] = round(candidate_entry_price, 2)
+            item["candidate_lot_size"] = max(
+                1,
+                _i(
+                    side_details.get("quantity"),
+                    candidate_contract.get("lot_size") or 1,
+                ),
             )
             item["learning_eligible"] = bool(item.get("learning_eligible"))
             item["trade_allowed"] = bool(item.get("trade_allowed"))
