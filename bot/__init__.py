@@ -143,6 +143,17 @@ try:
 except Exception:
     pass
 
+# V3 keeps AI shadow-only but makes learning richer: regime/context interaction
+# features, news/option/base agreement and conflict, volatility/liquidity context,
+# plus chronological inner-validation hyperparameter selection.  Missed-profit
+# and avoided-loss outcomes already flow into the same training dataset.
+try:
+    from bot.adaptive_learning_v3_patch import apply_adaptive_learning_v3_patch
+
+    apply_adaptive_learning_v3_patch()
+except Exception:
+    pass
+
 # Do not let two losses in any instruments freeze every otherwise-qualified
 # setup for 15 minutes. Keep the safer same-index + same-side cooldown intact so
 # an exited losing trade is not immediately reopened in the same direction.
