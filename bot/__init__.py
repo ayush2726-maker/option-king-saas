@@ -165,6 +165,15 @@ try:
 except Exception:
     pass
 
+# If another startup patch imported Advanced AI earlier, rebind its local
+# feature_vector reference to the final V3 builder.
+try:
+    from bot.adaptive_runtime_binding_v3 import apply_adaptive_runtime_binding_v3
+
+    apply_adaptive_runtime_binding_v3()
+except Exception:
+    pass
+
 # Do not let two losses in any instruments freeze every otherwise-qualified
 # setup for 15 minutes. Keep the safer same-index + same-side cooldown intact so
 # an exited losing trade is not immediately reopened in the same direction.
