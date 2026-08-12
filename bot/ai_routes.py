@@ -284,7 +284,10 @@ def get_ai_model_status(authorization: str = Header(None)):
 @router.get("/bot/ai-missed-trades")
 def get_ai_missed_trades(authorization: str = Header(None), recent_limit: int = 20):
     user = get_current_user(authorization)
-    return get_missed_trade_summary(user["id"], recent_limit=recent_limit)
+    # The mobile UI previously requested recent_limit=5, which hid older missed
+    # setups even though they were already captured in the database. Always
+    # return at least 20 so the report can show more than five entries.
+    return get_missed_trade_summary(user["id"], recent_limit=max(20, recent_limit))
 
 
 @router.get("/bot/ai-broker-capabilities")
