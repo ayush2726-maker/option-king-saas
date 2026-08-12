@@ -145,12 +145,23 @@ except Exception:
 
 # V3 keeps AI shadow-only but makes learning richer: regime/context interaction
 # features, news/option/base agreement and conflict, volatility/liquidity context,
-# plus chronological inner-validation hyperparameter selection.  Missed-profit
+# plus chronological inner-validation hyperparameter selection. Missed-profit
 # and avoided-loss outcomes already flow into the same training dataset.
 try:
     from bot.adaptive_learning_v3_patch import apply_adaptive_learning_v3_patch
 
     apply_adaptive_learning_v3_patch()
+except Exception:
+    pass
+
+# Teach new snapshots the actual option premium/Greeks context available at the
+# decision instant. This remains leakage-safe and shadow-only.
+try:
+    from bot.option_premium_learning_v3_patch import (
+        apply_option_premium_learning_v3_patch,
+    )
+
+    apply_option_premium_learning_v3_patch()
 except Exception:
     pass
 
