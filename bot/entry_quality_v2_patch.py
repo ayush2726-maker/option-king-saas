@@ -3,8 +3,9 @@
 Fix weak one-minute entries:
 1. Missing-volume normalisation is calculated once by the strategy core. This
    guard must never reinterpret or rescale that canonical decision score.
-2. VWAP + Supertrend + EMA describe direction, but a fresh entry also needs an
-   actual trigger. Require either ORB breakout or completed two-candle momentum.
+2. VWAP + Supertrend + EMA describe the mandatory direction. ORB breakout and
+   completed two-candle momentum remain visible quality diagnostics, but are no
+   longer a second hard gate after the protected 82-point setup qualifies.
 
 The protected score remains 82. Existing mandatory structure, reversal,
 anti-chase, sideways and option-premium safeguards remain active.
@@ -79,6 +80,11 @@ def _clean_existing_reasons(reasons, candidate):
             continue
         if text == "NO_DIRECTIONAL_SIGNAL" and candidate in ("CE", "PE"):
             continue
+        if text in {
+            "EMA_EXTENSION_OVER_0.95_ATR",
+            "ORB_OR_MOMENTUM_TRIGGER_REQUIRED",
+        }:
+            continue
         if text not in cleaned:
             cleaned.append(text)
     return cleaned
@@ -122,15 +128,6 @@ def _apply_entry_quality_v2(signal, market, profile):
         safety_reasons.append("NO_DIRECTIONAL_SIGNAL")
     if corrected_score < minimum:
         safety_reasons.append(f"SCORE_BELOW_{minimum}")
-    if (
-        candidate in ("CE", "PE")
-        and corrected_score >= minimum
-        and mandatory_passed
-        and not trigger["passed"]
-    ):
-        safety_reasons.append("ORB_OR_MOMENTUM_TRIGGER_REQUIRED")
-        fresh_reasons.append("ORB_OR_MOMENTUM_TRIGGER_REQUIRED")
-
     safety_reasons = list(dict.fromkeys(safety_reasons))
     fresh_reasons = list(dict.fromkeys(fresh_reasons))
 
@@ -138,13 +135,18 @@ def _apply_entry_quality_v2(signal, market, profile):
         candidate in ("CE", "PE")
         and corrected_score >= minimum
         and mandatory_passed
-        and trigger["passed"]
         and not safety_reasons
     )
 
-    warnings = list(output.get("warnings") or [])
-    if not trigger["passed"] and candidate in ("CE", "PE"):
-        warnings.append("FRESH_TRIGGER_MISSING:ORB_OR_MOMENTUM")
+    warnings = [
+        warning
+        for warning in (output.get("warnings") or [])
+        if (
+            str(warning or "") != "FRESH_TRIGGER_MISSING:ORB_OR_MOMENTUM"
+            and "ORB_OR_MOMENTUM_TRIGGER_REQUIRED" not in str(warning or "")
+            and "EMA_EXTENSION_OVER_0.95_ATR" not in str(warning or "")
+        )
+    ]
 
     output.update({
         "score": corrected_score,
@@ -160,14 +162,15 @@ def _apply_entry_quality_v2(signal, market, profile):
             "two_candle_momentum": trigger["momentum"],
         },
         "fresh_trigger_passed": trigger["passed"],
-        "fresh_trigger_required": "ORB_OR_TWO_CANDLE_MOMENTUM",
+        "fresh_trigger_required": "INFORMATIONAL_ONLY",
+        "fresh_trigger_is_blocking": False,
         "volume_normalization_weight": volume_weight,
         "volume_normalization_corrected": False,
         "volume_normalization_owner": str(
             output.get("volume_normalization_owner") or "TQU_CANONICAL_V1"
         ),
-        "entry_quality_version": "ENTRY_QUALITY_V2",
-        "entry_timing_mode": "MANDATORY_STRUCTURE_PLUS_FRESH_TRIGGER_V2",
+        "entry_quality_version": "ENTRY_QUALITY_V3_TRIGGER_OPTIONAL",
+        "entry_timing_mode": "MANDATORY_STRUCTURE_TRIGGER_INFORMATIONAL_V3",
         "warnings": list(dict.fromkeys(warnings)),
     })
     return output

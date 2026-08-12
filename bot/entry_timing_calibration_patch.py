@@ -5,12 +5,14 @@ while price is already too far from EMA/VWAP and the option premium is near the
 end of its move. The June regression appeared after the older fresh-distance
 gate was removed, allowing repeated late 100-score entries.
 
-This final pipeline guard restores the previously profitable timing limits:
-- EMA distance <= 0.95 spot ATR
-- VWAP distance <= 2.20 spot ATR when real VWAP is available
+EMA distance is retained as telemetry only.  The legacy fixed 0.95 ATR EMA
+gate duplicated the shared point + ATR-adaptive anti-chase engine and caused
+qualified directional setups to be missed.  Real-VWAP distance remains a hard
+timing limit when a non-fallback VWAP is available.
 
-The shared point/ATR anti-chase, mandatory structure, fresh trigger, reversal,
-ORB exhaustion and option-premium guards remain active. Score 82 is unchanged.
+The shared point/ATR anti-chase, mandatory structure, reversal, ORB exhaustion
+and option-premium guards remain active. ORB/momentum remains visible telemetry.
+Score 82 is unchanged.
 """
 
 from bot import angel_fetcher
@@ -60,14 +62,27 @@ def _apply_timing_gate(result, market_data):
 
     timing_reasons = []
     if candidate in ("CE", "PE") and score >= minimum:
-        if ema_distance_atr > EMA_MAX_ATR:
-            timing_reasons.append(EMA_REASON)
         if not vwap_fallback and vwap_distance_atr > VWAP_MAX_ATR:
             timing_reasons.append(VWAP_REASON)
 
-    safety_reasons = list(output.get("safety_gate_reasons") or [])
-    fresh_reasons = list(output.get("fresh_entry_block_reasons") or [])
-    warnings = list(output.get("warnings") or [])
+    # Retire the exact duplicate EMA reason even if an older wrapper supplied it.
+    # EMA_ANTI_CHASE / chase_blocked remain untouched and continue to protect the
+    # shared adaptive anti-chase decision.
+    safety_reasons = [
+        reason
+        for reason in (output.get("safety_gate_reasons") or [])
+        if str(reason or "").strip() != EMA_REASON
+    ]
+    fresh_reasons = [
+        reason
+        for reason in (output.get("fresh_entry_block_reasons") or [])
+        if str(reason or "").strip() != EMA_REASON
+    ]
+    warnings = [
+        warning
+        for warning in (output.get("warnings") or [])
+        if EMA_REASON not in str(warning or "")
+    ]
 
     for reason in timing_reasons:
         safety_reasons = _append_unique(safety_reasons, reason)
@@ -93,9 +108,10 @@ def _apply_timing_gate(result, market_data):
         "entry_timing_block_reasons": timing_reasons,
         "entry_timing_calibration": {
             "ema_max_atr": EMA_MAX_ATR,
+            "ema_fixed_atr_hard_block": False,
             "vwap_max_atr": VWAP_MAX_ATR,
         },
-        "entry_timing_mode": "CALIBRATED_FRESH_DISTANCE_V1",
+        "entry_timing_mode": "VWAP_DISTANCE_WITH_SHARED_EMA_ANTI_CHASE_V2",
     })
     return output
 

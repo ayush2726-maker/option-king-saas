@@ -16,7 +16,7 @@ def _allowed_signal():
     }
 
 
-def test_score_100_is_blocked_when_entry_is_late_from_ema():
+def test_fixed_095_atr_ema_extension_no_longer_blocks_qualified_trade():
     output = _apply_timing_gate(
         _allowed_signal(),
         {
@@ -29,11 +29,55 @@ def test_score_100_is_blocked_when_entry_is_late_from_ema():
     )
 
     assert output["score"] == 100
-    assert output["trade_allowed"] is False
-    assert output["signal"] == "WAIT"
-    assert "EMA_EXTENSION_OVER_0.95_ATR" in output[
+    assert output["trade_allowed"] is True
+    assert output["signal"] == "PE"
+    assert "EMA_EXTENSION_OVER_0.95_ATR" not in output[
         "entry_timing_block_reasons"
     ]
+    assert output["entry_timing_calibration"]["ema_fixed_atr_hard_block"] is False
+
+
+def test_real_vwap_extension_guard_remains_active():
+    output = _apply_timing_gate(
+        _allowed_signal(),
+        {
+            "price": 100.0,
+            "ema9": 80.0,
+            "vwap": 130.0,
+            "atr": 10.0,
+            "vwap_fallback_used": False,
+        },
+    )
+
+    assert output["trade_allowed"] is False
+    assert output["signal"] == "WAIT"
+    assert output["entry_timing_block_reasons"] == [
+        "VWAP_EXTENSION_OVER_2.20_ATR"
+    ]
+
+
+def test_shared_ema_anti_chase_block_is_not_removed():
+    signal = _allowed_signal()
+    signal.update({
+        "signal": "WAIT",
+        "trade_allowed": False,
+        "safety_gate_reasons": ["EMA_ANTI_CHASE"],
+        "ema_chase_blocked": True,
+    })
+    output = _apply_timing_gate(
+        signal,
+        {
+            "price": 100.0,
+            "ema9": 80.0,
+            "vwap": 100.0,
+            "atr": 10.0,
+            "vwap_fallback_used": False,
+        },
+    )
+
+    assert output["trade_allowed"] is False
+    assert output["signal"] == "WAIT"
+    assert "EMA_ANTI_CHASE" in output["safety_gate_reasons"]
 
 
 def test_fresh_score_100_remains_allowed():

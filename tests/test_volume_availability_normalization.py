@@ -135,3 +135,38 @@ def test_missing_volume_score_is_never_normalized_twice_by_entry_guards():
     assert payload["component_total"] == 67
     assert payload["decision_component_total"] == 67
     assert payload["component_score_matches_decision"] is True
+
+
+def test_orb_or_momentum_is_diagnostic_not_a_hard_entry_block():
+    market = {
+        "price": 100.0,
+        "orb_high": 120.0,
+        "orb_low": 80.0,
+        "c1_bullish": True,
+        "c2_bullish": False,
+    }
+    signal = {
+        "signal": "PE",
+        "candidate_signal": "PE",
+        "score": 89,
+        "min_score": 82,
+        "trade_allowed": True,
+        "mandatory_confirmations_passed": True,
+        "safety_gate_reasons": [],
+        "fresh_entry_block_reasons": [],
+        "warnings": [],
+    }
+
+    output = _apply_entry_quality_v2(signal, market, None)
+
+    assert output["fresh_trigger_passed"] is False
+    assert output["fresh_trigger_is_blocking"] is False
+    assert output["fresh_trigger_required"] == "INFORMATIONAL_ONLY"
+    assert output["trade_allowed"] is True
+    assert output["signal"] == "PE"
+    assert "ORB_OR_MOMENTUM_TRIGGER_REQUIRED" not in output[
+        "safety_gate_reasons"
+    ]
+    assert "ORB_OR_MOMENTUM_TRIGGER_REQUIRED" not in output[
+        "fresh_entry_block_reasons"
+    ]

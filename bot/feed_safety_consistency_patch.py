@@ -147,8 +147,8 @@ def _directional_snapshot(result, market_data):
             fresh_reasons.append(f"CORE_CONFIRMATIONS_{core}_OF_4")
         if not current_aligned:
             fresh_reasons.append("REVERSAL_CANDLE_AT_ENTRY")
-        if ema_distance_atr > 0.95:
-            fresh_reasons.append("EMA_EXTENSION_OVER_0.95_ATR")
+        # The fixed 0.95 ATR EMA rule is retired. The shared adaptive
+        # EMA anti-chase guard remains the single owner of EMA extension risk.
         if orb_extension_atr > 1.35:
             fresh_reasons.append("ORB_EXTENSION_OVER_1.35_ATR")
         if (not vwap_fallback) and vwap_distance_atr > 2.20:
