@@ -221,6 +221,8 @@ def _historical_rows(symbol: str, horizon: int) -> List[Dict[str, Any]]:
             JOIN ai_advanced_v2_contract_outcomes o ON o.decision_id=s.id
             WHERE o.horizon_minutes=? AND o.best_label IN('CE','PE','NO_TRADE')
               AND s.feature_json IS NOT NULL
+              AND COALESCE(s.learning_eligible,1)=1
+              AND COALESCE(o.training_eligible,1)=1
             ORDER BY datetime(s.created_at) DESC,s.rowid DESC
             LIMIT ?""",
             (int(horizon), int(MAX_HISTORY_ROWS)),
@@ -532,8 +534,24 @@ def apply_market_knowledge_brain_patch() -> bool:
                 knowledge = build_market_knowledge(market, base, option_payload, news)
                 return blend_shadow_prediction(advanced, knowledge)
 
-            def register_snapshot(user_id, market, base, option_payload, news, advanced):
-                decision_id = original_register(user_id, market, base, option_payload, news, advanced)
+            def register_snapshot(
+                user_id,
+                market,
+                base,
+                option_payload,
+                news,
+                advanced,
+                **kwargs,
+            ):
+                decision_id = original_register(
+                    user_id,
+                    market,
+                    base,
+                    option_payload,
+                    news,
+                    advanced,
+                    **kwargs,
+                )
                 try:
                     _persist_knowledge(str(decision_id or ""), int(user_id), advanced)
                 except Exception as exc:

@@ -26,6 +26,10 @@ from bot.advanced_intelligence_v2 import (
 )
 from bot.adaptive_model_v2 import model_status
 from bot.broker_intelligence import BROKER_CAPABILITIES
+from bot.missed_trade_learning_v1 import (
+    get_missed_trade_summary,
+    missed_trade_health,
+)
 from bot.advanced_ai_data_recovery_patch import (
     apply_advanced_ai_data_recovery_patch,
 )
@@ -148,6 +152,8 @@ def ai_health():
     news_storage = news.get("storage") or {}
     advanced = advanced_health()
     advanced_storage = advanced.get("storage") or {}
+    missed = missed_trade_health()
+    missed_storage = missed.get("storage") or {}
     return {
         "success": True,
         "service": "Option King Shared Railway AI",
@@ -193,6 +199,24 @@ def ai_health():
             "location": "RAILWAY",
             "storage_persistent": bool(advanced_storage.get("persistent")),
             "supported_brokers": ["angelone", "upstox", "zerodha"],
+            "trade_blocking": False,
+            "order_execution": False,
+        },
+        "missed_trade_learning": {
+            "version": missed.get("version"),
+            "started": missed.get("started"),
+            "thread_alive": missed.get("thread_alive"),
+            "last_cycle_at": missed.get("last_cycle_at"),
+            "last_capture_at": missed.get("last_capture_at"),
+            "last_error": missed.get("last_error"),
+            "captured_total": missed.get("captured_total"),
+            "tracking": missed.get("tracking"),
+            "complete": missed.get("complete"),
+            "outcome_count": missed.get("outcome_count"),
+            "trainable_outcome_count": missed.get("trainable_outcome_count"),
+            "location": "RAILWAY",
+            "storage_persistent": bool(missed_storage.get("persistent")),
+            "counterfactual_only": True,
             "trade_blocking": False,
             "order_execution": False,
         },
@@ -255,6 +279,12 @@ def get_ai_advanced_monitor(authorization: str = Header(None), recent_limit: int
 def get_ai_model_status(authorization: str = Header(None)):
     get_current_user(authorization)
     return model_status()
+
+
+@router.get("/bot/ai-missed-trades")
+def get_ai_missed_trades(authorization: str = Header(None), recent_limit: int = 20):
+    user = get_current_user(authorization)
+    return get_missed_trade_summary(user["id"], recent_limit=recent_limit)
 
 
 @router.get("/bot/ai-broker-capabilities")

@@ -89,6 +89,9 @@ from bot.entry_execution_safety_v1_patch import (
 from bot.pullback_continuation_entry_patch import (
     apply_pullback_continuation_entry_patch,
 )
+from bot.missed_trade_learning_v1 import (
+    apply_missed_trade_learning_patch,
+)
 from bot.admin_morning_trade_cleanup_20260804 import (
     delete_admin_morning_paper_trades_20260804,
 )
@@ -141,8 +144,11 @@ apply_cas_closing_guard_patch()
 # Final scan-selection layer: remember mature extended setups and release them
 # only after a safe EMA pullback plus same-direction continuation candle.
 apply_pullback_continuation_entry_patch()
+# Final observability/learning layer. It records post-decision missed setups and
+# evaluates them in a background shadow worker; it cannot mutate scans/orders.
+apply_missed_trade_learning_patch()
 
-RELEASE_VERSION = "pullback-continuation-entry-v1"
+RELEASE_VERSION = "missed-trade-learning-shadow-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",

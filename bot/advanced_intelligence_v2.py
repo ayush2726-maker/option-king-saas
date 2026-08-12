@@ -28,6 +28,7 @@ from bot.shared_ai import predict
 from database import get_db, get_db_storage_info
 
 VERSION = "OKAI-ADVANCED-BROKER-NEUTRAL-SHADOW-V2"
+LIVE_SAMPLE_SOURCE = "LIVE_ADVANCED_MONITOR"
 HORIZONS = (5, 15, 30)
 PRIMARY_HORIZON = 15
 POLL_SECONDS = 15
@@ -114,7 +115,13 @@ def ensure_advanced_schema() -> None:
           global_market_json TEXT,news_snapshot_json TEXT,adaptive_model_json TEXT,
           ce_contract_json TEXT,pe_contract_json TEXT,data_coverage_score INTEGER,
           option_risk_score INTEGER,complete INTEGER DEFAULT 0,completed_at TEXT,
-          trade_blocking INTEGER DEFAULT 0,order_execution INTEGER DEFAULT 0);
+          trade_blocking INTEGER DEFAULT 0,order_execution INTEGER DEFAULT 0,
+          sample_source TEXT NOT NULL DEFAULT 'LIVE_ADVANCED_MONITOR',
+          source_event_id TEXT,strategy_candidate_side TEXT,
+          strategy_score INTEGER,strategy_min_score INTEGER,
+          strategy_trade_allowed INTEGER,strategy_execution_allowed INTEGER,
+          strategy_block_reasons_json TEXT NOT NULL DEFAULT '[]',
+          learning_eligible INTEGER NOT NULL DEFAULT 1);
         CREATE INDEX IF NOT EXISTS idx_ai_advanced_v2_user_created
           ON ai_advanced_v2_snapshots(user_id,created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_ai_advanced_v2_pending
@@ -128,7 +135,11 @@ def ensure_advanced_schema() -> None:
           no_trade_net_pnl REAL DEFAULT 0,advanced_net_pnl REAL,
           base_net_pnl REAL,advanced_vs_base_benefit REAL,best_label TEXT,
           advanced_outcome TEXT,base_outcome TEXT,charge_model TEXT,
-          details_json TEXT,UNIQUE(decision_id,horizon_minutes));
+          details_json TEXT,
+          sample_source TEXT NOT NULL DEFAULT 'LIVE_ADVANCED_MONITOR',
+          training_eligible INTEGER NOT NULL DEFAULT 1,
+          quote_delay_seconds INTEGER DEFAULT 0,
+          UNIQUE(decision_id,horizon_minutes));
         CREATE INDEX IF NOT EXISTS idx_ai_advanced_v2_outcome_user_horizon
           ON ai_advanced_v2_contract_outcomes(user_id,horizon_minutes,evaluated_at DESC);
         CREATE TABLE IF NOT EXISTS ai_advanced_v2_runtime(
@@ -136,6 +147,46 @@ def ensure_advanced_schema() -> None:
           instance_id TEXT,started_at TEXT,heartbeat_at TEXT,last_error TEXT,
           trade_blocking INTEGER DEFAULT 0,order_execution INTEGER DEFAULT 0);
         """)
+        snapshot_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(ai_advanced_v2_snapshots)").fetchall()
+        }
+        snapshot_additions = {
+            "sample_source": "TEXT NOT NULL DEFAULT 'LIVE_ADVANCED_MONITOR'",
+            "source_event_id": "TEXT",
+            "strategy_candidate_side": "TEXT",
+            "strategy_score": "INTEGER",
+            "strategy_min_score": "INTEGER",
+            "strategy_trade_allowed": "INTEGER",
+            "strategy_execution_allowed": "INTEGER",
+            "strategy_block_reasons_json": "TEXT NOT NULL DEFAULT '[]'",
+            "learning_eligible": "INTEGER NOT NULL DEFAULT 1",
+        }
+        for column, kind in snapshot_additions.items():
+            if column not in snapshot_columns:
+                conn.execute(
+                    f"ALTER TABLE ai_advanced_v2_snapshots ADD COLUMN {column} {kind}"
+                )
+
+        outcome_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(ai_advanced_v2_contract_outcomes)").fetchall()
+        }
+        outcome_additions = {
+            "sample_source": "TEXT NOT NULL DEFAULT 'LIVE_ADVANCED_MONITOR'",
+            "training_eligible": "INTEGER NOT NULL DEFAULT 1",
+            "quote_delay_seconds": "INTEGER DEFAULT 0",
+        }
+        for column, kind in outcome_additions.items():
+            if column not in outcome_columns:
+                conn.execute(
+                    f"ALTER TABLE ai_advanced_v2_contract_outcomes ADD COLUMN {column} {kind}"
+                )
+        conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_advanced_v2_source_event
+            ON ai_advanced_v2_snapshots(source_event_id)
+            WHERE source_event_id IS NOT NULL"""
+        )
         now = _iso()
         conn.execute("""INSERT INTO ai_advanced_v2_runtime VALUES(1,?,?,?,?,NULL,0,0)
         ON CONFLICT(singleton) DO UPDATE SET version=excluded.version,
@@ -295,7 +346,20 @@ def _outcome(net):
     return "WIN" if net > 0 else "LOSS" if net < 0 else "FLAT"
 
 
-def register_snapshot(user_id, market, base, option_payload, news, advanced):
+def register_snapshot(
+    user_id,
+    market,
+    base,
+    option_payload,
+    news,
+    advanced,
+    *,
+    sample_source=LIVE_SAMPLE_SOURCE,
+    source_event_id=None,
+    strategy_context=None,
+    force_record=False,
+    created_at=None,
+):
     option = dict(option_payload.get("option_intelligence") or {})
     if not (market.get("market_open") and market.get("feed_connected") and _f(market.get("price")) > 0):
         return None
@@ -303,11 +367,21 @@ def register_snapshot(user_id, market, base, option_payload, news, advanced):
     pe = selected_contract(option, "PE") or {}
     if not ce or not pe:
         return None
-    now = _now()
+    now = _parse(created_at) or _now()
     conn = get_db()
     try:
+        source = str(sample_source or LIVE_SAMPLE_SOURCE).upper()
+        source_id = str(source_event_id or "").strip() or None
+        context = dict(strategy_context or {})
+        if source_id:
+            existing = conn.execute(
+                "SELECT id FROM ai_advanced_v2_snapshots WHERE source_event_id=? LIMIT 1",
+                (source_id,),
+            ).fetchone()
+            if existing:
+                return str(existing["id"])
         last = conn.execute("SELECT created_at,advanced_decision,broker,symbol FROM ai_advanced_v2_snapshots WHERE user_id=? ORDER BY datetime(created_at) DESC,rowid DESC LIMIT 1", (user_id,)).fetchone()
-        if last:
+        if last and not force_record:
             when = _parse(last["created_at"])
             same = str(last["advanced_decision"]) == str(advanced.get("decision")) and str(last["broker"]) == str(option_payload.get("broker")) and str(last["symbol"]) == str(market.get("symbol"))
             if when and same and (now - when).total_seconds() < RECORD_SPACING_SECONDS:
@@ -320,17 +394,27 @@ def register_snapshot(user_id, market, base, option_payload, news, advanced):
         advanced_probabilities_json,reasons_json,feature_json,option_summary_json,
         global_market_json,news_snapshot_json,adaptive_model_json,ce_contract_json,
         pe_contract_json,data_coverage_score,option_risk_score,complete,completed_at,
-        trade_blocking,order_execution) VALUES(
-        ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,0,0)""", (
+        trade_blocking,order_execution,sample_source,source_event_id,
+        strategy_candidate_side,strategy_score,strategy_min_score,
+        strategy_trade_allowed,strategy_execution_allowed,
+        strategy_block_reasons_json,learning_eligible) VALUES(
+        ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,NULL,0,0,
+        ?,?,?,?,?,?,?,?,?)""", (
             decision_id,user_id,_iso(now),str(option_payload.get("broker") or ""),str(market.get("symbol") or "NIFTY"),round(_f(market.get("price")),2),
             _direction(base.get("decision")),_i(base.get("confidence")),_dumps(base.get("probabilities") or {}),
             str(option.get("option_direction") or "NO_TRADE"),_i(option.get("option_confidence")),str(news.get("news_bias") or "NEUTRAL"),
             _i(news.get("news_strength")),_i(news.get("news_risk_score")),_direction(advanced.get("decision")),_i(advanced.get("confidence")),
             _dumps(advanced.get("probabilities") or {}),_dumps(advanced.get("reasons") or []),_dumps(advanced.get("feature") or {}),
             _dumps(option),_dumps(option_payload.get("global_market") or {}),_dumps(news),_dumps(advanced.get("adaptive_model") or {}),
-            _dumps(ce),_dumps(pe),_i(option.get("data_coverage_score")),_i(option.get("risk_score"))))
+            _dumps(ce),_dumps(pe),_i(option.get("data_coverage_score")),_i(option.get("risk_score")),
+            source,source_id,_direction(context.get("candidate_side")),
+            _i(context.get("score")),_i(context.get("min_score"),82),
+            1 if context.get("trade_allowed") else 0,
+            1 if context.get("execution_allowed") else 0,
+            _dumps(context.get("block_reasons") or []),
+            1 if context.get("learning_eligible", True) else 0))
         conn.commit()
-        print(f"AI ADVANCED V2 RAILWAY | logged | user={user_id} | broker={option_payload.get('broker')} | {advanced.get('decision')} {advanced.get('confidence')}% | blocking OFF")
+        print(f"AI ADVANCED V2 RAILWAY | logged | user={user_id} | source={source} | broker={option_payload.get('broker')} | {advanced.get('decision')} {advanced.get('confidence')}% | blocking OFF")
         return decision_id
     finally:
         conn.close()
@@ -343,7 +427,18 @@ def observe_outcomes(user_id, market, option_payload):
     conn = get_db()
     created = 0
     try:
-        pending = conn.execute("SELECT * FROM ai_advanced_v2_snapshots WHERE user_id=? AND complete=0 AND symbol=? ORDER BY datetime(created_at)", (user_id, str(market.get("symbol") or "NIFTY"))).fetchall()
+        pending = conn.execute(
+            """SELECT * FROM ai_advanced_v2_snapshots
+            WHERE user_id=? AND complete=0 AND symbol=?
+              AND COALESCE(sample_source,?)=?
+            ORDER BY datetime(created_at)""",
+            (
+                user_id,
+                str(market.get("symbol") or "NIFTY"),
+                LIVE_SAMPLE_SOURCE,
+                LIVE_SAMPLE_SOURCE,
+            ),
+        ).fetchall()
         for row in pending:
             start = _parse(row["created_at"])
             if not start:
@@ -366,13 +461,20 @@ def observe_outcomes(user_id, market, option_payload):
                 base_net = _decision_pnl(row["base_decision"], ce_net, pe_net)
                 details = {"ce": ce_result,"pe": pe_result,"entry_spot": _f(row["spot"]),"exit_spot": _f(market.get("price")),
                            "premium_basis": "ENTRY_ASK_OR_LTP_EXIT_BID_OR_LTP","cost_model": "INDIA_INDEX_OPTIONS_ALL_COSTS_V2"}
-                conn.execute("""INSERT OR IGNORE INTO ai_advanced_v2_contract_outcomes VALUES(
-                NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                conn.execute("""INSERT OR IGNORE INTO ai_advanced_v2_contract_outcomes(
+                decision_id,user_id,horizon_minutes,evaluated_at,spot_exit,
+                ce_entry_price,ce_exit_price,ce_net_pnl,pe_entry_price,
+                pe_exit_price,pe_net_pnl,no_trade_net_pnl,advanced_net_pnl,
+                base_net_pnl,advanced_vs_base_benefit,best_label,
+                advanced_outcome,base_outcome,charge_model,details_json,
+                sample_source,training_eligible,quote_delay_seconds) VALUES(
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0)""", (
                     row["id"],user_id,horizon,_iso(),round(_f(market.get("price")),2),
                     ce_result["entry_price"],ce_result["exit_price"],round(ce_net,2),
                     pe_result["entry_price"],pe_result["exit_price"],round(pe_net,2),0.0,
                     round(advanced_net,2),round(base_net,2),round(advanced_net-base_net,2),best_label,
-                    _outcome(advanced_net),_outcome(base_net),"INDIA_INDEX_OPTIONS_ALL_COSTS_V2",_dumps(details)))
+                    _outcome(advanced_net),_outcome(base_net),"INDIA_INDEX_OPTIONS_ALL_COSTS_V2",_dumps(details),
+                    LIVE_SAMPLE_SOURCE))
                 created += 1
             count = conn.execute("SELECT COUNT(*) n FROM ai_advanced_v2_contract_outcomes WHERE decision_id=?", (row["id"],)).fetchone()["n"]
             if _i(count) >= len(HORIZONS):
@@ -387,7 +489,11 @@ def _calibration(user_id):
     conn = get_db()
     try:
         rows = conn.execute("""SELECT s.advanced_confidence,o.advanced_outcome FROM ai_advanced_v2_snapshots s
-        JOIN ai_advanced_v2_contract_outcomes o ON o.decision_id=s.id WHERE s.user_id=? AND o.horizon_minutes=?""", (user_id, PRIMARY_HORIZON)).fetchall()
+        JOIN ai_advanced_v2_contract_outcomes o ON o.decision_id=s.id
+        WHERE s.user_id=? AND o.horizon_minutes=?
+          AND COALESCE(s.sample_source,?)=?""",
+            (user_id, PRIMARY_HORIZON, LIVE_SAMPLE_SOURCE, LIVE_SAMPLE_SOURCE),
+        ).fetchall()
     finally:
         conn.close()
     buckets = {}
@@ -409,10 +515,26 @@ def get_advanced_summary(user_id, recent_limit=20):
     ensure_advanced_schema()
     conn = get_db()
     try:
-        rows = conn.execute("SELECT * FROM ai_advanced_v2_snapshots WHERE user_id=? ORDER BY datetime(created_at) DESC,rowid DESC LIMIT ?", (user_id, max(1, min(_i(recent_limit,20),50)))).fetchall()
-        primary = conn.execute("SELECT * FROM ai_advanced_v2_contract_outcomes WHERE user_id=? AND horizon_minutes=?", (user_id, PRIMARY_HORIZON)).fetchall()
+        rows = conn.execute(
+            """SELECT * FROM ai_advanced_v2_snapshots
+            WHERE user_id=? AND COALESCE(sample_source,?)=?
+            ORDER BY datetime(created_at) DESC,rowid DESC LIMIT ?""",
+            (
+                user_id,
+                LIVE_SAMPLE_SOURCE,
+                LIVE_SAMPLE_SOURCE,
+                max(1, min(_i(recent_limit,20),50)),
+            ),
+        ).fetchall()
+        primary = conn.execute(
+            """SELECT o.* FROM ai_advanced_v2_contract_outcomes o
+            JOIN ai_advanced_v2_snapshots s ON s.id=o.decision_id
+            WHERE o.user_id=? AND o.horizon_minutes=?
+              AND COALESCE(s.sample_source,?)=?""",
+            (user_id, PRIMARY_HORIZON, LIVE_SAMPLE_SOURCE, LIVE_SAMPLE_SOURCE),
+        ).fetchall()
         recent = []
-        json_fields = (("base_probabilities_json","base_probabilities",{}),("advanced_probabilities_json","advanced_probabilities",{}),("reasons_json","reasons",[]),("feature_json","features",{}),("option_summary_json","option_summary",{}),("global_market_json","global_market",{}),("news_snapshot_json","news_snapshot",{}),("adaptive_model_json","adaptive_model",{}),("ce_contract_json","ce_contract",{}),("pe_contract_json","pe_contract",{}))
+        json_fields = (("base_probabilities_json","base_probabilities",{}),("advanced_probabilities_json","advanced_probabilities",{}),("reasons_json","reasons",[]),("feature_json","features",{}),("option_summary_json","option_summary",{}),("global_market_json","global_market",{}),("news_snapshot_json","news_snapshot",{}),("adaptive_model_json","adaptive_model",{}),("ce_contract_json","ce_contract",{}),("pe_contract_json","pe_contract",{}),("strategy_block_reasons_json","strategy_block_reasons",[]))
         for row in rows:
             item = dict(row)
             for source, target, default in json_fields:
@@ -442,12 +564,19 @@ def advanced_health():
     try:
         runtime = conn.execute("SELECT * FROM ai_advanced_v2_runtime WHERE singleton=1").fetchone()
         counts = conn.execute("SELECT COUNT(*) decisions,SUM(CASE WHEN complete=0 THEN 1 ELSE 0 END) pending FROM ai_advanced_v2_snapshots").fetchone()
+        sources = conn.execute(
+            """SELECT COALESCE(sample_source,?) sample_source,COUNT(*) samples
+            FROM ai_advanced_v2_snapshots
+            GROUP BY COALESCE(sample_source,?)""",
+            (LIVE_SAMPLE_SOURCE, LIVE_SAMPLE_SOURCE),
+        ).fetchall()
     finally:
         conn.close()
     return {"success": True,"version": VERSION,"started": bool(_started),"thread_alive": bool(_thread and _thread.is_alive()),
             "instance_id": _instance,"last_cycle_at": _last_cycle,"last_error": _last_error,
             "runtime": dict(runtime) if runtime else None,"decision_count": _i(counts["decisions"] if counts else 0),
             "pending_count": _i(counts["pending"] if counts else 0),"adaptive_models": model_status(),
+            "sample_sources": {str(row["sample_source"]): _i(row["samples"]) for row in sources},
             "storage": get_db_storage_info(),"location": "RAILWAY","mode": "SHADOW_ONLY","trade_blocking": False,"order_execution": False}
 
 

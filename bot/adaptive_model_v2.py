@@ -181,6 +181,8 @@ def _training_rows(horizon: int) -> Tuple[List[List[float]], List[int]]:
             FROM ai_advanced_v2_snapshots s
             JOIN ai_advanced_v2_contract_outcomes o ON o.decision_id=s.id
             WHERE o.horizon_minutes=? AND o.best_label IN('CE','PE','NO_TRADE')
+              AND COALESCE(s.learning_eligible,1)=1
+              AND COALESCE(o.training_eligible,1)=1
             ORDER BY datetime(s.created_at),s.rowid""",
             (horizon,),
         ).fetchall()

@@ -429,11 +429,21 @@ def apply_sector_rotation_ai_training_patch() -> bool:
                 _PATCHED = True
                 return True
 
-            def register_snapshot(user_id, market, base, option_payload, news, advanced):
+            def register_snapshot(
+                user_id,
+                market,
+                base,
+                option_payload,
+                news,
+                advanced,
+                **kwargs,
+            ):
                 payload = None
                 enriched = dict(advanced or {})
                 if (
-                    bool(market.get("market_open"))
+                    str(kwargs.get("sample_source") or "LIVE_ADVANCED_MONITOR").upper()
+                    == "LIVE_ADVANCED_MONITOR"
+                    and bool(market.get("market_open"))
                     and bool(market.get("feed_connected"))
                     and _f(market.get("price")) > 0
                 ):
@@ -456,6 +466,7 @@ def apply_sector_rotation_ai_training_patch() -> bool:
                     option_payload,
                     news,
                     enriched,
+                    **kwargs,
                 )
                 if decision_id and payload:
                     try:
