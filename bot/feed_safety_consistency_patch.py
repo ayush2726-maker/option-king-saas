@@ -98,8 +98,6 @@ def _directional_snapshot(result, market_data):
     orb_low = _number(market.get("orb_low"), 0)
     c1_bull = bool(market.get("c1_bullish", False))
     c2_bull = bool(market.get("c2_bullish", False))
-    vwap_fallback = bool(market.get("vwap_fallback_used", False))
-
     ce_checks = {
         "vwap": price > vwap,
         "supertrend": supertrend == "UP",
@@ -147,12 +145,9 @@ def _directional_snapshot(result, market_data):
             fresh_reasons.append(f"CORE_CONFIRMATIONS_{core}_OF_4")
         if not current_aligned:
             fresh_reasons.append("REVERSAL_CANDLE_AT_ENTRY")
-        # The fixed 0.95 ATR EMA rule is retired. The shared adaptive
-        # EMA anti-chase guard remains the single owner of EMA extension risk.
+        # Fixed EMA/VWAP distance timing rules are observation-only.
         if orb_extension_atr > 1.35:
             fresh_reasons.append("ORB_EXTENSION_OVER_1.35_ATR")
-        if (not vwap_fallback) and vwap_distance_atr > 2.20:
-            fresh_reasons.append("VWAP_EXTENSION_OVER_2.20_ATR")
         if two_candle_run and ema_distance_atr > 0.80 and orb_extension_atr > 0.90:
             fresh_reasons.append("LATE_TWO_CANDLE_EXHAUSTION")
 

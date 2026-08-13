@@ -37,7 +37,7 @@ def test_fixed_095_atr_ema_extension_no_longer_blocks_qualified_trade():
     assert output["entry_timing_calibration"]["ema_fixed_atr_hard_block"] is False
 
 
-def test_real_vwap_extension_guard_remains_active():
+def test_real_vwap_extension_is_observation_only():
     output = _apply_timing_gate(
         _allowed_signal(),
         {
@@ -49,11 +49,39 @@ def test_real_vwap_extension_guard_remains_active():
         },
     )
 
-    assert output["trade_allowed"] is False
-    assert output["signal"] == "WAIT"
-    assert output["entry_timing_block_reasons"] == [
-        "VWAP_EXTENSION_OVER_2.20_ATR"
-    ]
+    assert output["trade_allowed"] is True
+    assert output["signal"] == "PE"
+    assert output["entry_timing_block_reasons"] == []
+    assert output["vwap_distance_atr"] == 3.0
+    assert output["entry_timing_calibration"]["vwap_fixed_atr_hard_block"] is False
+
+
+def test_old_vwap_timing_reason_is_scrubbed_from_all_decision_fields():
+    signal = _allowed_signal()
+    signal.update({
+        "signal": "WAIT",
+        "trade_allowed": False,
+        "safety_gate_reasons": ["VWAP_EXTENSION_OVER_2.20_ATR"],
+        "fresh_entry_block_reasons": ["VWAP_EXTENSION_OVER_2.20_ATR"],
+        "warnings": ["ENTRY_TIMING_BLOCK:VWAP_EXTENSION_OVER_2.20_ATR"],
+    })
+    output = _apply_timing_gate(
+        signal,
+        {
+            "price": 100.0,
+            "ema9": 100.0,
+            "vwap": 130.0,
+            "atr": 10.0,
+            "vwap_fallback_used": False,
+        },
+    )
+
+    assert "VWAP_EXTENSION_OVER_2.20_ATR" not in output["safety_gate_reasons"]
+    assert "VWAP_EXTENSION_OVER_2.20_ATR" not in output["fresh_entry_block_reasons"]
+    assert all(
+        "VWAP_EXTENSION_OVER_2.20_ATR" not in str(value)
+        for value in output["warnings"]
+    )
 
 
 def test_shared_ema_anti_chase_block_is_not_removed():

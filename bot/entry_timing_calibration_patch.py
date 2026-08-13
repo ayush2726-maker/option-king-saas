@@ -5,14 +5,13 @@ while price is already too far from EMA/VWAP and the option premium is near the
 end of its move. The June regression appeared after the older fresh-distance
 gate was removed, allowing repeated late 100-score entries.
 
-EMA distance is retained as telemetry only.  The legacy fixed 0.95 ATR EMA
-gate duplicated the shared point + ATR-adaptive anti-chase engine and caused
-qualified directional setups to be missed.  Real-VWAP distance remains a hard
-timing limit when a non-fallback VWAP is available.
+EMA and VWAP distance are retained as telemetry only. The legacy fixed 0.95
+ATR EMA gate and 2.20 ATR VWAP timing gate caused qualified directional setups
+to be missed, so neither distance measurement may veto a trade.
 
-The shared point/ATR anti-chase, mandatory structure, reversal, ORB exhaustion
-and option-premium guards remain active. ORB/momentum remains visible telemetry.
-Score 82 is unchanged.
+Mandatory structure, reversal, ORB exhaustion, late-exhaustion and option-
+premium guards remain active. ORB/momentum remains visible telemetry. Score 82
+is unchanged.
 """
 
 from bot import angel_fetcher
@@ -48,40 +47,36 @@ def _apply_timing_gate(result, market_data):
     candidate = str(
         output.get("candidate_signal") or output.get("signal") or "WAIT"
     ).upper()
-    score = int(round(_f(output.get("score"), 0)))
-    minimum = int(round(_f(output.get("min_score", 82), 82)))
-
     price = _f((market_data or {}).get("price"), 0)
     ema9 = _f((market_data or {}).get("ema9"), price)
     vwap = _f((market_data or {}).get("vwap"), price)
     atr = max(0.01, _f((market_data or {}).get("atr"), 0.01))
-    vwap_fallback = bool((market_data or {}).get("vwap_fallback_used", False))
 
     ema_distance_atr = abs(price - ema9) / atr
     vwap_distance_atr = abs(price - vwap) / atr
 
+    # Both fixed distance timing gates are observation-only. Keep the
+    # calculated ratios in the response, but never create a timing block.
     timing_reasons = []
-    if candidate in ("CE", "PE") and score >= minimum:
-        if not vwap_fallback and vwap_distance_atr > VWAP_MAX_ATR:
-            timing_reasons.append(VWAP_REASON)
 
-    # Retire the exact duplicate EMA reason even if an older wrapper supplied it.
-    # EMA_ANTI_CHASE / chase_blocked remain untouched and continue to protect the
-    # shared adaptive anti-chase decision.
+    # Retire old EMA/VWAP timing reasons even if an older wrapper supplied them.
     safety_reasons = [
         reason
         for reason in (output.get("safety_gate_reasons") or [])
-        if str(reason or "").strip() != EMA_REASON
+        if str(reason or "").strip() not in {EMA_REASON, VWAP_REASON}
     ]
     fresh_reasons = [
         reason
         for reason in (output.get("fresh_entry_block_reasons") or [])
-        if str(reason or "").strip() != EMA_REASON
+        if str(reason or "").strip() not in {EMA_REASON, VWAP_REASON}
     ]
     warnings = [
         warning
         for warning in (output.get("warnings") or [])
-        if EMA_REASON not in str(warning or "")
+        if not any(
+            reason in str(warning or "")
+            for reason in (EMA_REASON, VWAP_REASON)
+        )
     ]
 
     for reason in timing_reasons:
@@ -110,8 +105,9 @@ def _apply_timing_gate(result, market_data):
             "ema_max_atr": EMA_MAX_ATR,
             "ema_fixed_atr_hard_block": False,
             "vwap_max_atr": VWAP_MAX_ATR,
+            "vwap_fixed_atr_hard_block": False,
         },
-        "entry_timing_mode": "VWAP_DISTANCE_WITH_SHARED_EMA_ANTI_CHASE_V2",
+        "entry_timing_mode": "EMA_VWAP_DISTANCE_OBSERVATION_ONLY_V3",
     })
     return output
 

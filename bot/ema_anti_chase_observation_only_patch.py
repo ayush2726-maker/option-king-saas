@@ -1,8 +1,8 @@
-"""Disable EMA anti-chase as a hard entry blocker.
+"""Disable EMA/VWAP distance anti-chase as hard entry blockers.
 
-EMA stretch remains recorded as telemetry/warning so missed-trade learning and
-AI can learn whether stretched entries were good or bad. VWAP anti-chase and
-all other independent score/safety/risk gates remain unchanged.
+EMA and VWAP stretch remain recorded as telemetry/warnings so missed-trade
+learning and AI can learn whether stretched entries were good or bad. All
+other independent score/safety/risk gates remain unchanged.
 """
 
 from __future__ import annotations
@@ -14,33 +14,48 @@ def _repair(result):
 
     out = dict(result)
     ema_blocked = bool(out.get("ema_chase_blocked"))
-    if not ema_blocked:
+    vwap_blocked = bool(out.get("vwap_chase_blocked"))
+    if not ema_blocked and not vwap_blocked:
         return out
 
-    # EMA stretch is now observation-only. Keep the measured stretch/limit in
-    # the payload for UI/AI learning, but it must not veto an otherwise valid
-    # setup. Do not bypass VWAP, sideways, score or any other safety gate.
-    out["ema_chase_observation_only"] = True
+    # Distance stretch is now observation-only. Keep the measured values and
+    # limits in the payload for UI/AI learning, but neither EMA nor VWAP may
+    # veto an otherwise valid setup. Do not bypass sideways, score or any other
+    # independent safety gate.
+    if ema_blocked:
+        out["ema_chase_observation_only"] = True
+    if vwap_blocked:
+        out["vwap_chase_observation_only"] = True
     out["ema_chase_blocked"] = False
-    out["chase_blocked"] = bool(out.get("vwap_chase_blocked"))
+    out["vwap_chase_blocked"] = False
+    out["chase_blocked"] = False
 
     warnings = []
     for value in out.get("warnings") or []:
         text = str(value or "")
-        if text == "CUSTOM_ANTI_CHASE_EMA" or text.startswith("ANTI_CHASE_EMA_STRETCH:"):
+        if text in {"CUSTOM_ANTI_CHASE_EMA", "CUSTOM_ANTI_CHASE_VWAP"}:
+            continue
+        if text.startswith(("ANTI_CHASE_EMA_STRETCH:", "ANTI_CHASE_VWAP_STRETCH:")):
             continue
         warnings.append(value)
-    warnings.append(
-        "EMA_ANTI_CHASE_OBSERVATION_ONLY:"
-        f"{float(out.get('ema_stretch_points') or 0):.1f}>"
-        f"{float(out.get('ema_stretch_limit') or 0):.1f}"
-    )
+    if ema_blocked:
+        warnings.append(
+            "EMA_ANTI_CHASE_OBSERVATION_ONLY:"
+            f"{float(out.get('ema_stretch_points') or 0):.1f}>"
+            f"{float(out.get('ema_stretch_limit') or 0):.1f}"
+        )
+    if vwap_blocked:
+        warnings.append(
+            "VWAP_ANTI_CHASE_OBSERVATION_ONLY:"
+            f"{float(out.get('vwap_stretch_points') or 0):.1f}>"
+            f"{float(out.get('vwap_stretch_limit') or 0):.1f}"
+        )
     out["warnings"] = list(dict.fromkeys(warnings))
 
     candidate = str(out.get("candidate_signal") or "WAIT").upper()
     score = int(out.get("score") or 0)
     minimum = int(out.get("min_score") or 82)
-    other_block = bool(out.get("vwap_chase_blocked")) or bool(out.get("sideways_blocked"))
+    other_block = bool(out.get("sideways_blocked"))
 
     if candidate in {"CE", "PE"} and score >= minimum and not other_block:
         out["trade_allowed"] = True
