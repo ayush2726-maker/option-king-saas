@@ -71,6 +71,13 @@ try:
     apply_supertrend_replay_final_patch()
 except Exception: pass
 
+# Upstox option-chain must use an explicit nearest expiry date. Never allow the
+# API's generic current-week selection to silently jump NIFTY to a farther week.
+try:
+    from bot.upstox_nearest_expiry_fix_v1 import apply_upstox_nearest_expiry_fix
+    apply_upstox_nearest_expiry_fix()
+except Exception: pass
+
 # Adaptive learning stack. All remains shadow-only until chronological
 # validation beats baseline and calibration gates.
 try:
