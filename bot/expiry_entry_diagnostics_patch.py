@@ -9,7 +9,8 @@ Fixes:
   reasons in the existing scan row without weakening the 82/fresh-entry guards.
 """
 
-from datetime import date, datetime
+import time
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 
@@ -24,6 +25,13 @@ UPSTOX_UNDERLYING_KEYS = {
     "BANKNIFTY": "NSE_INDEX|Nifty Bank",
     "SENSEX": "BSE_INDEX|SENSEX",
 }
+
+IST = timezone(timedelta(hours=5, minutes=30))
+UPSTOX_ENTRY_RESOLVER_VERSION = "OKAI-UPSTOX-ENTRY-RESOLVER-V2"
+
+
+def _today_ist():
+    return datetime.now(timezone.utc).astimezone(IST).date()
 
 
 def _parse_date(value):
@@ -109,7 +117,7 @@ def _upstox_option_contracts(self, underlying, expiry_value):
         f"{self.BASE_URL}/option/contract",
         params=params,
         headers=self._h(),
-        timeout=18,
+        timeout=6,
     )
     try:
         payload = response.json()
@@ -127,21 +135,49 @@ def _search_upstox_nearest(self, underlying, expiry, strike, option_type):
         if u not in UPSTOX_UNDERLYING_KEYS or ot not in ("CE", "PE"):
             return {"success": False, "message": "Unsupported option request"}
 
-        today = date.today()
+        today = _today_ist()
         requested = str(expiry or "current_week").strip()
-        attempts = [today.isoformat()]
-        if requested and requested not in attempts:
-            attempts.append(requested)
-        for fallback in ("current_week", "current_month", None):
-            if fallback not in attempts:
-                attempts.append(fallback)
+        requested_day = _parse_date(requested)
+        expected = requested_day or option_chain.expected_expiry_for_trade_date(u, today)
 
+        # The actual entry resolver must use the same concrete nearest expiry as
+        # option intelligence. Passing literals such as ``current_week`` made
+        # Upstox intermittently return no row (or a farther weekly contract).
+        # Holiday-shifted expiries are allowed only up to three days earlier.
         all_errors = []
-        for expiry_value in attempts:
-            rows, error = _upstox_option_contracts(self, u, expiry_value)
-            if error:
-                all_errors.append(f"{expiry_value or 'nearest'}:{error}")
-                continue
+        request_count = 0
+        response_sets = []
+        # Two bounded exact-expiry attempts cover a transient timeout without
+        # holding the entry loop for a full minute.
+        for api_attempt in range(2):
+            request_count += 1
+            rows, error = _upstox_option_contracts(
+                self,
+                u,
+                expected.isoformat(),
+            )
+            if rows:
+                response_sets.append((expected, rows, "EXACT_EXPIRY"))
+                break
+            all_errors.append(
+                f"{expected.isoformat()}#{api_attempt + 1}:"
+                f"{error or 'empty option-contract response'}"
+            )
+            if api_attempt == 0:
+                time.sleep(0.35)
+
+        # One unfiltered recovery request handles broker-side exact-filter
+        # glitches. Rows are still hard-limited to the configured expiry or its
+        # three-day holiday adjustment, so it cannot jump to the next week.
+        if not response_sets:
+            request_count += 1
+            rows, error = _upstox_option_contracts(self, u, None)
+            if rows:
+                response_sets.append((None, rows, "UNFILTERED_STRICT_RECOVERY"))
+            else:
+                all_errors.append(f"unfiltered:{error or 'empty option-contract response'}")
+
+        for expiry_filter, rows, source in response_sets:
 
             ranked = []
             for row in rows:
@@ -153,16 +189,32 @@ def _search_upstox_nearest(self, underlying, expiry, strike, option_type):
                 if symbol_underlying not in {u, "NIFTYBANK" if u == "BANKNIFTY" else u}:
                     continue
                 expiry_date = _parse_date(row.get("expiry"))
-                if expiry_date is None or expiry_date < today:
+                if (
+                    expiry_date is None
+                    or expiry_date < today
+                ):
+                    continue
+                if requested_day is not None:
+                    if expiry_date != expected:
+                        continue
+                elif expiry_date > expected or (expected - expiry_date).days > 3:
+                    continue
+                if expiry_filter is not None and expiry_date != expiry_filter:
                     continue
                 try:
                     row_strike = float(row.get("strike_price") or 0)
                 except Exception:
                     continue
+                symbol = str(row.get("trading_symbol") or "").strip()
+                token = str(row.get("instrument_key") or "").strip()
+                if not symbol or not token:
+                    continue
                 ranked.append((expiry_date, abs(row_strike - float(strike)), row_strike, row))
 
             if not ranked:
-                all_errors.append(f"{expiry_value or 'nearest'}:no matching {u} {ot}")
+                all_errors.append(
+                    f"{source}:no matching {u} {ot} near {expected.isoformat()}"
+                )
                 continue
 
             expiry_date, _, row_strike, best = min(
@@ -177,13 +229,24 @@ def _search_upstox_nearest(self, underlying, expiry, strike, option_type):
                 "expiry": str(best.get("expiry") or expiry_date.isoformat()),
                 "strike": row_strike,
                 "lot_size": int(best.get("lot_size") or best.get("minimum_lot") or 0),
-                "expiry_source": expiry_value or "nearest_active",
+                "expiry_source": source,
+                "expected_expiry": expected.isoformat(),
                 "same_day_expiry": expiry_date == today,
+                "resolver_version": UPSTOX_ENTRY_RESOLVER_VERSION,
+                "request_count": request_count,
             }
 
         return {
             "success": False,
-            "message": "Upstox option resolve failed | " + " | ".join(all_errors)[:500],
+            "reason": "UPSTOX_EXACT_EXPIRY_CONTRACT_UNAVAILABLE",
+            "message": (
+                f"UPSTOX_EXACT_EXPIRY_CONTRACT_UNAVAILABLE:{u}:{ot}:"
+                f"expected={expected.isoformat()} | "
+                + " | ".join(all_errors)[:420]
+            ),
+            "expected_expiry": expected.isoformat(),
+            "resolver_version": UPSTOX_ENTRY_RESOLVER_VERSION,
+            "request_count": request_count,
         }
     except Exception as exc:
         return {"success": False, "message": str(exc)[:500]}
@@ -210,9 +273,10 @@ def _signal_block_reason(signal):
 
 
 def _execution_reason(state):
-    guard = state.get("entry_guard") or {}
-    if guard and not guard.get("allowed", True):
-        return str(guard.get("reason") or "OPTION_PREMIUM_GUARD")
+    for key in ("last_entry_attempt", "entry_attempt", "entry_guard"):
+        guard = state.get(key) or {}
+        if guard and not guard.get("allowed", True):
+            return str(guard.get("reason") or "ENTRY_EXECUTION_GUARD")
     size = state.get("position_size_block") or {}
     if size:
         return str(size.get("reason") or "POSITION_SIZE_BLOCK")
@@ -221,7 +285,10 @@ def _execution_reason(state):
             return str(state.get(key))
     if state.get("live_order_lock"):
         return "LIVE_ORDER_LOCK"
-    return "OPTION_RESOLVE_LTP_OR_ATR_FAILED"
+    for key in ("last_entry_block_reason", "entry_block_reason"):
+        if state.get(key):
+            return str(state[key])
+    return "ENTRY_NOT_OPENED_WITHOUT_DIAGNOSTIC"
 
 
 def apply_expiry_entry_diagnostics_patch():

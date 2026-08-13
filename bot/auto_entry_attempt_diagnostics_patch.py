@@ -8,6 +8,7 @@ tighten entry rules and it never places, modifies or closes orders by itself.
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -54,6 +55,75 @@ def _reason_from_state(state: dict) -> str:
     if guard.get("reason"):
         return str(guard.get("reason"))
     return "ENTRY_NOT_OPENED_BY_EXECUTION_GUARD"
+
+
+def _resolve_multi_contract(
+    obj,
+    broker_name: str,
+    underlying: str,
+    strike: float,
+    side: str,
+    *,
+    sleeper=time.sleep,
+) -> tuple[dict, list[str]]:
+    # The Upstox resolver performs its own exact-expiry retries and unfiltered
+    # strict recovery. Repeating that whole sequence here would delay entry.
+    attempts = 1 if str(broker_name).lower() == "upstox" else 3
+    resolved: dict = {}
+    errors: list[str] = []
+    for attempt in range(attempts):
+        resolved = obj.search_option(
+            underlying,
+            "current_week",
+            strike,
+            side,
+        )
+        if resolved.get("success"):
+            break
+        errors.append(
+            str(
+                resolved.get("message")
+                or resolved.get("error")
+                or "OPTION_CONTRACT_NOT_RESOLVED"
+            )[:180]
+        )
+        if attempt + 1 < attempts:
+            sleeper(0.5 * (attempt + 1))
+    return resolved, errors
+
+
+def _fetch_multi_ltp(
+    obj,
+    broker_name: str,
+    resolved: dict,
+    *,
+    sleeper=time.sleep,
+) -> tuple[dict, list[str]]:
+    quote: dict = {}
+    errors: list[str] = []
+    for attempt in range(3):
+        if str(broker_name).lower() == "upstox":
+            quote = obj.get_ltp(
+                resolved.get("token") or resolved["symbol"],
+                exchange=resolved.get("exchange", "NSE_FO"),
+            )
+        else:
+            quote = obj.get_ltp(
+                resolved["symbol"],
+                exchange=resolved.get("exchange", "NFO"),
+            )
+        if quote.get("success") and _f(quote.get("ltp"), 0) > 0:
+            break
+        errors.append(
+            str(
+                quote.get("message")
+                or quote.get("error")
+                or "OPTION_LTP_FAILED"
+            )[:180]
+        )
+        if attempt < 2:
+            sleeper(0.5 * (attempt + 1))
+    return quote, errors
 
 
 def apply_auto_entry_attempt_diagnostics_patch() -> None:
@@ -165,21 +235,48 @@ def apply_auto_entry_attempt_diagnostics_patch() -> None:
             underlying = selected["underlying"]
             signal = selected["signal_data"]
             market = selected["market_data"]
-            resolved = obj.search_option(
+            resolved, resolve_errors = _resolve_multi_contract(
+                obj,
+                broker_name,
                 underlying,
-                "current_week",
-                runtime._legacy()._dynamic_atm_strike(underlying, market["price"]),
+                runtime._legacy()._dynamic_atm_strike(
+                    underlying,
+                    market["price"],
+                ),
                 signal["signal"],
             )
             if not resolved.get("success"):
-                _attempt(state, allowed=False, reason="OPTION_CONTRACT_NOT_RESOLVED:" + str(resolved.get("message") or resolved.get("error") or "" )[:120], stage="RESOLVE_CONTRACT", selected=selected, broker=broker_name)
+                _attempt(
+                    state,
+                    allowed=False,
+                    reason="OPTION_CONTRACT_NOT_RESOLVED:" + str(resolved.get("message") or resolved.get("error") or "")[:180],
+                    stage="RESOLVE_CONTRACT",
+                    selected=selected,
+                    broker=broker_name,
+                    resolve_attempts=(1 if broker_name == "upstox" else 3),
+                    errors=resolve_errors,
+                    expected_expiry=resolved.get("expected_expiry"),
+                )
                 return False
-            if broker_name == "upstox":
-                quote = obj.get_ltp(resolved.get("token") or resolved["symbol"], exchange=resolved.get("exchange", "NSE_FO"))
-            else:
-                quote = obj.get_ltp(resolved["symbol"], exchange=resolved.get("exchange", "NFO"))
-            if not quote.get("success"):
-                _attempt(state, allowed=False, reason="OPTION_LTP_FAILED:" + str(quote.get("message") or quote.get("error") or "")[:120], stage="OPTION_LTP", selected=selected, broker=broker_name, symbol=resolved.get("symbol"))
+            quote, quote_errors = _fetch_multi_ltp(
+                obj,
+                broker_name,
+                resolved,
+            )
+            if not quote.get("success") or _f(quote.get("ltp"), 0) <= 0:
+                _attempt(
+                    state,
+                    allowed=False,
+                    reason="OPTION_LTP_FAILED:" + str(quote.get("message") or quote.get("error") or "INVALID_OR_EMPTY_LTP")[:180],
+                    stage="OPTION_LTP",
+                    selected=selected,
+                    broker=broker_name,
+                    symbol=resolved.get("symbol"),
+                    token=resolved.get("token"),
+                    exchange=resolved.get("exchange"),
+                    quote_attempts=3,
+                    errors=quote_errors,
+                )
                 return False
             quote_price = _f(quote.get("ltp"), 0)
             if quote_price <= 0:
