@@ -289,5 +289,28 @@ def test_exact_cost_adjusted_outcomes_feed_existing_ai_dataset(monkeypatch, tmp_
 def test_late_counterfactual_is_visible_but_excluded_from_training(monkeypatch, tmp_path):
     missed, _, _ = _load_stack(monkeypatch, tmp_path)
     assert missed.MAX_TRAINING_QUOTE_DELAY_SECONDS < 180
-    assert missed.VERSION.endswith("SHADOW-V1")
+    assert missed.VERSION.endswith("SHADOW-V2")
     assert missed.SAMPLE_SOURCE == "MISSED_TRADE_SHADOW_V1"
+
+
+def test_only_missing_due_horizons_consume_worker_slots(monkeypatch, tmp_path):
+    missed, _, _ = _load_stack(monkeypatch, tmp_path)
+    event = {"created_at": START.isoformat()}
+
+    # The old worker treated this row as due merely because its 5m horizon had
+    # elapsed, even though 5m and 15m were already complete and 30m was not due.
+    assert missed._missing_due_horizons(
+        event,
+        {5, 15},
+        START + timedelta(minutes=20),
+    ) == []
+    assert missed._missing_due_horizons(
+        event,
+        set(),
+        START + timedelta(minutes=12),
+    ) == [5]
+    assert missed._missing_due_horizons(
+        event,
+        {5, 15},
+        START + timedelta(minutes=31),
+    ) == [30]

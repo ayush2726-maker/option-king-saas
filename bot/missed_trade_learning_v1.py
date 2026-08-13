@@ -28,7 +28,7 @@ from bot.news_intelligence import aggregate as aggregate_news
 from bot.shared_ai import predict
 
 
-VERSION = "OKAI-MISSED-TRADE-LEARNING-SHADOW-V1"
+VERSION = "OKAI-MISSED-TRADE-LEARNING-SHADOW-V2"
 SAMPLE_SOURCE = "MISSED_TRADE_SHADOW_V1"
 HORIZONS = (5, 15, 30)
 PRIMARY_HORIZON = 15
@@ -40,7 +40,7 @@ MAX_HYDRATION_ATTEMPTS = 6
 HYDRATION_RETRY_SECONDS = 30
 MAX_EVENT_AGE_MINUTES = 240
 MAX_HYDRATIONS_PER_CYCLE = 1
-MAX_OUTCOMES_PER_CYCLE = 2
+MAX_OUTCOMES_PER_CYCLE = 4
 
 NON_TRAINING_OPERATIONAL_MARKERS = (
     "MARKET_CLOSED",
@@ -162,6 +162,76 @@ def _capture_window_open(now: datetime) -> bool:
 def _quote_window_open(now: datetime) -> bool:
     weekday, minute = _market_minutes(now)
     return weekday < 5 and (9 * 60 + 15) <= minute <= (15 * 60 + 40)
+
+
+def _missing_due_horizons(
+    event: Mapping[str, Any],
+    existing: Iterable[int],
+    now: datetime,
+) -> list[int]:
+    started = _parse(event.get("created_at"))
+    if started is None:
+        return []
+    completed = {_i(value) for value in existing or []}
+    return [
+        horizon
+        for horizon in HORIZONS
+        if horizon not in completed
+        and now >= started + timedelta(minutes=horizon)
+    ]
+
+
+def _due_tracking_events(now: datetime, limit: int = 80) -> list[Dict[str, Any]]:
+    """Return only TRACKING rows that have a missing horizon due now.
+
+    Ordering by ``updated_at`` provides round-robin recovery when one contract
+    quote fails: the failed row is moved behind other due rows instead of
+    consuming every cycle forever.
+    """
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """SELECT * FROM ai_missed_trade_signals_v1
+            WHERE status='TRACKING'
+            ORDER BY datetime(updated_at),datetime(created_at),rowid
+            LIMIT ?""",
+            (max(1, int(limit)),),
+        ).fetchall()
+        events = [dict(row) for row in rows]
+        decision_ids = [
+            str(event.get("advanced_decision_id") or "")
+            for event in events
+            if event.get("advanced_decision_id")
+        ]
+        existing_by_decision: Dict[str, set[int]] = {}
+        if decision_ids:
+            placeholders = ",".join("?" for _ in decision_ids)
+            outcome_rows = conn.execute(
+                f"""SELECT decision_id,horizon_minutes
+                FROM ai_advanced_v2_contract_outcomes
+                WHERE decision_id IN ({placeholders})""",
+                decision_ids,
+            ).fetchall()
+            for row in outcome_rows:
+                existing_by_decision.setdefault(
+                    str(row["decision_id"]),
+                    set(),
+                ).add(_i(row["horizon_minutes"]))
+    finally:
+        conn.close()
+
+    return [
+        event
+        for event in events
+        if _missing_due_horizons(
+            event,
+            existing_by_decision.get(
+                str(event.get("advanced_decision_id") or ""),
+                set(),
+            ),
+            now,
+        )
+    ]
 
 
 def ensure_missed_trade_schema() -> None:
@@ -793,6 +863,12 @@ def _insert_counterfactual_outcome(
                 quote_delay,
             ),
         )
+        if cursor.rowcount:
+            conn.execute(
+                """UPDATE ai_missed_trade_signals_v1
+                SET updated_at=?,last_error=NULL WHERE id=?""",
+                (_iso(now), event["id"]),
+            )
         conn.commit()
         return bool(cursor.rowcount)
     finally:
@@ -907,25 +983,13 @@ def run_learning_cycle(now: Optional[datetime] = None) -> Dict[str, Any]:
             for row in pending:
                 hydrated += 1 if _hydrate_event(dict(row), current) else 0
 
-            conn = get_db()
-            try:
-                tracking = conn.execute(
-                    """SELECT * FROM ai_missed_trade_signals_v1
-                    WHERE status='TRACKING'
-                    ORDER BY datetime(created_at),rowid LIMIT 40"""
-                ).fetchall()
-            finally:
-                conn.close()
+            tracking = _due_tracking_events(current)
             attempted = 0
-            for row in tracking:
-                event = dict(row)
-                started = _parse(event.get("created_at")) or current
-                if not any(current >= started + timedelta(minutes=h) for h in HORIZONS):
-                    continue
-                attempted += 1
+            for event in tracking:
                 created = _evaluate_event(event, current)
                 if created:
                     outcomes += created
+                attempted += 1
                 if attempted >= MAX_OUTCOMES_PER_CYCLE:
                     break
         _expire_stale_events(current)
@@ -1167,6 +1231,7 @@ def missed_trade_health() -> Dict[str, Any]:
         ).fetchone()
     finally:
         conn.close()
+    due_outcome_backlog = len(_due_tracking_events(_now(), limit=200))
     return {
         "success": True,
         "version": VERSION,
@@ -1181,6 +1246,7 @@ def missed_trade_health() -> Dict[str, Any]:
         "complete": _i(counts["complete"] if counts else 0),
         "outcome_count": _i(outcomes["total"] if outcomes else 0),
         "trainable_outcome_count": _i(outcomes["trainable"] if outcomes else 0),
+        "due_outcome_backlog": due_outcome_backlog,
         "storage": get_db_storage_info(),
         "location": "RAILWAY",
         "mode": "SHADOW_ONLY",

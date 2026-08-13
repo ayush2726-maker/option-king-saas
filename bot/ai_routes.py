@@ -214,6 +214,7 @@ def ai_health():
             "complete": missed.get("complete"),
             "outcome_count": missed.get("outcome_count"),
             "trainable_outcome_count": missed.get("trainable_outcome_count"),
+            "due_outcome_backlog": missed.get("due_outcome_backlog"),
             "location": "RAILWAY",
             "storage_persistent": bool(missed_storage.get("persistent")),
             "counterfactual_only": True,
