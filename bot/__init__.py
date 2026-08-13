@@ -78,6 +78,13 @@ try:
     apply_upstox_nearest_expiry_fix()
 except Exception: pass
 
+# EMA stretch is learning/telemetry only now; it must not veto a qualified
+# setup. VWAP anti-chase and all other score/safety/risk gates remain intact.
+try:
+    from bot.ema_anti_chase_observation_only_patch import apply_ema_anti_chase_observation_only_patch
+    apply_ema_anti_chase_observation_only_patch()
+except Exception: pass
+
 # Adaptive learning stack. All remains shadow-only until chronological
 # validation beats baseline and calibration gates.
 try:
