@@ -86,6 +86,9 @@ from bot.live_quote_runtime_recovery import (
 from bot.entry_execution_safety_v1_patch import (
     apply_entry_execution_safety_v1_patch,
 )
+from bot.qualified_entry_release_patch import (
+    apply_qualified_entry_release_patch,
+)
 from bot.pullback_continuation_entry_patch import (
     apply_pullback_continuation_entry_patch,
 )
@@ -136,6 +139,9 @@ apply_eod_entry_guard_patch()
 apply_consecutive_loss_cooldown_patch()
 apply_active_strategy_score_patch()
 apply_decision_score_display_consistency_patch()
+# Score 82 already includes direction/MTF quality. Do not veto the same setup
+# again through duplicate direction, reversal-candle or MTF hard reasons.
+apply_qualified_entry_release_patch()
 apply_live_quote_timestamp_patch()
 # Final entry execution layer: fresh data + option premium confirmation + audit.
 apply_entry_execution_safety_v1_patch()
@@ -148,7 +154,7 @@ apply_pullback_continuation_entry_patch()
 # evaluates them in a background shadow worker; it cannot mutate scans/orders.
 apply_missed_trade_learning_patch()
 
-RELEASE_VERSION = "ema-vwap-distance-observation-only-v1"
+RELEASE_VERSION = "qualified-entry-release-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
