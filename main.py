@@ -72,10 +72,12 @@ from bot.eod_safety_testing_access_patch import (
     apply_eod_entry_guard_patch,
     initialize_testing_access_and_cleanup,
 )
-from bot.consecutive_loss_cooldown_patch import apply_consecutive_loss_cooldown_patch
 from bot.active_strategy_score_patch import apply_active_strategy_score_patch
 from bot.decision_score_display_consistency_patch import (
     apply_decision_score_display_consistency_patch,
+)
+from bot.canonical_cooldown_dedup_patch import (
+    apply_canonical_cooldown_dedup_patch,
 )
 from bot.breakeven_4pct_patch import apply_breakeven_4pct_patch
 from bot.live_quote_runtime_recovery import (
@@ -136,9 +138,11 @@ apply_expectancy_engine_v1_patch()
 apply_breakeven_4pct_patch()
 finalize_real_option_premium_patch()
 apply_eod_entry_guard_patch()
-apply_consecutive_loss_cooldown_patch()
 apply_active_strategy_score_patch()
 apply_decision_score_display_consistency_patch()
+# One post-loss owner only: same index + same CE/PE side for 15 minutes.
+# Disable older 12/20-minute, rest-of-day and global cooldown overlaps.
+apply_canonical_cooldown_dedup_patch()
 # Score 82 already includes direction/MTF quality. Do not veto the same setup
 # again through duplicate direction, reversal-candle or MTF hard reasons.
 apply_qualified_entry_release_patch()
@@ -154,7 +158,7 @@ apply_pullback_continuation_entry_patch()
 # evaluates them in a background shadow worker; it cannot mutate scans/orders.
 apply_missed_trade_learning_patch()
 
-RELEASE_VERSION = "qualified-entry-release-v1"
+RELEASE_VERSION = "canonical-cooldown-dedup-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
