@@ -158,7 +158,7 @@ apply_pullback_continuation_entry_patch()
 # evaluates them in a background shadow worker; it cannot mutate scans/orders.
 apply_missed_trade_learning_patch()
 
-RELEASE_VERSION = "entry-runtime-unblock-v1"
+RELEASE_VERSION = "current-capital-display-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",

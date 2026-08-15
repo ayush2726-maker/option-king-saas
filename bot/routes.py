@@ -575,6 +575,70 @@ def add_pnl(conn, user_id: int, pnl: float):
     conn.commit()
 
 
+def _status_capital_snapshot(
+    conn,
+    user_id,
+    settings,
+    trading_mode,
+    paper_capital,
+    total_pnl,
+    active_trades,
+):
+    """Return the capital displayed by /bot/signal for PAPER or LIVE."""
+    mode_trades = [
+        trade
+        for trade in (active_trades or [])
+        if str(trade.get("trading_mode") or trading_mode).lower()
+        == str(trading_mode).lower()
+    ]
+    open_pnl = round(
+        sum(
+            float(trade.get("unrealized_pnl") or 0)
+            for trade in mode_trades
+        ),
+        2,
+    )
+    starting_capital = paper_capital if trading_mode == "paper" else None
+    current_capital = None
+    capital_source = "BROKER_CAPITAL_UNAVAILABLE"
+
+    if trading_mode == "paper":
+        try:
+            from bot.capital_continuity_patch import _paper_summary
+
+            capital_summary = _paper_summary(conn, user_id, settings)
+            starting_capital = float(capital_summary["seed_capital"])
+            current_capital = round(
+                float(capital_summary["equity"]) + open_pnl,
+                2,
+            )
+            capital_source = "PAPER_CARRY_FORWARD_PLUS_OPEN_PNL"
+        except Exception:
+            current_capital = round(
+                float(paper_capital) + float(total_pnl or 0) + open_pnl,
+                2,
+            )
+            capital_source = "PAPER_SEED_PLUS_TOTAL_PNL"
+    else:
+        live_bases = [
+            float(trade.get("capital_base") or 0)
+            for trade in mode_trades
+            if float(trade.get("capital_base") or 0) > 0
+        ]
+        if live_bases:
+            starting_capital = max(live_bases)
+            current_capital = round(starting_capital + open_pnl, 2)
+            capital_source = "LIVE_BROKER_BASE_PLUS_OPEN_PNL"
+
+    return {
+        "starting_capital": starting_capital,
+        "current_capital": current_capital,
+        "current_equity": current_capital,
+        "open_pnl": open_pnl,
+        "capital_source": capital_source,
+    }
+
+
 @router.get("/signal")
 def get_signal(authorization: str = Header(None)):
     user = get_current_user(authorization)
@@ -924,6 +988,14 @@ def get_signal(authorization: str = Header(None)):
                     )
                     else None
                 ),
+                "capital_base": (
+                    float(t["capital_base"])
+                    if (
+                        "capital_base" in t.keys()
+                        and t["capital_base"] is not None
+                    )
+                    else None
+                ),
                 "entry_price": entry,
                 "current_price": current_price,
                 "sl_price": sl_price,
@@ -958,6 +1030,18 @@ def get_signal(authorization: str = Header(None)):
     except Exception:
         pass
 
+    # Use the same PAPER carry-forward owner as runtime sizing. LIVE reads only
+    # broker-funded capital saved on an actual open position.
+    capital_snapshot = _status_capital_snapshot(
+        conn,
+        user["id"],
+        settings,
+        trading_mode,
+        paper_capital,
+        total_pnl,
+        active_trades,
+    )
+
     conn.close()
 
     return {
@@ -986,6 +1070,7 @@ def get_signal(authorization: str = Header(None)):
 
         "trading_mode": trading_mode,
         "paper_capital": paper_capital,
+        **capital_snapshot,
         "primary_instrument": primary,
         "enabled_instruments": enabled,
         "qty": qty,
