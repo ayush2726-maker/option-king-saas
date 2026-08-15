@@ -125,6 +125,14 @@ def _monitor_multi_for_one_minute(user_id, broker_name, obj, state, scans):
             conn.close()
 
 
+def _attempt_qualified_candidates(scans, blocked, opener, state):
+    """Try every qualified index in score order until one actually opens."""
+    candidates = runtime._eligible_candidates(scans, blocked)
+    opened = runtime._attempt_entry_candidates(candidates, opener, state)
+    selected = opened or (candidates[0] if candidates else None)
+    return selected
+
+
 def _run_angel_one_second(user_id, creds, state):
     obj = None
     while state.get("running"):
@@ -156,9 +164,16 @@ def _run_angel_one_second(user_id, creds, state):
                 blocked = {runtime._underlying(row) for row in rows}
                 selected = None
                 if runtime._can_enter(conn, user_id, settings, rows, state):
-                    selected = runtime._best_candidate(scans, blocked)
-                    if selected:
-                        runtime._open_angel(conn, user_id, obj, selected, settings, state)
+                    selected = _attempt_qualified_candidates(
+                        scans,
+                        blocked,
+                        lambda candidate: runtime._open_angel(
+                            conn, user_id, obj, candidate, settings, state
+                        ),
+                        state,
+                    )
+                else:
+                    state["entry_candidate_attempts"] = []
 
                 rows = runtime._open_rows(conn, user_id)
                 runtime._state_update(state, scans, selected, settings, rows)
@@ -215,17 +230,22 @@ def _run_multi_one_second(user_id, broker_name, creds, state):
                 blocked = {runtime._underlying(row) for row in rows}
                 selected = None
                 if runtime._can_enter(conn, user_id, settings, rows, state):
-                    selected = runtime._best_candidate(scans, blocked)
-                    if selected:
-                        runtime._open_multi(
+                    selected = _attempt_qualified_candidates(
+                        scans,
+                        blocked,
+                        lambda candidate: runtime._open_multi(
                             conn,
                             user_id,
                             broker_name,
                             obj,
-                            selected,
+                            candidate,
                             settings,
                             state,
-                        )
+                        ),
+                        state,
+                    )
+                else:
+                    state["entry_candidate_attempts"] = []
 
                 rows = runtime._open_rows(conn, user_id)
                 runtime._state_update(state, scans, selected, settings, rows)

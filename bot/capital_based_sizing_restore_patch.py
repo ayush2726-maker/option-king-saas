@@ -30,13 +30,42 @@ def _i(value, default=0):
         return int(default)
 
 
-def _runtime_capital_size(capital_base, slot, premium, lot_size):
+def _runtime_capital_size(capital_base, slot, premium, lot_size, rows=None):
+    """Size against the configured slot without breaking the runtime API.
+
+    ``auto_portfolio_runtime._open_common`` passes the currently open rows so
+    the sizing layer can preserve the portfolio reserve.  The old final patch
+    dropped that keyword from its signature, which raised ``TypeError`` before
+    every otherwise-qualified entry could be inserted.
+
+    Slots 1 and 2 keep their configured 50/40 targets.  Slot 3 may use one
+    complete lot only when rounding in the first two positions left capital
+    above the hard reserve; this removes the impossible zero-budget slot while
+    keeping the reserve intact.
+    """
     capital = max(0.0, _f(capital_base))
     price = max(0.0, _f(premium))
     lot = max(1, _i(lot_size, 1))
-    allocation = float(runtime.SLOT_ALLOCATIONS.get(_i(slot, 1), 0.0))
-    budget = max(0.0, capital * allocation)
+    slot_number = _i(slot, 1)
+    allocation = float(runtime.SLOT_ALLOCATIONS.get(slot_number, 0.0))
+    target_budget = max(0.0, capital * allocation)
+    reserve_floor = max(0.0, capital * runtime.RESERVE_ALLOCATION)
+    committed = sum(runtime._row_capital_used(row) for row in (rows or []))
+    available_after_reserve = max(0.0, capital - reserve_floor - committed)
     one_lot_cost = price * lot
+
+    # Slot 3 is the optional remainder slot.  Never consume the 10% reserve,
+    # and never scale it beyond the minimum complete exchange lot.
+    flex_used = bool(
+        slot_number == 3
+        and one_lot_cost > 0
+        and one_lot_cost <= available_after_reserve + 1e-9
+    )
+    budget = (
+        one_lot_cost
+        if flex_used
+        else min(target_budget, available_after_reserve)
+    )
     lots = int(math.floor(budget / one_lot_cost)) if one_lot_cost > 0 else 0
     qty = lots * lot
     capital_used = round(price * qty, 2)
@@ -44,12 +73,26 @@ def _runtime_capital_size(capital_base, slot, premium, lot_size):
         "lot_size": lot,
         "lots": lots,
         "qty": qty,
+        "target_slot_budget": round(target_budget, 2),
         "slot_budget": round(budget, 2),
         "usable_capital": round(budget, 2),
+        "reserve_floor": round(reserve_floor, 2),
+        "committed_capital": round(committed, 2),
+        "available_after_reserve": round(available_after_reserve, 2),
         "one_lot_cost": round(one_lot_cost, 2),
         "capital_used": capital_used,
         "capital_left_in_slot": round(max(0.0, budget - capital_used), 2),
         "allocation_percent": round(allocation * 100.0, 2),
+        "actual_allocation_pct": round(
+            capital_used / capital * 100.0 if capital > 0 else 0.0,
+            2,
+        ),
+        "flex_used": flex_used,
+        "sizing_mode": (
+            "REMAINDER_SLOT_ONE_LOT"
+            if flex_used
+            else "CAPITAL_BASED_ALLOCATION"
+        ),
         "risk_cap_applied": False,
         "risk_sizing_mode": "CAPITAL_BASED_ALLOCATION",
         "quantity_sizing_rule": "FLOOR_ALLOCATION_DIVIDED_BY_PREMIUM_AND_LOT",

@@ -86,10 +86,20 @@ def _ensure_observation_schema(conn):
 
 
 def _can_enter_observation(conn, user_id, settings, rows, state):
-    if len(rows) >= runtime.MAX_OPEN_POSITIONS or state.get("live_order_lock"):
+    mode = _mode_from_settings(settings)
+    runtime._reconcile_mode_change_state(rows, mode, state)
+
+    # A broker-order lock belongs only to LIVE execution.  It can survive a
+    # restart/mode switch in the in-memory state and must not starve PAPER.
+    if mode == "paper":
+        state.pop("live_order_lock", None)
+        state.pop("live_order_lock_source", None)
+
+    if len(rows) >= runtime.MAX_OPEN_POSITIONS:
+        return False
+    if mode == "live" and state.get("live_order_lock"):
         return False
 
-    mode = _mode_from_settings(settings)
     count = _today_count(conn, user_id, mode)
 
     state["daily_trade_mode"] = mode.upper()

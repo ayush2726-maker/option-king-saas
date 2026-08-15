@@ -1021,6 +1021,10 @@ def _open_common(
     if not quality.get("allowed", True):
         return False
 
+    state.pop("position_size_block", None)
+    if not state.get("live_order_lock"):
+        state.pop("live_order_error", None)
+
     rows = _open_rows(conn, user_id)
     slot = _free_slot(rows)
     if slot is None or len(rows) >= MAX_OPEN_POSITIONS:
@@ -1051,6 +1055,9 @@ def _open_common(
             "MODE_GUARD",
             {"existing_modes": sorted(modes), "requested_mode": current_mode},
         )
+    # Do not let a mode-change message from an earlier scan stop candidate
+    # fallback after the conflicting positions have been closed.
+    state.pop("mode_change_blocked", None)
 
     if current_mode == "paper":
         capital_base = _paper_base(conn, user_id, settings)
@@ -1116,6 +1123,7 @@ def _open_common(
             state["live_order_error"] = order.get("message") or "Live BUY failed"
             if order.get("pending"):
                 state["live_order_lock"] = True
+                state["live_order_lock_source"] = "ENTRY_BUY_PENDING"
             return _record_preopen_failure(
                 state,
                 broker_name,
@@ -1481,12 +1489,22 @@ def _setting_truthy(value, default=False):
     }
 
 
+def _reconcile_mode_change_state(rows, current_mode, state):
+    """Keep the mode guard only while conflicting open positions exist."""
+    modes = {_mode(row) for row in (rows or [])}
+    blocked = bool(modes and current_mode not in modes)
+    if not blocked:
+        state.pop("mode_change_blocked", None)
+    return blocked
+
+
 def _can_enter(conn, user_id, settings, rows, state):
     current_mode = (
         "live"
         if str(settings.get("trading_mode", "paper")).lower() == "live"
         else "paper"
     )
+    _reconcile_mode_change_state(rows, current_mode, state)
     today_count = _today_count(conn, user_id)
     raw_daily = _i(settings.get("max_trades_per_day", 5), 5)
 
