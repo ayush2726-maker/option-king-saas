@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Mapping
 
-VERSION = "OKAI-MARKET-MECHANICS-V4"
+VERSION = "OKAI-MARKET-MECHANICS-V4.1"
 
 FEATURES = [
     "trend_momentum", "trend_exhaustion", "participation_strength",
@@ -19,6 +19,13 @@ FEATURES = [
     "premium_expensive", "premium_asymmetry", "theta_risk_context",
     "direction_quality_ce", "direction_quality_pe", "no_trade_pressure",
 ]
+
+_NEWS_DERIVED_FEATURES = (
+    "event_shock",
+    "context_conflict",
+    "direction_quality_ce",
+    "direction_quality_pe",
+)
 
 
 def _f(v: Any, d: float = 0.0) -> float:
@@ -50,8 +57,10 @@ def _derive(f: Mapping[str, Any]) -> Dict[str, float]:
     spread = _c(_f(f.get("spread_percent")))
     risk = _c(_f(f.get("option_risk")))
     iv = _c(_f(f.get("average_iv")))
-    ce_prem = _c(_f(f.get("ce_premium_to_spot")))
-    pe_prem = _c(_f(f.get("pe_premium_to_spot")))
+    # Option-premium V3 publishes the canonical ``*_premium_pct_spot`` names.
+    # Keep the old aliases as a read fallback for any already persisted rows.
+    ce_prem = _c(_f(f.get("ce_premium_pct_spot", f.get("ce_premium_to_spot"))))
+    pe_prem = _c(_f(f.get("pe_premium_pct_spot", f.get("pe_premium_to_spot"))))
     ce_theta = _c(_f(f.get("ce_theta_pressure")))
     pe_theta = _c(_f(f.get("pe_theta_pressure")))
 
@@ -97,6 +106,8 @@ def apply_market_mechanics_learning_v4_patch() -> bool:
             if name not in model.FEATURE_NAMES:
                 model.FEATURE_NAMES.append(name)
         model.FEATURE_GROUPS["MARKET_MECHANICS"] = tuple(FEATURES)
+        ablation = tuple(getattr(model, "NEWS_ABLATION_FEATURES", model.NEWS_FEATURES))
+        model.NEWS_ABLATION_FEATURES = tuple(dict.fromkeys(ablation + _NEWS_DERIVED_FEATURES))
 
         # Extend the V3 historical-row wrapper: V3 already reconstructs its own
         # derived features from stored snapshots; derive V4 from those rows too.

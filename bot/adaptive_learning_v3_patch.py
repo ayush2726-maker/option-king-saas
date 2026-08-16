@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Mapping
 
-VERSION = "OKAI-ADAPTIVE-LEARNING-V3"
+VERSION = "OKAI-ADAPTIVE-LEARNING-V3.1"
 
 _DERIVED_FEATURES = [
     "base_option_ce_agree",
@@ -33,6 +33,14 @@ _DERIVED_FEATURES = [
     "pcr_bearish_pressure",
     "directional_edge",
 ]
+
+_NEWS_DERIVED_FEATURES = (
+    "news_ce_alignment",
+    "news_pe_alignment",
+    # These contexts directly average news direction with base/option/RSI.
+    "bullish_context",
+    "bearish_context",
+)
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -150,6 +158,8 @@ def _install_feature_patch(model) -> None:
 
     model.FEATURE_NAMES.extend(name for name in _DERIVED_FEATURES if name not in model.FEATURE_NAMES)
     model.FEATURE_GROUPS["REGIME_INTERACTIONS"] = tuple(_DERIVED_FEATURES)
+    ablation = tuple(getattr(model, "NEWS_ABLATION_FEATURES", model.NEWS_FEATURES))
+    model.NEWS_ABLATION_FEATURES = tuple(dict.fromkeys(ablation + _NEWS_DERIVED_FEATURES))
     model._training_rows = training_rows_v3_safe
 
 

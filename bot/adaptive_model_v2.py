@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Mapping, Tuple
 
 from database import get_db
 
-VERSION = "OKAI-ADAPTIVE-SOFTMAX-V2.1"
+VERSION = "OKAI-ADAPTIVE-SOFTMAX-V2.2"
 MIN_TRAINING_SAMPLES = 300
 MIN_VALIDATION_SAMPLES = 60
 MIN_VALIDATION_ACCURACY = 0.40
@@ -31,6 +31,10 @@ FEATURE_NAMES = [
 ]
 LABELS = ("CE", "PE", "NO_TRADE")
 NEWS_FEATURES = ("news_ce", "news_pe", "news_strength", "news_risk")
+# Patches can add interaction/mechanics fields that are calculated from news.
+# Keep those fields out of the no-news ablation as well; otherwise the reported
+# "without news" score still contains news through derived features.
+NEWS_ABLATION_FEATURES = NEWS_FEATURES
 FEATURE_GROUPS = {
     "BASE_STRATEGY": ("base_ce", "base_pe", "base_no_trade"),
     "OPTION_CHAIN": (
@@ -347,6 +351,7 @@ def _feature_diagnostics(
             "brier_with_news": round(brier, 4),
             "brier_without_news": round(no_news_brier, 4),
             "brier_improvement": news_brier_improvement,
+            "excluded_features_without_news": list(NEWS_ABLATION_FEATURES),
             "meaning": (
                 "Positive delta ka matlab news features ne validation improve ki. "
                 "Negative delta ka matlab news noise bani."
@@ -399,7 +404,11 @@ def train_horizon(horizon: int = 15) -> Dict[str, Any]:
     majority_class = int(np.argmax(train_counts))
     baseline = float((y_valid == majority_class).mean())
 
-    news_indices = [FEATURE_NAMES.index(name) for name in NEWS_FEATURES]
+    news_indices = [
+        FEATURE_NAMES.index(name)
+        for name in NEWS_ABLATION_FEATURES
+        if name in FEATURE_NAMES
+    ]
     keep_indices = [index for index in range(len(FEATURE_NAMES)) if index not in news_indices]
     x_train_no_news_raw = x_train_raw[:, keep_indices]
     x_valid_no_news_raw = x_valid_raw[:, keep_indices]
