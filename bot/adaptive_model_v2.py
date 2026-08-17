@@ -598,6 +598,9 @@ def model_status() -> Dict[str, Any]:
         return {
             "success": True,
             "model_version": VERSION,
+            "mode": "TRAINING_ONLY_SHADOW",
+            "training_only": True,
+            "decision_authority": "BASELINE_STRATEGY_ONLY",
             "minimum_training_samples": MIN_TRAINING_SAMPLES,
             "activation_rules": {
                 "minimum_validation_accuracy_percent": round(MIN_VALIDATION_ACCURACY * 100, 2),
@@ -606,6 +609,7 @@ def model_status() -> Dict[str, Any]:
                 "minimum_class_train_samples": MIN_CLASS_TRAIN_SAMPLES,
             },
             "models": models,
+            "score_adjustment": 0,
             "trade_blocking": False,
             "order_execution": False,
         }
