@@ -305,7 +305,10 @@ def fuse_advanced(market, base, option_payload, news):
         reasons.append("DATA_COVERAGE_RISK_GATE")
     return {"success": True,"version": VERSION,"decision": decision,"confidence": int(confidence),
             "probabilities": probabilities,"reasons": list(dict.fromkeys(reasons))[:15],
-            "feature": feature,"adaptive_model": adaptive,"trade_blocking": False,"order_execution": False}
+            "feature": feature,"adaptive_model": adaptive,
+            "mode": "TRAINING_ONLY_SHADOW","training_only": True,
+            "decision_authority": "BASELINE_STRATEGY_ONLY","score_adjustment": 0,
+            "trade_blocking": False,"order_execution": False}
 
 
 def _find_contract(option_summary, entry):
