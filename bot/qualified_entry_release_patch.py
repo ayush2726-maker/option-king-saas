@@ -6,9 +6,10 @@ independent hard gates made an 82+ decision display as qualified while AUTO
 still returned WAIT.
 
 This patch removes only duplicated/advisory reasons after the final canonical
-score is known. Genuine execution and exhaustion protections stay blocking:
-score below threshold, sideways protection, ORB over-extension, late two-
-candle exhaustion, session counter-trend, market hours, cooldowns, sizing,
+score is known. ORB distance remains visible as telemetry, but it must not veto
+an otherwise score-qualified entry. Genuine execution and exhaustion
+protections stay blocking: score below threshold, sideways protection, late
+two-candle exhaustion, session counter-trend, market hours, cooldowns, sizing,
 contract/LTP/ATR and broker/order safety.
 """
 
@@ -25,6 +26,7 @@ ADVISORY_EXACT = {
     "EMA_TREND_REQUIRED",
     "REVERSAL_CANDLE_AT_ENTRY",
     "ORB_OR_MOMENTUM_TRIGGER_REQUIRED",
+    "ORB_EXTENSION_OVER_1.35_ATR",
     "EMA_EXTENSION_OVER_0.95_ATR",
     "VWAP_EXTENSION_OVER_2.20_ATR",
     "EMA_ANTI_CHASE",
@@ -137,7 +139,11 @@ def _repair_signal(signal: Any) -> Any:
         )
     )
 
-    warnings = list(output.get("warnings") or [])
+    warnings = [
+        warning
+        for warning in list(output.get("warnings") or [])
+        if "ORB_EXTENSION_OVER_1.35_ATR" not in str(warning).upper()
+    ]
     if removed:
         warnings.append(
             "QUALIFIED_ENTRY_DUPLICATE_BLOCKS_OBSERVATION_ONLY:"
@@ -156,6 +162,7 @@ def _repair_signal(signal: Any) -> Any:
         "mandatory_confirmations_blocking": False,
         "reversal_candle_blocking": False,
         "mtf_confirmation_blocking": False,
+        "orb_extension_blocking": False,
         "qualified_entry_release_applied": bool(removed),
         "qualified_entry_release_reasons": removed,
         "qualified_entry_release_version": VERSION,

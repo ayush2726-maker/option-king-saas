@@ -1,5 +1,6 @@
 from bot.entry_quality_v2_patch import _apply_entry_quality_v2
 from bot.entry_timing_calibration_patch import _apply_timing_gate
+from bot.qualified_entry_release_patch import _repair_signal as _repair_qualified_signal
 
 
 RETIRED_REASONS = {
@@ -83,3 +84,32 @@ def test_unrelated_shared_anti_chase_still_blocks_after_cleanup():
     assert output["signal"] == "WAIT"
     assert output["trade_allowed"] is False
     assert output["safety_gate_reasons"] == ["EMA_ANTI_CHASE"]
+
+def test_orb_extension_is_observation_only_for_qualified_entry():
+    signal = {
+        "signal": "WAIT",
+        "candidate_signal": "PE",
+        "score": 89,
+        "min_score": 82,
+        "trade_allowed": False,
+        "safety_gate_reasons": ["ORB_EXTENSION_OVER_1.35_ATR"],
+        "fresh_entry_block_reasons": ["ORB_EXTENSION_OVER_1.35_ATR"],
+        "warnings": ["FRESH_ENTRY_BLOCK:ORB_EXTENSION_OVER_1.35_ATR"],
+        "orb_extension_atr": 1.82,
+    }
+
+    output = _repair_qualified_signal(signal)
+
+    assert output["signal"] == "PE"
+    assert output["trade_allowed"] is True
+    assert output["safety_gate_passed"] is True
+    assert output["fresh_entry_ok"] is True
+    assert output["orb_extension_blocking"] is False
+    assert output["orb_extension_atr"] == 1.82
+    assert "ORB_EXTENSION_OVER_1.35_ATR" not in output["safety_gate_reasons"]
+    assert "ORB_EXTENSION_OVER_1.35_ATR" not in output["fresh_entry_block_reasons"]
+    assert all(
+        "ORB_EXTENSION_OVER_1.35_ATR" not in str(warning)
+        for warning in output["warnings"]
+    )
+
