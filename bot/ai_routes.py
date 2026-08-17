@@ -232,6 +232,11 @@ def shared_ai_predict(
     _require_personal_ai_key(x_ai_key)
     result = predict(dict(snapshot or {}))
     result["decision_location"] = "RAILWAY_SHARED_AI"
+    result["mode"] = "TRAINING_ONLY_SHADOW"
+    result["training_only"] = True
+    result["decision_authority"] = "BASELINE_STRATEGY_ONLY"
+    result["score_adjustment"] = 0
+    result["trade_blocking"] = False
     result["order_execution"] = False
     return result
 
@@ -251,6 +256,10 @@ def get_ai_decision(authorization: str = Header(None)):
     return {
         **result,
         "decision_location": "RAILWAY_SHARED_AI",
+        "mode": "TRAINING_ONLY_SHADOW",
+        "training_only": True,
+        "decision_authority": "BASELINE_STRATEGY_ONLY",
+        "score_adjustment": 0,
         "order_execution": False,
         "trade_blocking": False,
         "snapshot": snapshot,
