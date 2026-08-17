@@ -1,8 +1,13 @@
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Header
+from fastapi.responses import FileResponse
 from database import get_db
 from auth.routes import get_current_user
+from admin.pnl_report import build_all_user_pnl_report
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
+ADMIN_PANEL_FILE = Path(__file__).with_name("panel.html")
 
 
 def require_admin(authorization: str):
@@ -10,6 +15,16 @@ def require_admin(authorization: str):
     if not user["is_admin"]:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+@router.get("/panel", include_in_schema=False)
+def admin_panel():
+    """Serve the login shell; every data request remains admin-token protected."""
+    return FileResponse(
+        ADMIN_PANEL_FILE,
+        media_type="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.get("/dashboard")
@@ -92,6 +107,17 @@ def list_all_users(
         "page": page,
         "users": [dict(u) for u in users]
     }
+
+
+@router.get("/users/pnl")
+def all_users_pnl(authorization: str = Header(None)):
+    """Admin-only current and all-time net P&L for every user."""
+    require_admin(authorization)
+    conn = get_db()
+    try:
+        return build_all_user_pnl_report(conn)
+    finally:
+        conn.close()
 
 
 @router.post("/users/{user_id}/suspend")
