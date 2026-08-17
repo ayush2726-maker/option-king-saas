@@ -87,7 +87,13 @@ def test_open_user_recovery_starts_only_persisted_running_user(monkeypatch):
 
 
 def test_running_memory_runtime_is_not_started_twice(monkeypatch):
+    conn = _memory_db()
+    conn.execute("CREATE TABLE user_bot_state (user_id INTEGER PRIMARY KEY, is_running INTEGER)")
+    conn.execute("INSERT INTO user_bot_state (user_id, is_running) VALUES (4, 1)")
+    conn.commit()
+
     monkeypatch.setattr(recovery, "_runtime_state", lambda _user_id: {"running": True})
+    monkeypatch.setattr(recovery, "get_db", lambda: conn)
     monkeypatch.setattr(
         recovery,
         "_start_runtime",
@@ -95,6 +101,64 @@ def test_running_memory_runtime_is_not_started_twice(monkeypatch):
     )
 
     result = recovery.recover_user_runtime_if_needed(4)
+    assert result["already_running"] is True
+    assert result["attempted"] is False
+
+
+def test_all_stale_quotes_restart_running_runtime_once(monkeypatch):
+    conn = _memory_db()
+    conn.execute("CREATE TABLE user_bot_state (user_id INTEGER PRIMARY KEY, is_running INTEGER)")
+    conn.execute("INSERT INTO user_bot_state (user_id, is_running) VALUES (12, 1)")
+    conn.execute(
+        "INSERT INTO paper_trades (id, user_id, status) VALUES (21, 12, 'OPEN')"
+    )
+    conn.commit()
+
+    monkeypatch.setattr(recovery, "_quote_columns_ready", False)
+    monkeypatch.setattr(recovery, "_runtime_state", lambda _user_id: {"running": True})
+    monkeypatch.setattr(recovery, "get_db", lambda: conn)
+    monkeypatch.setattr(recovery, "_last_restart_attempt", {})
+    calls = []
+    monkeypatch.setattr(
+        recovery,
+        "_restart_stale_runtime",
+        lambda user_id: calls.append(user_id)
+        or {"attempted": True, "started": True, "stale_runtime_restarted": True},
+    )
+
+    result = recovery.recover_user_runtime_if_needed(12)
+
+    assert result["all_stale"] is True
+    assert result["stale_runtime_restarted"] is True
+    assert calls == [12]
+
+
+def test_one_fresh_open_quote_does_not_restart_runtime(monkeypatch):
+    conn = _memory_db()
+    conn.execute("CREATE TABLE user_bot_state (user_id INTEGER PRIMARY KEY, is_running INTEGER)")
+    conn.execute("INSERT INTO user_bot_state (user_id, is_running) VALUES (13, 1)")
+    conn.execute(
+        "INSERT INTO paper_trades (id, user_id, status) VALUES (22, 13, 'OPEN')"
+    )
+    monkeypatch.setattr(recovery, "_quote_columns_ready", False)
+    recovery._ensure_quote_columns(conn)
+    conn.execute(
+        "UPDATE paper_trades SET quote_updated_at=? WHERE id=22",
+        (recovery._utc_now(),),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(recovery, "_runtime_state", lambda _user_id: {"running": True})
+    monkeypatch.setattr(recovery, "get_db", lambda: conn)
+    monkeypatch.setattr(
+        recovery,
+        "_restart_stale_runtime",
+        lambda _user_id: (_ for _ in ()).throw(AssertionError("fresh runtime must not restart")),
+    )
+
+    result = recovery.recover_user_runtime_if_needed(13)
+
+    assert result["all_stale"] is False
     assert result["already_running"] is True
     assert result["attempted"] is False
 
