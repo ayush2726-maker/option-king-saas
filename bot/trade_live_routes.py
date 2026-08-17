@@ -25,6 +25,9 @@ import bot.risk_control_v2_bootstrap  # noqa: F401
 router = APIRouter(prefix="/bot", tags=["Bot"])
 
 
+LIVE_QUOTE_STALE_SECONDS = 15
+
+
 def _row_value(row, key, default=None):
     try:
         if key in row.keys():
@@ -81,6 +84,44 @@ def _time_ist(value):
         return ist.strftime("%H:%M IST")
     except Exception:
         return None
+
+
+def _quote_freshness(row, status):
+    """Expose the monitor quote age instead of silently presenting stale LTP."""
+    updated_at = _row_value(row, "quote_updated_at")
+    age_seconds = None
+
+    if updated_at:
+        try:
+            text = str(updated_at).strip().replace(" ", "T")
+            if text.endswith("Z"):
+                parsed = datetime.fromisoformat(text[:-1] + "+00:00")
+            else:
+                parsed = datetime.fromisoformat(text)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+            age_seconds = max(
+                0.0,
+                (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds(),
+            )
+        except Exception:
+            age_seconds = None
+
+    is_open = str(status or "").upper() == "OPEN"
+    stale = bool(
+        is_open
+        and (
+            age_seconds is None
+            or age_seconds > LIVE_QUOTE_STALE_SECONDS
+        )
+    )
+    return {
+        "quote_updated_at": updated_at,
+        "quote_age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
+        "quote_stale": stale,
+        "quote_stale_after_seconds": LIVE_QUOTE_STALE_SECONDS,
+        "quote_source": _row_value(row, "quote_source"),
+    }
 
 
 def _history_metrics(row, status, entry, qty):
@@ -172,6 +213,7 @@ def _trade_view(row):
 
     metrics = _history_metrics(row, status, entry, qty)
     trade.update(metrics)
+    trade.update(_quote_freshness(row, status))
 
     if status == "OPEN":
         current = _number(trade.get("current_price"), entry)
@@ -334,11 +376,14 @@ def get_trade_history(authorization: str = Header(None)):
 
 @router.get("/trade-live")
 def get_live_trade_price(authorization: str = Header(None)):
-    """Return the current open trade with latest monitored option LTP and net P&L."""
+    """Return every open trade with its latest monitored option LTP and net P&L.
+
+    ``trade`` remains the slot-1 compatibility field for older app builds.
+    Current builds consume ``trades`` so slot 2/3 never wait for the slower
+    history refresh before their price, SL and P&L change on screen.
+    """
     user = get_current_user(authorization)
 
-    # Repair old gross-P&L rows before the history/chart UI refreshes. This is
-    # idempotent and normally becomes a no-op after the first request.
     try:
         backfill_closed_trade_costs(user["id"])
     except Exception:
@@ -347,15 +392,14 @@ def get_live_trade_price(authorization: str = Header(None)):
     conn = get_db()
 
     try:
-        row = conn.execute(
+        rows = conn.execute(
             """
             SELECT * FROM paper_trades
             WHERE user_id=? AND status='OPEN'
             ORDER BY COALESCE(capital_slot, 99) ASC, id ASC
-            LIMIT 1
             """,
             (user["id"],),
-        ).fetchone()
+        ).fetchall()
     except Exception as exc:
         conn.close()
         return {
@@ -367,17 +411,24 @@ def get_live_trade_price(authorization: str = Header(None)):
 
     conn.close()
 
-    if not row:
+    if not rows:
         return {
             "success": True,
             "open": False,
             "trade": None,
+            "trades": [],
+            "open_positions": [],
+            "open_trade_count": 0,
             "as_of": datetime.now(timezone.utc).isoformat(),
             "display_only": True,
         }
 
-    trade = _trade_view(row)
-    live_price = _number(trade.get("live_price"), _row_value(row, "entry_price", 0))
+    trades = [_trade_view(row) for row in rows]
+    trade = trades[0]
+    live_price = _number(
+        trade.get("live_price"),
+        _row_value(rows[0], "entry_price", 0),
+    )
     gross_pnl = round(_number(trade.get("gross_pnl"), 0), 2)
     total_charges = round(_number(trade.get("total_charges"), 0), 2)
     pnl = round(_number(trade.get("net_pnl", trade.get("pnl", 0))), 2)
@@ -386,11 +437,20 @@ def get_live_trade_price(authorization: str = Header(None)):
         "success": True,
         "open": True,
         "trade": trade,
+        "trades": trades,
+        "open_positions": trades,
+        "open_trade_count": len(trades),
         "live_price": round(live_price, 2),
         "gross_pnl": gross_pnl,
         "estimated_exit_costs": total_charges,
         "net_pnl": pnl,
-        "runtime_ltp_available": _row_value(row, "last_ltp") is not None,
+        "runtime_ltp_available": all(
+            _row_value(row, "last_ltp") is not None for row in rows
+        ),
+        "all_quotes_fresh": all(not item.get("quote_stale") for item in trades),
+        "stale_trade_ids": [
+            item.get("id") for item in trades if item.get("quote_stale")
+        ],
         "source": "OPEN_TRADE_RUNTIME_LAST_LTP",
         "as_of": datetime.now(timezone.utc).isoformat(),
         "display_only": True,
