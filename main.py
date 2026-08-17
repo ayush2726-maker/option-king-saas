@@ -158,7 +158,7 @@ apply_pullback_continuation_entry_patch()
 # evaluates them in a background shadow worker; it cannot mutate scans/orders.
 apply_missed_trade_learning_patch()
 
-RELEASE_VERSION = "multi-position-live-quotes-v2"
+RELEASE_VERSION = "stale-quote-auto-recovery-v3"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
