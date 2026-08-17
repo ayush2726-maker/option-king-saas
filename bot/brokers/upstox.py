@@ -284,32 +284,99 @@ class UpstoxBroker(BaseBroker):
         self.is_logged_in = False
         return {"success": True}
 
+    @staticmethod
+    def _quote_instrument(symbol, exchange="NFO"):
+        raw = str(symbol or "").strip()
+        if "|" in raw:
+            return raw
+        segment = (
+            "BSE_FO"
+            if str(exchange or "").upper().startswith(("BSE", "BFO"))
+            else "NSE_FO"
+        )
+        return f"{segment}|{raw}"
+
+    def get_ltps(self, symbols, exchange="NFO"):
+        """Fetch live quotes in one V3 call; retain V2 only as a fallback."""
+        instruments = []
+        for symbol in symbols or []:
+            instrument = self._quote_instrument(symbol, exchange)
+            if instrument and instrument not in instruments:
+                instruments.append(instrument)
+        if not instruments:
+            return {"success": False, "quotes": {}, "message": "No instruments"}
+
+        errors = []
+        for url, source in (
+            (f"{self.V3_URL}/market-quote/ltp", "UPSTOX_LTP_V3"),
+            (f"{self.BASE_URL}/market-quote/ltp", "UPSTOX_LTP_V2_FALLBACK"),
+        ):
+            try:
+                response = requests.get(
+                    url,
+                    params={"instrument_key": ",".join(instruments)},
+                    headers=self._h(),
+                    timeout=10,
+                )
+                payload = response.json()
+                data = payload.get("data") or {}
+                quotes = {}
+                for response_key, entry in data.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    price = entry.get("last_price")
+                    if price is None:
+                        continue
+                    returned_token = str(entry.get("instrument_token") or "").strip()
+                    normalized_key = str(response_key or "").replace(":", "|", 1)
+                    quote = {
+                        "success": True,
+                        "ltp": price,
+                        "instrument_token": returned_token,
+                        "quote_source": source,
+                    }
+                    if returned_token:
+                        quotes[returned_token] = quote
+                    quotes[normalized_key] = quote
+
+                # Upstox response keys can be trading symbols rather than the
+                # requested numeric instrument tokens. Fill exact request keys
+                # from returned instrument_token first, then the sole result.
+                sole_quote = next(iter(quotes.values()), None)
+                for instrument in instruments:
+                    if instrument not in quotes and len(data) == 1 and sole_quote:
+                        quotes[instrument] = sole_quote
+
+                if quotes:
+                    return {
+                        "success": True,
+                        "quotes": quotes,
+                        "quote_source": source,
+                    }
+                errors.append(
+                    f"{source}:{response.status_code}:"
+                    f"{self._message(payload)}"
+                )
+            except Exception as exc:
+                errors.append(f"{source}:{type(exc).__name__}:{str(exc)[:160]}")
+
+        return {
+            "success": False,
+            "quotes": {},
+            "message": " | ".join(errors[-2:])[:400],
+        }
+
     def get_ltp(self, symbol, exchange="NFO"):
-        try:
-            instrument = symbol if "|" in str(symbol) else f"NSE_FO|{symbol}"
-            response = requests.get(
-                f"{self.BASE_URL}/market-quote/ltp",
-                params={"instrument_key": instrument},
-                headers=self._h(),
-                timeout=10,
-            )
-            data = response.json().get("data", {})
-            key_variant = instrument.replace("|", ":")
-            entry = data.get(instrument) or data.get(key_variant)
-            if not entry:
-                entry = next(iter(data.values()), None)
-            if not entry:
-                return {
-                    "success": False,
-                    "message": f"No LTP data: {response.text[:200]}",
-                }
-            return {
-                "success": True,
-                "ltp": entry["last_price"],
-                "symbol": symbol,
-            }
-        except Exception as exc:
-            return {"success": False, "message": str(exc)}
+        instrument = self._quote_instrument(symbol, exchange)
+        result = self.get_ltps([instrument], exchange=exchange)
+        quote = (result.get("quotes") or {}).get(instrument)
+        if quote:
+            return {**quote, "symbol": symbol}
+        return {
+            "success": False,
+            "message": result.get("message") or f"No LTP data for {instrument}",
+            "symbol": symbol,
+        }
 
     def get_candles(
         self,
