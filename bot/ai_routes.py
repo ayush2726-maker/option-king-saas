@@ -158,6 +158,11 @@ def ai_health():
         "success": True,
         "service": "Option King Shared Railway AI",
         "model_version": MODEL_VERSION,
+        "mode": "TRAINING_ONLY_SHADOW",
+        "training_only": True,
+        "decision_authority": "BASELINE_STRATEGY_ONLY",
+        "score_adjustment": 0,
+        "trade_blocking": False,
         "personal_api_key_configured": bool(os.getenv("OKAI_AI_API_KEY", "").strip()),
         "order_execution": False,
         "shadow_monitor": {
