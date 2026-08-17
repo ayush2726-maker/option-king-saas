@@ -100,6 +100,10 @@ try:
     apply_market_mechanics_learning_v4_patch()
 except Exception: pass
 try:
+    from bot.baseline_setup_training_v5_patch import apply_baseline_setup_training_v5_patch
+    apply_baseline_setup_training_v5_patch()
+except Exception: pass
+try:
     from bot.adaptive_runtime_binding_v3 import apply_adaptive_runtime_binding_v3
     apply_adaptive_runtime_binding_v3()
 except Exception: pass
