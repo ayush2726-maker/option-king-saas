@@ -110,12 +110,36 @@ def _monitor_multi_for_one_minute(user_id, broker_name, obj, state, scans):
             runtime._ensure_schema(conn)
             rows = runtime._open_rows(conn, user_id)
             if rows:
+                batch_quotes = None
+                batch_error = None
+                if broker_name == "upstox" and hasattr(obj, "get_ltps"):
+                    refs = [
+                        runtime._v(trade, "token", trade["symbol"])
+                        or trade["symbol"]
+                        for trade in rows
+                    ]
+                    batch = obj.get_ltps(refs)
+                    batch_quotes = batch.get("quotes") or {}
+                    batch_error = batch.get("message") or "UPSTOX_BATCH_LTP_MISSING"
+
+                def quote_for_trade(trade):
+                    if batch_quotes is None:
+                        return runtime._ltp_multi(broker_name, obj, trade)
+                    ref = (
+                        runtime._v(trade, "token", trade["symbol"])
+                        or trade["symbol"]
+                    )
+                    return batch_quotes.get(str(ref)) or {
+                        "success": False,
+                        "message": batch_error,
+                    }
+
                 runtime._manage_rows(
                     conn,
                     user_id,
                     rows,
                     scans,
-                    lambda trade: runtime._ltp_multi(broker_name, obj, trade),
+                    quote_for_trade,
                     lambda r, a, q, p: runtime._place_multi(obj, r, a, q, p),
                     state,
                 )
