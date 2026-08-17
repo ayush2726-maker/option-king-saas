@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,11 +28,16 @@ from bot import auto_portfolio_runtime as runtime
 from database import get_db
 
 
-VERSION = "LIVE_QUOTE_RUNTIME_RECOVERY_V1"
+VERSION = "LIVE_QUOTE_RUNTIME_RECOVERY_V2"
 LIVE_PATHS = {"/bot/trade-live"}
 _QUOTE_COLUMNS = {"quote_updated_at", "quote_source"}
 _quote_columns_ready = False
 _quote_columns_lock = threading.Lock()
+STALE_RUNTIME_SECONDS = 20
+STALE_RESTART_COOLDOWN_SECONDS = 45
+_restart_locks: dict[int, threading.Lock] = {}
+_restart_locks_guard = threading.Lock()
+_last_restart_attempt: dict[int, float] = {}
 
 
 def _utc_now() -> str:
@@ -120,6 +126,109 @@ def apply_live_quote_timestamp_patch() -> None:
     runtime._okai_live_quote_timestamp_version = VERSION
 
 
+def _parse_utc(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        text = str(value).strip().replace(" ", "T")
+        if text.endswith("Z"):
+            parsed = datetime.fromisoformat(text[:-1] + "+00:00")
+        else:
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _open_quote_health(conn, user_id: int) -> dict[str, Any]:
+    """Return true stale state only when every open quote has stopped."""
+    _ensure_quote_columns(conn)
+    try:
+        rows = conn.execute(
+            """
+            SELECT quote_updated_at
+            FROM paper_trades
+            WHERE user_id=? AND status='OPEN'
+            """,
+            (int(user_id),),
+        ).fetchall()
+    except Exception:
+        rows = []
+
+    now = datetime.now(timezone.utc)
+    ages: list[float | None] = []
+    for row in rows:
+        try:
+            value = row["quote_updated_at"]
+        except Exception:
+            value = row[0] if row else None
+        parsed = _parse_utc(value)
+        ages.append(max(0.0, (now - parsed).total_seconds()) if parsed else None)
+
+    stale_count = sum(
+        age is None or age > STALE_RUNTIME_SECONDS
+        for age in ages
+    )
+    return {
+        "open_count": len(ages),
+        "stale_count": stale_count,
+        "all_stale": bool(ages) and stale_count == len(ages),
+        "oldest_quote_age_seconds": (
+            round(max(age for age in ages if age is not None), 1)
+            if any(age is not None for age in ages)
+            else None
+        ),
+    }
+
+
+def _restart_lock(user_id: int) -> threading.Lock:
+    uid = int(user_id)
+    with _restart_locks_guard:
+        lock = _restart_locks.get(uid)
+        if lock is None:
+            lock = threading.Lock()
+            _restart_locks[uid] = lock
+        return lock
+
+
+def _restart_stale_runtime(user_id: int) -> dict[str, Any]:
+    """Replace a wedged broker session, with one restart per cooldown window."""
+    uid = int(user_id)
+    lock = _restart_lock(uid)
+    if not lock.acquire(blocking=False):
+        return {"attempted": False, "started": False, "restart_in_progress": True}
+
+    try:
+        now = time.monotonic()
+        last_attempt = _last_restart_attempt.get(uid, 0.0)
+        if now - last_attempt < STALE_RESTART_COOLDOWN_SECONDS:
+            return {
+                "attempted": False,
+                "started": False,
+                "restart_cooldown": True,
+            }
+
+        _last_restart_attempt[uid] = now
+        try:
+            from bot.angel_fetcher import stop_user_bot
+
+            stop_user_bot(uid)
+        except Exception:
+            pass
+
+        recovery = _start_runtime(uid)
+        return {
+            "attempted": True,
+            "started": bool(recovery.get("started")),
+            "reason": recovery.get("reason"),
+            "stale_runtime_restarted": bool(recovery.get("started")),
+        }
+    finally:
+        lock.release()
+
+
 def _persisted_running(conn, user_id: int) -> bool:
     for table in ("user_bot_state", "bot_status"):
         try:
@@ -188,13 +297,33 @@ def _start_runtime(user_id: int) -> dict[str, Any]:
 
 
 def recover_user_runtime_if_needed(user_id: int) -> dict[str, Any]:
-    """Restart only when the persisted bot is ON and memory runtime is absent."""
+    """Recover a missing runtime or replace a running-but-wedged quote feed."""
     state = _runtime_state(user_id)
     if state.get("running"):
+        conn = get_db()
+        try:
+            should_run = _persisted_running(conn, int(user_id))
+            health = _open_quote_health(conn, int(user_id))
+        except Exception:
+            should_run = False
+            health = {"open_count": 0, "stale_count": 0, "all_stale": False}
+        finally:
+            conn.close()
+
+        if should_run and health.get("all_stale"):
+            restarted = _restart_stale_runtime(user_id)
+            return {
+                **restarted,
+                **health,
+                "already_running": False,
+                "version": VERSION,
+            }
+
         return {
             "attempted": False,
             "started": False,
             "already_running": True,
+            **health,
             "version": VERSION,
         }
 
