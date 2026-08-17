@@ -144,10 +144,15 @@ def _repair_signal(signal: Any) -> Any:
         for warning in list(output.get("warnings") or [])
         if "ORB_EXTENSION_OVER_1.35_ATR" not in str(warning).upper()
     ]
-    if removed:
+    reported_removed = [
+        reason
+        for reason in removed
+        if reason != "ORB_EXTENSION_OVER_1.35_ATR"
+    ]
+    if reported_removed:
         warnings.append(
             "QUALIFIED_ENTRY_DUPLICATE_BLOCKS_OBSERVATION_ONLY:"
-            + ",".join(removed)
+            + ",".join(reported_removed)
         )
 
     output.update({
