@@ -46,6 +46,10 @@
   .hidden { display: none; }
   .refresh-btn { float: right; padding: 6px 14px; background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 6px; color: #888; cursor: pointer; font-size: 12px; }
   .bot-control { display: flex; gap: 12px; align-items: center; }
+  .money-positive { color: #00c853; font-weight: 700; }
+  .money-negative { color: #ff5252; font-weight: 700; }
+  .money-flat { color: #aaa; font-weight: 700; }
+  .table-wrap { width: 100%; overflow-x: auto; }
   .modal { display: none; position: fixed; inset: 0; background: #00000088; z-index: 100; justify-content: center; align-items: center; }
   .modal.show { display: flex; }
   .modal-box { background: #1a1a2e; border-radius: 12px; padding: 24px; width: 320px; border: 1px solid #2a2a4a; }
@@ -62,7 +66,7 @@
   <div class="login-box">
     <h2>⚡ Option King AI</h2>
     <p style="color:#888;text-align:center;margin-bottom:24px;font-size:13px">Admin Panel</p>
-    <input type="email" id="loginEmail" placeholder="Email" value="ayush2726@gmail.com">
+    <input type="email" id="loginEmail" placeholder="Email">
     <input type="password" id="loginPassword" placeholder="Password">
     <button class="btn" onclick="doLogin()">Login</button>
     <div id="loginError" class="error"></div>
@@ -81,10 +85,31 @@
 
   <div class="container">
     <div class="nav">
-      <div class="nav-btn active" onclick="showTab('dashboard')">📊 Dashboard</div>
-      <div class="nav-btn" onclick="showTab('users')">👥 Users</div>
-      <div class="nav-btn" onclick="showTab('bot')">🤖 Bot</div>
-      <div class="nav-btn" onclick="showTab('broker')">🔗 Broker</div>
+      <div class="nav-btn active" data-tab="dashboard" onclick="showTab('dashboard')">📊 Dashboard</div>
+      <div class="nav-btn" data-tab="users" onclick="showTab('users')">👥 Users</div>
+      <div class="nav-btn" data-tab="pnl" onclick="showTab('pnl')">₹ User P&amp;L</div>
+      <div class="nav-btn" data-tab="bot" onclick="showTab('bot')">🤖 Bot</div>
+      <div class="nav-btn" data-tab="broker" onclick="showTab('broker')">🔗 Broker</div>
+    </div>
+
+    <!-- User P&L Tab -->
+    <div id="tab-pnl" class="hidden">
+      <div class="stats-grid">
+        <div class="stat-card"><div class="value" id="pnl-today">-</div><div class="label">Today Net P&amp;L</div></div>
+        <div class="stat-card"><div class="value" id="pnl-all-time">-</div><div class="label">All-time Net P&amp;L</div></div>
+        <div class="stat-card"><div class="value" id="pnl-open">-</div><div class="label">Current Open P&amp;L</div></div>
+        <div class="stat-card"><div class="value" id="pnl-users">-</div><div class="label">Users</div></div>
+      </div>
+      <div class="card">
+        <h3>All Users P&amp;L <button class="refresh-btn" onclick="loadPnl()">↻ Refresh</button></h3>
+        <div id="pnlAsOf" style="font-size:12px;color:#888;margin-bottom:12px"></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>User</th><th>Today</th><th>Open</th><th>Paper All-time</th><th>Live All-time</th><th>Total All-time</th><th>Trades</th></tr></thead>
+            <tbody id="pnlUsersTable"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
     <!-- Dashboard Tab -->
@@ -206,18 +231,70 @@ function doLogout() {
 }
 
 function showTab(tab) {
-  ['dashboard','users','bot','broker'].forEach(t => {
+  ['dashboard','users','pnl','bot','broker'].forEach(t => {
     document.getElementById('tab-' + t).classList.add('hidden');
     document.querySelectorAll('.nav-btn').forEach((b,i) => b.classList.remove('active'));
   });
   document.getElementById('tab-' + tab).classList.remove('hidden');
   document.querySelectorAll('.nav-btn').forEach(b => {
-    if (b.textContent.toLowerCase().includes(tab)) b.classList.add('active');
+    if (b.dataset.tab === tab) b.classList.add('active');
   });
   if (tab === 'dashboard') loadDashboard();
   if (tab === 'users') loadUsers();
+  if (tab === 'pnl') loadPnl();
   if (tab === 'bot') { loadBotStatus(); loadStrategy(); }
   if (tab === 'broker') loadBrokers();
+}
+
+function moneyClass(value) {
+  const n = Number(value || 0);
+  return n > 0 ? 'money-positive' : (n < 0 ? 'money-negative' : 'money-flat');
+}
+
+function money(value) {
+  const n = Number(value || 0);
+  const sign = n > 0 ? '+' : '';
+  return `${sign}₹${n.toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2})}`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>'"]/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+  })[c]);
+}
+
+async function loadPnl() {
+  const data = await api('GET', '/admin/users/pnl');
+  if (!data?.success) return;
+  const combined = data.totals?.combined || {};
+  const today = combined.today || {};
+  const allTime = combined.all_time || {};
+  const setMoney = (id, value) => {
+    const el = document.getElementById(id);
+    el.textContent = money(value);
+    el.className = 'value ' + moneyClass(value);
+  };
+  setMoney('pnl-today', today.net_pnl);
+  setMoney('pnl-all-time', allTime.net_pnl);
+  setMoney('pnl-open', allTime.open_pnl);
+  document.getElementById('pnl-users').textContent = data.user_count || 0;
+  document.getElementById('pnlAsOf').textContent = `Date: ${data.date_ist} IST • Net after costs • Updated ${new Date(data.as_of).toLocaleString('en-IN')}`;
+  document.getElementById('pnlUsersTable').innerHTML = (data.users || []).map(u => {
+    const open = u.combined?.all_time?.open_pnl || 0;
+    const unpriced = u.combined?.all_time?.unpriced_open_trades || 0;
+    const trades = u.combined?.all_time?.trade_count || 0;
+    return `
+      <tr>
+        <td><b>${escapeHtml(u.name)}</b><br><span style="color:#777;font-size:11px">${escapeHtml(u.email)}</span></td>
+        <td class="${moneyClass(u.today_net_pnl)}">${money(u.today_net_pnl)}</td>
+        <td class="${moneyClass(open)}">${money(open)}${unpriced ? `<br><span style="color:#ff9100;font-size:10px">${unpriced} awaiting quote</span>` : ''}</td>
+        <td class="${moneyClass(u.paper?.all_time?.net_pnl)}">${money(u.paper?.all_time?.net_pnl)}</td>
+        <td class="${moneyClass(u.live?.all_time?.net_pnl)}">${money(u.live?.all_time?.net_pnl)}</td>
+        <td class="${moneyClass(u.all_time_net_pnl)}">${money(u.all_time_net_pnl)}</td>
+        <td>${trades}</td>
+      </tr>
+    `;
+  }).join('');
 }
 
 async function loadDashboard() {
