@@ -16,6 +16,7 @@ from bot.net_pnl_history_patch import (
     backfill_closed_trade_costs,
     calculate_row_net_costs,
 )
+from bot.authoritative_ledger import build_authoritative_ledger
 
 # Imported for startup side effects. It installs equity-risk sizing and stronger
 # post-loss re-entry protection before the bot/backtest patches are activated.
@@ -345,6 +346,21 @@ def get_trade_history(authorization: str = Header(None)):
 
     conn = get_db()
     try:
+        settings = {
+            "trading_mode": "paper",
+            "paper_capital": 100000,
+        }
+        try:
+            import json
+
+            settings_row = conn.execute(
+                "SELECT settings_json FROM strategy_settings WHERE user_id=?",
+                (user["id"],),
+            ).fetchone()
+            if settings_row:
+                settings.update(json.loads(settings_row["settings_json"] or "{}"))
+        except Exception:
+            pass
         rows = conn.execute(
             """
             SELECT * FROM paper_trades
@@ -355,6 +371,7 @@ def get_trade_history(authorization: str = Header(None)):
             (user["id"],),
         ).fetchall()
         trades = [_trade_view(row) for row in rows]
+        ledger = build_authoritative_ledger(conn, user["id"], settings)
     except Exception as exc:
         return {
             "success": False,
@@ -368,7 +385,8 @@ def get_trade_history(authorization: str = Header(None)):
         "success": True,
         "paper_trades": trades,
         "count": len(trades),
-        "today": _today_summary(trades),
+        "today": ledger["today"],
+        "ledger": ledger,
         "pnl_basis": "NET_AFTER_EXECUTION_COSTS",
         "history_display": "HIGH_LOW_NOW_ENTRY_EXIT_TIME_V2",
     }
