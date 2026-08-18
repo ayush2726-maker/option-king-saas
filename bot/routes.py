@@ -10,6 +10,7 @@ from telegram.routes import notify_user
 from datetime import datetime, timezone, timedelta
 import json
 import random
+from bot.authoritative_ledger import build_authoritative_ledger
 
 try:
     from bot.angel_fetcher import start_user_bot, stop_user_bot, get_user_bot_state, angel_login, INDEX_TOKENS, INDEX_EXCHANGE
@@ -1030,17 +1031,31 @@ def get_signal(authorization: str = Header(None)):
     except Exception:
         pass
 
-    # Use the same PAPER carry-forward owner as runtime sizing. LIVE reads only
-    # broker-funded capital saved on an actual open position.
-    capital_snapshot = _status_capital_snapshot(
-        conn,
-        user["id"],
-        settings,
-        trading_mode,
-        paper_capital,
-        total_pnl,
-        active_trades,
-    )
+    # One authoritative DB ledger owns Today P&L, Total P&L and Current Capital.
+    # This prevents the dashboard from combining legacy bot_status totals with
+    # locally aggregated history rows.
+    try:
+        ledger = build_authoritative_ledger(conn, user["id"], settings)
+        total_trades = ledger["total_trades"]
+        total_pnl = ledger["realized_pnl"]
+        capital_snapshot = {
+            "starting_capital": ledger["starting_capital"],
+            "current_capital": ledger["current_capital"],
+            "current_equity": ledger["current_capital"],
+            "open_pnl": ledger["open_pnl"],
+            "capital_source": ledger["source"],
+        }
+    except Exception:
+        ledger = None
+        capital_snapshot = _status_capital_snapshot(
+            conn,
+            user["id"],
+            settings,
+            trading_mode,
+            paper_capital,
+            total_pnl,
+            active_trades,
+        )
 
     conn.close()
 
@@ -1071,6 +1086,8 @@ def get_signal(authorization: str = Header(None)):
         "trading_mode": trading_mode,
         "paper_capital": paper_capital,
         **capital_snapshot,
+        "ledger": ledger,
+        "today": ledger.get("today") if ledger else None,
         "primary_instrument": primary,
         "enabled_instruments": enabled,
         "qty": qty,

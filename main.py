@@ -97,6 +97,9 @@ from bot.pullback_continuation_entry_patch import (
 from bot.missed_trade_learning_v1 import (
     apply_missed_trade_learning_patch,
 )
+from bot.final_correlated_risk_guard import (
+    apply_final_correlated_risk_guard,
+)
 from bot.admin_morning_trade_cleanup_20260804 import (
     delete_admin_morning_paper_trades_20260804,
 )
@@ -157,6 +160,9 @@ apply_pullback_continuation_entry_patch()
 # Final observability/learning layer. It records post-decision missed setups and
 # evaluates them in a background shadow worker; it cannot mutate scans/orders.
 apply_missed_trade_learning_patch()
+# Absolute final order authority: correlated exposure plus the exact 15-minute
+# same-index/same-side loss cooldown cannot be replaced by another wrapper.
+apply_final_correlated_risk_guard()
 
 RELEASE_VERSION = "admin-all-users-pnl-v1"
 
