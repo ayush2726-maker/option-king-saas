@@ -128,3 +128,10 @@ try:
     from bot.regime_accuracy_confirmation_patch import apply_regime_accuracy_confirmation_patch
     apply_regime_accuracy_confirmation_patch()
 except Exception: pass
+
+# Exit an invalidated CE/PE as soon as the completed-candle scan confirms a
+# strong opposite trend. Do not wait for the wider premium SL to be touched.
+try:
+    from bot.fast_opposite_trend_exit_patch import apply_fast_opposite_trend_exit_patch
+    apply_fast_opposite_trend_exit_patch()
+except Exception: pass
