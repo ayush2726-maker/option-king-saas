@@ -84,6 +84,109 @@ def _paper_trade_view(row):
     return trade
 
 
+def _paper_daily_summary(conn, user_id, limit=120):
+    """Return only IST calendar dates on which this user actually traded."""
+    rows = conn.execute(
+        """
+        SELECT
+            date(datetime(created_at, '+5 hours', '+30 minutes')) AS trade_date,
+            COUNT(*) AS trade_count,
+            SUM(CASE WHEN UPPER(COALESCE(status,''))='CLOSED' THEN 1 ELSE 0 END) AS closed_count,
+            SUM(CASE WHEN UPPER(COALESCE(status,''))='OPEN' THEN 1 ELSE 0 END) AS open_count,
+            SUM(CASE WHEN UPPER(COALESCE(status,''))='CLOSED'
+                     AND COALESCE(net_pnl,pnl,0) > 0 THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN UPPER(COALESCE(status,''))='CLOSED'
+                     AND COALESCE(net_pnl,pnl,0) < 0 THEN 1 ELSE 0 END) AS losses,
+            COALESCE(SUM(
+                CASE WHEN UPPER(COALESCE(status,''))='CLOSED'
+                     THEN COALESCE(net_pnl,pnl,0)
+                     ELSE 0 END
+            ), 0) AS day_pnl
+        FROM paper_trades
+        WHERE user_id=? AND created_at IS NOT NULL
+        GROUP BY trade_date
+        HAVING trade_date IS NOT NULL
+        ORDER BY trade_date DESC
+        LIMIT ?
+        """,
+        (user_id, max(1, int(limit or 120))),
+    ).fetchall()
+
+    history = []
+    for row in rows:
+        data = row_to_dict(row)
+        trade_date = str(data.get("trade_date") or "")
+        try:
+            parsed = datetime.strptime(trade_date, "%Y-%m-%d")
+            display_date = parsed.strftime("%d %b %Y")
+            day = parsed.day
+            month = parsed.strftime("%b")
+            year = parsed.year
+        except Exception:
+            display_date = trade_date
+            day = None
+            month = ""
+            year = None
+
+        pnl = round(_number(data.get("day_pnl")), 2)
+        history.append({
+            "date": trade_date,
+            "display_date": display_date,
+            "day": day,
+            "month": month,
+            "year": year,
+            "trade_count": int(data.get("trade_count") or 0),
+            "closed_count": int(data.get("closed_count") or 0),
+            "open_count": int(data.get("open_count") or 0),
+            "wins": int(data.get("wins") or 0),
+            "losses": int(data.get("losses") or 0),
+            "pnl": pnl,
+            "net_pnl": pnl,
+            "pnl_basis": "NET_AFTER_EXECUTION_COSTS",
+            "has_trades": True,
+            "drilldown_date": trade_date,
+        })
+    return history
+
+
+def _day_summary_from_trades(trade_date, trades):
+    closed = [
+        trade for trade in trades
+        if str(trade.get("status") or "").upper() == "CLOSED"
+    ]
+    opened = [
+        trade for trade in trades
+        if str(trade.get("status") or "").upper() == "OPEN"
+    ]
+    pnl = round(sum(
+        _number(
+            trade.get("net_pnl")
+            if trade.get("net_pnl") is not None
+            else trade.get("pnl")
+        )
+        for trade in closed
+    ), 2)
+    wins = sum(1 for trade in closed if _number(trade.get("pnl")) > 0)
+    losses = sum(1 for trade in closed if _number(trade.get("pnl")) < 0)
+    try:
+        parsed = datetime.strptime(trade_date, "%Y-%m-%d")
+        display_date = parsed.strftime("%d %b %Y")
+    except Exception:
+        display_date = trade_date
+    return {
+        "date": trade_date,
+        "display_date": display_date,
+        "trade_count": len(trades),
+        "closed_count": len(closed),
+        "open_count": len(opened),
+        "wins": wins,
+        "losses": losses,
+        "pnl": pnl,
+        "net_pnl": pnl,
+        "pnl_basis": "NET_AFTER_EXECUTION_COSTS",
+    }
+
+
 def ensure_tables(conn):
     conn.execute("""
         CREATE TABLE IF NOT EXISTS paper_trades (
@@ -191,7 +294,7 @@ def trade_history(authorization: str = Header(None)):
 def paper_history(authorization: str = Header(None)):
     user = get_current_user(authorization)
 
-    # Convert old gross rows to net P&L before the graph reads them.
+    # Convert old gross rows to net P&L before history totals are calculated.
     try:
         backfill_closed_trade_costs(user["id"])
     except Exception:
@@ -205,14 +308,68 @@ def paper_history(authorization: str = Header(None)):
         (user["id"],)
     ).fetchall()
     trades = [_paper_trade_view(row) for row in rows]
+    daily_history = _paper_daily_summary(conn, user["id"])
 
     conn.close()
     return {
         "success": True,
+        # Backward compatible full list for old app builds.
+        "paper_trades": trades,
+        "count": len(trades),
+        # New primary Trade History view: one row/card per actual trading date.
+        "daily_history": daily_history,
+        "daily_count": len(daily_history),
+        "history_view": "DAILY_DRILLDOWN_V1",
+        "pnl_basis": "NET_AFTER_EXECUTION_COSTS",
+        "timestamp_format": "ISO_UTC",
+        "timezone": "Asia/Kolkata",
+    }
+
+@router.get("/history/paper/day")
+def paper_history_day(date: str, authorization: str = Header(None)):
+    user = get_current_user(authorization)
+    requested_date = str(date or "").strip()
+    try:
+        datetime.strptime(requested_date, "%Y-%m-%d")
+    except Exception:
+        return {
+            "success": False,
+            "message": "Invalid date. Use YYYY-MM-DD.",
+            "date": requested_date,
+            "paper_trades": [],
+        }
+
+    try:
+        backfill_closed_trade_costs(user["id"])
+    except Exception:
+        pass
+
+    conn = get_db()
+    ensure_tables(conn)
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM paper_trades
+        WHERE user_id=?
+          AND date(datetime(created_at, '+5 hours', '+30 minutes'))=?
+        ORDER BY id DESC
+        """,
+        (user["id"], requested_date),
+    ).fetchall()
+    trades = [_paper_trade_view(row) for row in rows]
+    summary = _day_summary_from_trades(requested_date, trades)
+    conn.close()
+
+    return {
+        "success": True,
+        "date": requested_date,
+        "display_date": summary["display_date"],
+        "summary": summary,
         "paper_trades": trades,
         "count": len(trades),
         "pnl_basis": "NET_AFTER_EXECUTION_COSTS",
         "timestamp_format": "ISO_UTC",
+        "timezone": "Asia/Kolkata",
     }
 
 @router.get("/reports/daily")
