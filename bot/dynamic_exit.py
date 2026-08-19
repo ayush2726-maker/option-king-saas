@@ -2,7 +2,8 @@ import math
 
 
 TICK_SIZE = 0.05
-MAX_PREMIUM_RISK_PERCENT = 8.0
+MIN_PREMIUM_RISK_PERCENT = 10.0
+MAX_PREMIUM_RISK_PERCENT = 15.0
 TRUE_BE_NET_PROFIT_PERCENT = 2.0
 
 # Conservative basis used because this shared exit helper does not receive the
@@ -113,17 +114,31 @@ def calculate_option_atr_levels(
     if is_expiry_day:
         response = 1.0
         multiplier = 1.5
-        mode = "EXPIRY_PURE_ATR"
+        mode = "EXPIRY_SMART_ATR_10PCT_FLOOR"
     else:
         response = 0.5
         multiplier = 1.2
-        mode = "NORMAL_PURE_ATR"
+        mode = "NORMAL_SMART_ATR_10PCT_FLOOR"
 
     option_atr = atr * response
     raw_risk = option_atr * multiplier
+
+    # Avoid the old very-tight ATR stop. Every bought option gets at least 10%
+    # premium room; ATR may widen it when volatility needs more space. A 15%
+    # premium cap still limits runaway risk on abnormal candles. The caller's
+    # configured floor can ask for more, but never less than the protected 10%.
+    requested_floor_percent = max(
+        MIN_PREMIUM_RISK_PERCENT,
+        float(sl_floor_percent or 0.0),
+    )
+    requested_floor_percent = min(
+        requested_floor_percent,
+        MAX_PREMIUM_RISK_PERCENT,
+    )
+    premium_risk_floor = entry * requested_floor_percent / 100.0
     premium_risk_cap = entry * MAX_PREMIUM_RISK_PERCENT / 100.0
     risk = min(
-        max(TICK_SIZE, raw_risk),
+        max(TICK_SIZE, raw_risk, premium_risk_floor),
         max(TICK_SIZE, premium_risk_cap),
         max(TICK_SIZE, entry - TICK_SIZE),
     )
@@ -136,16 +151,18 @@ def calculate_option_atr_levels(
         "estimated_option_atr": round(option_atr, 2),
         "atr_multiplier": multiplier,
         "atr_risk_points": round(raw_risk, 2),
-        "percentage_risk_points": round(premium_risk_cap, 2),
-        "sl_floor_percent": 0.0,
+        "percentage_risk_points": round(premium_risk_floor, 2),
+        "sl_floor_percent": round(requested_floor_percent, 2),
         "risk_points": round(risk, 2),
         "sl_price": round(max(TICK_SIZE, entry - risk), 2),
         "target_price": None,
         "reward_multiple": None,
         "is_expiry_day": bool(is_expiry_day),
         "fixed_target_enabled": False,
+        "min_premium_risk_percent": MIN_PREMIUM_RISK_PERCENT,
         "hard_premium_risk_cap_percent": MAX_PREMIUM_RISK_PERCENT,
-        "hard_risk_cap_applied": bool(risk + 1e-9 < raw_risk),
+        "premium_floor_applied": bool(premium_risk_floor > raw_risk + 1e-9),
+        "hard_risk_cap_applied": bool(risk + 1e-9 < max(raw_risk, premium_risk_floor)),
         "quantity_preserved": True,
     }
 
@@ -269,7 +286,7 @@ def detect_structural_reversal(
         ema9_broken = close > ema9_value
         trend_flip_confirmed = (
             st == "UP"
-            and ema9_value > ema21_value
+            and ema9_value > ema9_value
         )
         valid_opposite_signal = (
             signal == "CE"
