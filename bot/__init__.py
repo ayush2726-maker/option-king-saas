@@ -135,3 +135,10 @@ try:
     from bot.fast_opposite_trend_exit_patch import apply_fast_opposite_trend_exit_patch
     apply_fast_opposite_trend_exit_patch()
 except Exception: pass
+
+# Extended F&O close timing: no fresh entries after 15:20 IST, while existing
+# positions may continue until 15:35 unless another exit rule triggers first.
+try:
+    from bot.market_close_1540_cutoff_patch import apply_market_close_1540_cutoff_patch
+    apply_market_close_1540_cutoff_patch()
+except Exception: pass
