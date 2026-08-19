@@ -120,3 +120,11 @@ try:
     from bot.execution_reason_visibility_patch import apply_execution_reason_visibility_patch
     apply_execution_reason_visibility_patch()
 except Exception: pass
+
+# Accuracy layer: DMI + RSI momentum + market structure + regime awareness.
+# It is deliberately score-based rather than a new hard blocker, so a single
+# indicator disagreement cannot freeze otherwise valid AUTO setups.
+try:
+    from bot.regime_accuracy_confirmation_patch import apply_regime_accuracy_confirmation_patch
+    apply_regime_accuracy_confirmation_patch()
+except Exception: pass
