@@ -129,6 +129,20 @@ try:
     apply_regime_accuracy_confirmation_patch()
 except Exception: pass
 
+# Risk control must be active in PAPER/LIVE runtime, not just backtests.
+# This caps planned loss by equity risk and enables the post-ATR-loss guard.
+try:
+    from bot.risk_control_v2_patch import apply_risk_control_v2_patch
+    apply_risk_control_v2_patch()
+except Exception: pass
+
+# First profit lock: exact broker/instrument/quantity costs + 4% net profit.
+# It latches immediately at that exact price; later R-based runner stages remain.
+try:
+    from bot.breakeven_4pct_patch import apply_breakeven_4pct_patch
+    apply_breakeven_4pct_patch()
+except Exception: pass
+
 # Exit an invalidated CE/PE as soon as the completed-candle scan confirms a
 # strong opposite trend. Do not wait for the wider premium SL to be touched.
 try:
