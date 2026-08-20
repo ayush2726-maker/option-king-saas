@@ -142,3 +142,11 @@ try:
     from bot.market_close_1540_cutoff_patch import apply_market_close_1540_cutoff_patch
     apply_market_close_1540_cutoff_patch()
 except Exception: pass
+
+# Non-live SaaS data source: PAPER, charts/sector rotation and backtests may use
+# the owner's broker market-data session. LIVE execution is deliberately not
+# touched and still requires each user's own broker.
+try:
+    from bot.shared_nonlive_data_feed_patch import apply_shared_nonlive_data_feed_patch
+    apply_shared_nonlive_data_feed_patch()
+except Exception: pass
