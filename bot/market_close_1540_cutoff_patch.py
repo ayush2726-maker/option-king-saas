@@ -1,6 +1,6 @@
 """Update intraday timing for the extended F&O close.
 
-Fresh AUTO entries stop at 15:20 IST. Existing positions are allowed to run
+Fresh AUTO entries stop at 15:25 IST. Existing positions are allowed to run
 until 15:35 IST unless SL/target/reversal exits earlier. This keeps a five-minute
 buffer before the 15:40 derivatives close.
 """
@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
 
-VERSION = "OKAI-MARKET-CLOSE-1540-CUTOFF-V1"
-ENTRY_CUTOFF_MINUTE = 15 * 60 + 20
+VERSION = "OKAI-MARKET-CLOSE-1540-CUTOFF-V2"
+ENTRY_CUTOFF_MINUTE = 15 * 60 + 25
 FORCE_EXIT_MINUTE = 15 * 60 + 35
 
 
@@ -36,7 +36,7 @@ def apply_market_close_1540_cutoff_patch() -> None:
     # --- AUTO Portfolio fresh-entry cutoff ---
     original_open_common = runtime._open_common
 
-    def open_common_with_1520_cutoff(
+    def open_common_with_1525_cutoff(
         conn,
         user_id,
         broker_name,
@@ -56,10 +56,10 @@ def apply_market_close_1540_cutoff_patch() -> None:
                     state,
                     broker_name,
                     selected,
-                    "FRESH_ENTRY_CUTOFF_15_20_IST",
+                    "FRESH_ENTRY_CUTOFF_15_25_IST",
                     "TIME_GUARD",
                     {
-                        "fresh_entry_cutoff": "15:20",
+                        "fresh_entry_cutoff": "15:25",
                         "force_exit": "15:35",
                         "market_close": "15:40",
                         "version": VERSION,
@@ -82,7 +82,7 @@ def apply_market_close_1540_cutoff_patch() -> None:
             state,
         )
 
-    runtime._open_common = open_common_with_1520_cutoff
+    runtime._open_common = open_common_with_1525_cutoff
 
     # --- AUTO Portfolio force exit: suppress old 15:25 EOD exit and use 15:35 ---
     original_evaluate_exit = runtime._evaluate_exit
@@ -105,21 +105,21 @@ def apply_market_close_1540_cutoff_patch() -> None:
 
     runtime._evaluate_exit = evaluate_exit_with_1535_force_exit
 
-    # --- Legacy Angel live entry: stop fresh entries at 15:20 ---
+    # --- Legacy Angel live entry: stop fresh entries at 15:25 ---
     original_live_gateway_entry = angel_fetcher._manage_live_gateway_entry
 
-    def live_gateway_entry_with_1520_cutoff(*args, **kwargs):
+    def live_gateway_entry_with_1525_cutoff(*args, **kwargs):
         if _minute_now() >= ENTRY_CUTOFF_MINUTE:
             return {
                 "queued": False,
-                "reason": "FRESH_ENTRY_CUTOFF_15_20_IST",
-                "fresh_entry_cutoff": "15:20",
+                "reason": "FRESH_ENTRY_CUTOFF_15_25_IST",
+                "fresh_entry_cutoff": "15:25",
                 "force_exit": "15:35",
                 "version": VERSION,
             }
         return original_live_gateway_entry(*args, **kwargs)
 
-    angel_fetcher._manage_live_gateway_entry = live_gateway_entry_with_1520_cutoff
+    angel_fetcher._manage_live_gateway_entry = live_gateway_entry_with_1525_cutoff
 
     # Any local-gateway payload created by legacy live flow must carry 15:35.
     original_queue_live_entry = angel_fetcher.queue_live_entry
@@ -127,7 +127,7 @@ def apply_market_close_1540_cutoff_patch() -> None:
     def queue_live_entry_with_1535(user_id, payload, *args, **kwargs):
         safe_payload = dict(payload or {})
         safe_payload["force_exit_at"] = "15:35"
-        safe_payload["fresh_entry_cutoff"] = "15:20"
+        safe_payload["fresh_entry_cutoff"] = "15:25"
         safe_payload["market_close"] = "15:40"
         return original_queue_live_entry(user_id, safe_payload, *args, **kwargs)
 
@@ -157,7 +157,7 @@ def apply_market_close_1540_cutoff_patch() -> None:
                 (user_id,),
             ).fetchone()
             if not open_trade:
-                # No position: 15:20 fresh-entry cutoff means do nothing.
+                # No position: 15:25 fresh-entry cutoff means do nothing.
                 return None
 
             token = open_trade["token"]

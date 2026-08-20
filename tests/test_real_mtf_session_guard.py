@@ -216,26 +216,26 @@ def test_screenshot_setup_recalculates_to_67_instead_of_inflated_82(monkeypatch)
     assert repaired["chart_candles"][-1]["score"] == 67
 
 
-def test_normal_auto_paper_cutoff_is_1445_and_eod_stays_1525():
+def test_normal_auto_cutoff_is_1525_and_eod_is_1535():
     _restore_normal_auto_cutoff()
 
-    before_cutoff = datetime(2026, 8, 3, 14, 44)
-    after_cutoff = datetime(2026, 8, 3, 15, 5)
+    before_cutoff = datetime(2026, 8, 3, 15, 24)
+    after_cutoff = datetime(2026, 8, 3, 15, 25)
 
     with paper_cutoff._entry_mode("paper"):
         assert paper_cutoff._entry_window_open(before_cutoff) is True
         assert paper_cutoff._entry_window_open(after_cutoff) is False
-        assert paper_cutoff._entry_block_reason(after_cutoff) == "AUTO_ENTRY_CUTOFF_1445_IST"
+        assert paper_cutoff._entry_block_reason(after_cutoff) == "AUTO_ENTRY_CUTOFF_1525_IST"
 
-    assert paper_cutoff.PAPER_ENTRY_CUTOFF_MINUTE == 14 * 60 + 45
-    assert paper_cutoff.PAPER_EOD_MINUTE == 15 * 60 + 25
+    assert paper_cutoff.PAPER_ENTRY_CUTOFF_MINUTE == 15 * 60 + 25
+    assert paper_cutoff.PAPER_EOD_MINUTE == 15 * 60 + 35
 
 
 def test_entry_window_status_distinguishes_cutoff_and_market_close():
-    assert _entry_window_state(datetime(2026, 8, 11, 14, 44))["open"] is True
-    assert _entry_window_state(datetime(2026, 8, 11, 14, 45))["reason"] == (
-        "AUTO_ENTRY_CUTOFF_1445_IST"
+    assert _entry_window_state(datetime(2026, 8, 11, 15, 24))["open"] is True
+    assert _entry_window_state(datetime(2026, 8, 11, 15, 25))["reason"] == (
+        "AUTO_ENTRY_CUTOFF_1525_IST"
     )
-    assert _entry_window_state(datetime(2026, 8, 11, 15, 30))["reason"] == (
-        "MARKET_CLOSED_AFTER_1530_IST"
+    assert _entry_window_state(datetime(2026, 8, 11, 15, 40))["reason"] == (
+        "MARKET_CLOSED_AFTER_1540_IST"
     )

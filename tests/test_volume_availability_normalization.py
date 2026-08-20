@@ -97,6 +97,67 @@ def test_full_signal_and_breakdown_show_same_normalized_decision_score():
     assert payload["availability_normalized"] is True
 
 
+def test_stale_zero_bonus_snapshot_is_rebuilt_to_match_normalized_header():
+    market = {
+        "price": 100.0,
+        "vwap": 101.0,
+        "ema9": 99.0,
+        "ema21": 100.0,
+        "adx": 39.5,
+        "volume_ratio": 0.0,
+        "volume_available": False,
+        "supertrend_dir": "DOWN",
+        "trend": "DOWNTREND",
+        "mtf_confirmed": True,
+        "orb_high": 110.0,
+        "orb_low": 106.0,
+        "c1_bullish": False,
+        "c2_bullish": False,
+        "atr": 10.0,
+    }
+    result = {
+        "candidate_signal": "PE",
+        "signal": "PE",
+        "score": 100,
+        "base_score": 55,
+        "adx": 39.5,
+        "adx_bonus": 0,
+        "volume_ratio": 0.0,
+        "volume_available": False,
+        "volume_bonus": 0,
+        "mtf_confirmed": True,
+        "mtf_bonus": 0,
+        "pre_normalization_score": 92,
+        "effective_score_max": 92,
+        "configured_score_max": 100,
+        "availability_adjustment": 8,
+        "availability_normalized": True,
+        "strategy_profile_key": "okai_default_82",
+        "profile_weights": {
+            "vwap": 11,
+            "supertrend": 11,
+            "ema_trend": 11,
+            "orb": 11,
+            "momentum": 11,
+            "adx": 20,
+            "volume": 15,
+            "mtf": 10,
+        },
+    }
+
+    payload = _score_payload(market, result)
+    rows = {row["key"]: row for row in payload["components"]}
+
+    assert rows["adx"]["decision_score"] == 20
+    assert rows["volume"]["decision_score"] == 7
+    assert rows["mtf"]["decision_score"] == 10
+    assert rows["availability_normalization"]["decision_score"] == 8
+    assert "final_score_adjustment" not in rows
+    assert payload["component_total"] == 100
+    assert payload["decision_component_total"] == 100
+    assert payload["component_score_matches_decision"] is True
+
+
 def test_missing_volume_score_is_never_normalized_twice_by_entry_guards():
     market = {
         "price": 24450.25,

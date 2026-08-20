@@ -1,8 +1,8 @@
 """Keep PAPER testing active until the safer 15:25 IST cutoff.
 
-PAPER mode may accept fresh AUTO entries until 15:25 and open PAPER positions
-are force-closed at 15:25, five minutes before the 15:30 market close. LIVE mode
-keeps its existing 14:45 entry cutoff and 15:25 EOD exit. Backtests are unchanged.
+PAPER and LIVE modes may accept fresh AUTO entries until 15:25. Open positions
+are force-closed at 15:35, five minutes before the extended 15:40 market close.
+Backtests are unchanged.
 """
 
 from __future__ import annotations
@@ -17,10 +17,10 @@ from bot import eod_safety_testing_access_patch as eod_patch
 
 ENTRY_START_MINUTE = 9 * 60 + 15
 PAPER_ENTRY_CUTOFF_MINUTE = 15 * 60 + 25
-PAPER_EOD_MINUTE = 15 * 60 + 25
-LIVE_ENTRY_CUTOFF_MINUTE = 14 * 60 + 45
-LIVE_EOD_MINUTE = 15 * 60 + 25
-PATCH_VERSION = "PAPER_SAFE_CLOSE_1525_V2"
+PAPER_EOD_MINUTE = 15 * 60 + 35
+LIVE_ENTRY_CUTOFF_MINUTE = 15 * 60 + 25
+LIVE_EOD_MINUTE = 15 * 60 + 35
+PATCH_VERSION = "PAPER_SAFE_CLOSE_1535_V3"
 
 _context = threading.local()
 
@@ -85,13 +85,13 @@ def _entry_block_reason(value: datetime) -> str:
         return "AUTO_ENTRY_BLOCKED_BEFORE_0915_IST"
     if _current_entry_mode() == "paper":
         return "PAPER_ENTRY_CUTOFF_1525_IST"
-    return "LIVE_ENTRY_CUTOFF_1445_IST"
+    return "LIVE_ENTRY_CUTOFF_1525_IST"
 
 
 def _window_labels(mode: str) -> tuple[str, str]:
     if str(mode).lower() == "paper":
-        return "09:15-15:25", "15:25"
-    return "09:15-14:45", "15:25"
+        return "09:15-15:25", "15:35"
+    return "09:15-15:25", "15:35"
 
 
 def _mark_entry_time_block(state: dict | None, value: datetime) -> None:
@@ -126,7 +126,7 @@ def _clear_entry_time_block(state: dict | None) -> None:
 
 
 def _adjust_eod_reason(mode: str, reason, value: datetime):
-    """Force PAPER EOD at 15:25 while preserving SL and structural exits."""
+    """Force PAPER EOD at 15:35 while preserving SL and structural exits."""
     if str(mode).lower() != "paper":
         return reason
 
@@ -140,7 +140,7 @@ def _adjust_eod_reason(mode: str, reason, value: datetime):
     if minute < PAPER_EOD_MINUTE and old_eod:
         return None
     if minute >= PAPER_EOD_MINUTE and (reason is None or old_eod):
-        return "PAPER EOD EXIT 15:25 IST"
+        return "PAPER EOD EXIT 15:35 IST"
     return reason
 
 

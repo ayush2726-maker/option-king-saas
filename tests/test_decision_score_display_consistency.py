@@ -1,5 +1,6 @@
 from bot.decision_score_display_consistency_patch import (
     SCORE_MODE,
+    _component_aliases,
     _normalise_scan,
 )
 
@@ -48,3 +49,28 @@ def test_missing_breakdown_is_left_unchanged():
 
     assert _normalise_scan(scan) is scan
     assert scan["signal_data"]["score"] == 84
+
+
+def test_component_aliases_keep_legacy_mobile_rows_in_sync():
+    signal = {"base_score": 55, "adx_bonus": 0, "volume_bonus": 0, "mtf_bonus": 0}
+    payload = {
+        "components": [
+            {"key": "vwap", "decision_score": 11},
+            {"key": "supertrend", "decision_score": 11},
+            {"key": "ema_trend", "decision_score": 11},
+            {"key": "orb", "decision_score": 11},
+            {"key": "momentum", "decision_score": 11},
+            {"key": "adx", "decision_score": 20},
+            {"key": "volume", "decision_score": 7},
+            {"key": "mtf", "decision_score": 10},
+            {"key": "availability_normalization", "decision_score": 8},
+        ]
+    }
+
+    aliases = _component_aliases(payload, signal)
+
+    assert aliases["directional_score"] == 55
+    assert aliases["adx_score"] == 20
+    assert aliases["volume_score"] == 7
+    assert aliases["mtf_score"] == 10
+    assert aliases["availability_adjustment"] == 8

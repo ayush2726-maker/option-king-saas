@@ -27,8 +27,8 @@ from database import get_db
 
 
 AUTO_ENTRY_START_MINUTE = 9 * 60 + 15
-AUTO_ENTRY_CUTOFF_MINUTE = 14 * 60 + 45
-HARD_EOD_MINUTE = 15 * 60 + 25
+AUTO_ENTRY_CUTOFF_MINUTE = 15 * 60 + 25
+HARD_EOD_MINUTE = 15 * 60 + 35
 REQUESTED_ADMIN_PURGE_IST_DATES = {
     "2026-07-20",
     "2026-07-21",
@@ -76,7 +76,7 @@ def _entry_block_reason(value: datetime) -> str:
         return "AUTO_ENTRY_BLOCKED_MARKET_CLOSED"
     if _minute_of_day(value) < AUTO_ENTRY_START_MINUTE:
         return "AUTO_ENTRY_BLOCKED_BEFORE_0915_IST"
-    return "AUTO_ENTRY_CUTOFF_1445_IST"
+    return "AUTO_ENTRY_CUTOFF_1525_IST"
 
 
 def _mark_entry_time_block(state: dict | None, value: datetime) -> None:
@@ -86,8 +86,8 @@ def _mark_entry_time_block(state: dict | None, value: datetime) -> None:
         {
             "entry_time_blocked": True,
             "entry_time_block_reason": _entry_block_reason(value),
-            "entry_window_ist": "09:15-14:45",
-            "hard_eod_exit_ist": "15:25",
+            "entry_window_ist": "09:15-15:25",
+            "hard_eod_exit_ist": "15:35",
             "selected_for_entry": None,
         }
     )
@@ -98,8 +98,8 @@ def _clear_entry_time_block(state: dict | None) -> None:
         return
     state["entry_time_blocked"] = False
     state.pop("entry_time_block_reason", None)
-    state["entry_window_ist"] = "09:15-14:45"
-    state["hard_eod_exit_ist"] = "15:25"
+    state["entry_window_ist"] = "09:15-15:25"
+    state["hard_eod_exit_ist"] = "15:35"
 
 
 def apply_eod_entry_guard_patch() -> None:

@@ -14,8 +14,8 @@ from datetime import datetime, timezone, timedelta
 from bot import auto_portfolio_runtime as runtime
 
 
-ENTRY_CUTOFF_HOUR = 14
-ENTRY_CUTOFF_MINUTE = 45
+ENTRY_CUTOFF_HOUR = 15
+ENTRY_CUTOFF_MINUTE = 25
 
 
 def _f(value, default=0.0):
@@ -89,7 +89,7 @@ def _first_block_reason(signal, min_score):
     if reasons:
         return str(reasons[0])[:80]
     if _after_entry_cutoff():
-        return "ENTRY_CUTOFF_AFTER_14_45"
+        return "ENTRY_CUTOFF_AFTER_15_25"
     return "UNKNOWN_BLOCK_REASON"
 
 
@@ -174,7 +174,7 @@ def _audit_lines(scan):
         _append_unique(lines, "ENTRY_READY_AUDIT: QUALIFIED_BY_ENGINE", limit=8)
 
     if _after_entry_cutoff():
-        _append_unique(lines, "TIME_GATE: AFTER_14_45_NORMAL_ENTRY_BLOCK", limit=8)
+        _append_unique(lines, "TIME_GATE: AFTER_15_25_NORMAL_ENTRY_BLOCK", limit=8)
 
     strong_side = _strong_trend_side(market, signal)
     if strong_side in {"CE", "PE"}:

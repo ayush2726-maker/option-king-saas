@@ -96,6 +96,36 @@ def _normalise_scan(scan: Any) -> Any:
     return scan
 
 
+def _component_aliases(payload: dict, signal: dict) -> dict:
+    """Flatten canonical component rows for older mobile score cards."""
+    values: dict[str, int] = {}
+    directional = 0
+    for row in payload.get("components") or []:
+        if not isinstance(row, dict):
+            continue
+        key = str(row.get("key") or "").strip().lower()
+        score = _i(row.get("decision_score", row.get("score", 0)), 0)
+        if key in {"vwap", "supertrend", "ema_trend", "orb", "momentum"}:
+            directional += score
+        elif key:
+            values[key] = score
+
+    return {
+        "base_score": directional or _i(signal.get("base_score"), 0),
+        "directional_score": directional or _i(signal.get("base_score"), 0),
+        "adx_bonus": values.get("adx", _i(signal.get("adx_bonus"), 0)),
+        "adx_score": values.get("adx", _i(signal.get("adx_bonus"), 0)),
+        "volume_bonus": values.get("volume", _i(signal.get("volume_bonus"), 0)),
+        "volume_score": values.get("volume", _i(signal.get("volume_bonus"), 0)),
+        "mtf_bonus": values.get("mtf", _i(signal.get("mtf_bonus"), 0)),
+        "mtf_score": values.get("mtf", _i(signal.get("mtf_bonus"), 0)),
+        "availability_adjustment": values.get(
+            "availability_normalization",
+            _i(signal.get("availability_adjustment"), 0),
+        ),
+    }
+
+
 def _install_final_entry_guards() -> None:
     # Run in this order: correct the score first, then attach the final opening
     # and loss circuit as the outermost entry/close protection.
@@ -161,6 +191,7 @@ def apply_decision_score_display_consistency_patch() -> None:
                 "visual_strength_score": decision,
                 "diagnostic_visual_strength_score": visual,
                 "score_mode": SCORE_MODE,
+                **_component_aliases(payload, signal),
             }
         )
         return data

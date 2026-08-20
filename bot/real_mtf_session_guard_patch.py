@@ -3,8 +3,8 @@
 The live replay path previously labelled the current 1-minute EMA direction as
 "MTF confirmed" and awarded the 10-point 5-minute bonus.  A short pullback could
 therefore qualify a PE trade during a strong bullish session (or CE during a
-strong bearish session).  PAPER AUTO was also allowed to open fresh positions
-until 15:25, despite the normal strategy cutoff being 14:45.
+strong bearish session). The legacy session guard also carried an obsolete
+14:45 cutoff.
 
 This patch is installed after the existing score/display wrappers and:
 - derives MTF from completed, exchange-aligned 5-minute candles;
@@ -12,8 +12,8 @@ This patch is installed after the existing score/display wrappers and:
   EMA and Supertrend agree with the 1-minute candidate;
 - blocks an opposite-side entry when both the real 5-minute trend and the
   completed ORB show a clear session bias;
-- restores 14:45 as the normal AUTO entry cutoff for PAPER and LIVE, while
-  preserving the separate Hero Zero route and the 15:25 EOD exit.
+- uses the canonical 15:25 AUTO entry cutoff for PAPER and LIVE, with the
+  separate 15:35 force-exit buffer before the 15:40 close.
 
 No position sizing, ATR SL, profit lock, cooldown, broker order, or Hero Zero
 rule is changed.
@@ -29,7 +29,7 @@ from bot import auto_portfolio_runtime as runtime
 
 
 PATCH_VERSION = "REAL_5M_MTF_SESSION_GUARD_V2_CANONICAL"
-NORMAL_AUTO_CUTOFF_MINUTE = 14 * 60 + 45
+NORMAL_AUTO_CUTOFF_MINUTE = 15 * 60 + 25
 MIN_COMPLETE_5M_BARS = 12
 ORB_BUFFER_POINTS = 5.0
 
@@ -261,17 +261,17 @@ def _entry_window_state(now_ist: datetime | None = None) -> dict[str, Any]:
         reason = "AUTO_ENTRY_BLOCKED_MARKET_CLOSED"
     elif minute < 9 * 60 + 15:
         reason = "AUTO_ENTRY_BLOCKED_BEFORE_0915_IST"
-    elif minute >= 15 * 60 + 30:
-        reason = "MARKET_CLOSED_AFTER_1530_IST"
+    elif minute >= 15 * 60 + 40:
+        reason = "MARKET_CLOSED_AFTER_1540_IST"
     elif minute >= NORMAL_AUTO_CUTOFF_MINUTE:
-        reason = "AUTO_ENTRY_CUTOFF_1445_IST"
+        reason = "AUTO_ENTRY_CUTOFF_1525_IST"
     else:
         reason = ""
 
     return {
         "open": not bool(reason),
         "reason": reason,
-        "window_ist": "09:15-14:45",
+        "window_ist": "09:15-15:25",
         "checked_at_ist": value.isoformat(),
     }
 
@@ -549,7 +549,7 @@ def _repair_scan(scan: Any, frame: Any, profile: dict | None = None) -> Any:
 
 
 def _restore_normal_auto_cutoff() -> None:
-    """Normal AUTO stops at 14:45; EOD remains 15:25; Hero Zero is separate."""
+    """Keep every AUTO/display clock on the canonical 15:25 cutoff."""
     try:
         from bot import eod_safety_testing_access_patch as eod
         from bot import paper_market_close_1530_patch as paper
@@ -558,14 +558,14 @@ def _restore_normal_auto_cutoff() -> None:
         paper.LIVE_ENTRY_CUTOFF_MINUTE = NORMAL_AUTO_CUTOFF_MINUTE
 
         def window_labels(_mode: str) -> tuple[str, str]:
-            return "09:15-14:45", "15:25"
+            return "09:15-15:25", "15:35"
 
         def entry_block_reason(value) -> str:
             if value.weekday() >= 5:
                 return "AUTO_ENTRY_BLOCKED_MARKET_CLOSED"
             if paper._minute_of_day(value) < paper.ENTRY_START_MINUTE:
                 return "AUTO_ENTRY_BLOCKED_BEFORE_0915_IST"
-            return "AUTO_ENTRY_CUTOFF_1445_IST"
+            return "AUTO_ENTRY_CUTOFF_1525_IST"
 
         paper._window_labels = window_labels
         paper._entry_block_reason = entry_block_reason
@@ -578,8 +578,8 @@ def _restore_normal_auto_cutoff() -> None:
         try:
             from bot import trade_miss_audit_patch as audit
 
-            audit.ENTRY_CUTOFF_HOUR = 14
-            audit.ENTRY_CUTOFF_MINUTE = 45
+            audit.ENTRY_CUTOFF_HOUR = 15
+            audit.ENTRY_CUTOFF_MINUTE = 25
         except Exception:
             pass
     except Exception:

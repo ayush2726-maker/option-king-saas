@@ -25,6 +25,8 @@ LABELS = {
     "adx": "ADX Strength",
     "volume": "Volume Confirmation",
     "availability_normalization": "Data Availability Normalization",
+    "accuracy_confirmation": "Accuracy Confirmation",
+    "final_score_adjustment": "Final Score Reconciliation",
     "mtf": "Trend / MTF Confirmation",
 }
 
@@ -287,10 +289,24 @@ def _score_components(market: dict, result: dict, profile: dict | None = None) -
     adx_enabled = _b(enabled.get("adx"), True)
     adx_weight = _i(weights.get("adx"), 0)
     adx_display = _partial(adx_weight, adx / max(adx_threshold, 1.0)) if adx_enabled else 0
-    adx_decision = _i(
-        result.get("adx_bonus"),
-        adx_weight if adx_enabled and adx >= adx_threshold else 0,
-    )
+    adx_decision = _i(result.get("adx_bonus"), 0)
+    # Some late runtime wrappers preserve the normalized final score but leave
+    # an older zero bonus in the display snapshot. Rebuild that stale field from
+    # the same active threshold/weight used by the strategy.
+    if adx_enabled and adx >= adx_threshold and adx_decision <= 0:
+        is_protected_default = str(
+            result.get("strategy_profile_key")
+            or profile.get("profile_key")
+            or "okai_default_82"
+        ) == "okai_default_82"
+        adx_decision = (
+            min(
+                adx_weight,
+                max(0, int((adx - adx_threshold) * 0.8 + 10)),
+            )
+            if is_protected_default
+            else adx_weight
+        )
     if not adx_enabled:
         adx_decision = 0
     rows.append(
@@ -450,7 +466,9 @@ def _score_components(market: dict, result: dict, profile: dict | None = None) -
     mtf_ok = _b(result.get("mtf_confirmed", (market or {}).get("mtf_confirmed", False)), False)
     mtf_weight = _i(weights.get("mtf"), 0)
     mtf_display = mtf_weight if mtf_enabled and mtf_ok else 0
-    mtf_decision = _i(result.get("mtf_bonus"), mtf_display)
+    mtf_decision = _i(result.get("mtf_bonus"), 0)
+    if mtf_enabled and mtf_ok and mtf_decision <= 0:
+        mtf_decision = mtf_display
     rows.append(
         {
             "key": "mtf",
@@ -478,14 +496,78 @@ def _score_payload(market: dict, result: dict, profile: dict | None = None) -> d
     weights = _weights(profile, result)
     enabled = _enabled(profile, result)
     components = _score_components(market or {}, result, {"weights": weights, "enabled": enabled, **profile})
+    accuracy_adjustment = _i(result.get("accuracy_adjustment"), 0)
+    if accuracy_adjustment:
+        components.append(
+            {
+                "key": "accuracy_confirmation",
+                "label": LABELS["accuracy_confirmation"],
+                "score": accuracy_adjustment,
+                "display_score": accuracy_adjustment,
+                "visual_score": accuracy_adjustment,
+                "decision_score": accuracy_adjustment,
+                "max_score": 7,
+                "enabled": True,
+                "passed": accuracy_adjustment > 0,
+                "partial": abs(accuracy_adjustment) < 7,
+                "direction": "ADJUST",
+                "selected_side": str(
+                    result.get("candidate_signal")
+                    or result.get("signal")
+                    or "WAIT"
+                ),
+                "detail": f"Accuracy confirmation {accuracy_adjustment:+d}",
+            }
+        )
+
     component_total = sum(_i(item.get("score"), 0) for item in components)
     visual_total = sum(
         _i(item.get("visual_score", item.get("score")), 0)
         for item in components
     )
     decision_component_total = sum(_i(item.get("decision_score"), 0) for item in components)
-    raw_total = sum(_i(item.get("max_score"), 0) for item in components if _b(item.get("enabled"), True))
+    raw_total = sum(
+        _i(item.get("max_score"), 0)
+        for item in components
+        if _b(item.get("enabled"), True)
+        and str(item.get("key") or "") not in {
+            "accuracy_confirmation",
+            "final_score_adjustment",
+        }
+    )
     final_score = _i(result.get("score"), decision_component_total)
+    # The final score is authoritative. If a legacy wrapper changed/capped it
+    # without updating component rows, expose the exact residual instead of
+    # showing an impossible header-versus-breakdown mismatch.
+    reconciliation = final_score - decision_component_total
+    if reconciliation:
+        components.append(
+            {
+                "key": "final_score_adjustment",
+                "label": LABELS["final_score_adjustment"],
+                "score": reconciliation,
+                "display_score": reconciliation,
+                "visual_score": reconciliation,
+                "decision_score": reconciliation,
+                "max_score": abs(reconciliation),
+                "enabled": True,
+                "passed": reconciliation >= 0,
+                "partial": False,
+                "direction": "RECONCILE",
+                "selected_side": str(
+                    result.get("candidate_signal")
+                    or result.get("signal")
+                    or "WAIT"
+                ),
+                "detail": (
+                    "Final decision score reconciliation "
+                    f"{reconciliation:+d}"
+                ),
+            }
+        )
+        component_total += reconciliation
+        decision_component_total += reconciliation
+        visual_total += reconciliation
     min_score = _i(result.get("min_score", result.get("min_score_required", 82)), 82)
     return {
         "score": final_score,
