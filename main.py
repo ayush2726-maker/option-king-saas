@@ -36,6 +36,7 @@ from backtest.post_loss_reentry_cooldown_patch import apply_backtest_post_loss_r
 from backtest.realism_costs_patch import apply_backtest_realism_costs_patch
 from backtest.cost_idempotence_patch import apply_cost_idempotence_patch
 from backtest.monthly_job_start_patch import apply_monthly_job_start_patch
+from backtest.daily_job_start_patch import apply_daily_job_start_patch
 from backtest.normal_entry_cutoff_1445_patch import apply_normal_entry_cutoff_1445_patch
 from backtest.real_option_premium_patch import prepare_real_option_premium_patch
 from backtest.real_option_premium_finalize_patch import finalize_real_option_premium_patch
@@ -135,6 +136,7 @@ apply_backtest_post_loss_reentry_cooldown_patch()
 apply_backtest_realism_costs_patch()
 apply_cost_idempotence_patch()
 apply_monthly_job_start_patch()
+apply_daily_job_start_patch()
 apply_normal_entry_cutoff_1445_patch()
 apply_capital_based_sizing_restore_patch()
 apply_expectancy_engine_v1_patch()
