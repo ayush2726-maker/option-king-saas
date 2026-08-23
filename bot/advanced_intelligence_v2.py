@@ -274,15 +274,12 @@ def fuse_advanced(market, base, option_payload, news):
     if option_risk >= 60:
         scores["NO_TRADE"] += 22
         reasons.append("OPTION_LIQUIDITY_OR_IV_RISK")
-    news_bias = _direction(news.get("news_bias"))
-    news_strength = _f(news.get("news_strength"))
-    news_risk = _f(news.get("news_risk_score"))
-    if news.get("fresh") and news_bias in {"CE", "PE"}:
-        scores[news_bias] += min(24.0, 5.0 + news_strength * 0.22)
-        reasons.append("NEWS_" + news_bias)
-    if news_risk >= 65:
-        scores["NO_TRADE"] += min(28.0, news_risk * 0.28)
-        reasons.append("HIGH_NEWS_RISK")
+    # Chronological validation currently shows that directional headline
+    # scoring reduces accuracy.  Keep the full snapshot for learning and UI,
+    # but do not let an unvalidated headline move the shadow decision score.
+    # The V6 learner also treats news as a challenger, never as champion input.
+    if news.get("fresh"):
+        reasons.append("NEWS_MONITOR_ONLY")
     vix = dict((global_market.get("values") or {}).get("india_vix") or {})
     vix_value = _f(vix.get("last_price"))
     vix_change = _f(vix.get("change_percent"))

@@ -104,6 +104,10 @@ try:
     apply_baseline_setup_training_v5_patch()
 except Exception: pass
 try:
+    from bot.adaptive_accuracy_v6_patch import apply_adaptive_accuracy_v6_patch
+    apply_adaptive_accuracy_v6_patch()
+except Exception: pass
+try:
     from bot.adaptive_runtime_binding_v3 import apply_adaptive_runtime_binding_v3
     apply_adaptive_runtime_binding_v3()
 except Exception: pass
