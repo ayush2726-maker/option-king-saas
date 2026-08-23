@@ -20,21 +20,29 @@ def _trade(**overrides):
 
 
 def _solver(price):
-    return {
-        "price": price,
-        "target_net_profit": 1510.80,
-        "net_pnl_at_price": 1513.59,
-        "total_charges_at_price": 140.01,
-        "slippage_cost_at_price": 77.27,
-        "quantity_basis": 60,
-        "instrument_basis": "BANKNIFTY",
-        "broker_basis": "upstox",
-        "trading_mode_basis": "paper",
-    }
+    def solve(*args, **_kwargs):
+        percent = float(args[-1])
+        staged_price = {
+            0.0: price - 15.0,
+            2.0: price - 7.5,
+            4.0: price,
+        }[percent]
+        return {
+            "price": staged_price,
+            "target_net_profit": 1510.80,
+            "net_pnl_at_price": 1513.59,
+            "total_charges_at_price": 140.01,
+            "slippage_cost_at_price": 77.27,
+            "quantity_basis": 60,
+            "instrument_basis": "BANKNIFTY",
+            "broker_basis": "upstox",
+            "trading_mode_basis": "paper",
+        }
+    return solve
 
 
 def test_exact_4pct_lock_triggers_before_one_r(monkeypatch):
-    monkeypatch.setattr(trail.live_cost, "calculate_exact_breakeven_price", lambda *_a, **_k: _solver(658.35))
+    monkeypatch.setattr(trail.live_cost, "calculate_exact_breakeven_price", _solver(658.35))
     monkeypatch.setattr(trail, "FIRST_LOCK_TRIGGER_R", config.FIRST_LOCK_TRIGGER_R)
 
     result = trail._authoritative_trail(
@@ -44,13 +52,14 @@ def test_exact_4pct_lock_triggers_before_one_r(monkeypatch):
 
     assert result["peak_r"] < 1.0
     assert result["breakeven_triggered"] is True
-    assert result["sl_price"] >= 658.40
-    assert result["stage"] == "CHARGES_PLUS_4PCT_LOCK"
-    assert result["trail_schedule"]["cost_cover_trigger_r"] == 0.0
+    assert result["four_pct_triggered"] is True
+    assert result["sl_price"] >= result["protected_2pct_price"]
+    assert result["sl_price"] < result["peak_price"]
+    assert result["trail_schedule"]["four_pct_trigger_r"] == 0.0
 
 
 def test_lock_still_waits_below_exact_4pct_price(monkeypatch):
-    monkeypatch.setattr(trail.live_cost, "calculate_exact_breakeven_price", lambda *_a, **_k: _solver(658.35))
+    monkeypatch.setattr(trail.live_cost, "calculate_exact_breakeven_price", _solver(658.35))
     monkeypatch.setattr(trail, "FIRST_LOCK_TRIGGER_R", config.FIRST_LOCK_TRIGGER_R)
 
     result = trail._authoritative_trail(
@@ -58,13 +67,15 @@ def test_lock_still_waits_below_exact_4pct_price(monkeypatch):
         657.65,
     )
 
-    assert result["breakeven_triggered"] is False
-    assert result["sl_price"] == 594.30
-    assert result["stage"] == "WAITING_CHARGES_PLUS_4PCT_LOCK"
+    assert result["breakeven_triggered"] is True
+    assert result["four_pct_triggered"] is False
+    assert result["sl_price"] >= result["cost_floor_price"]
+    assert result["sl_price"] < result["protected_2pct_price"]
+    assert result["stage"] == "LOCK_0_25R_AFTER_0_75R"
 
 
 def test_higher_r_runner_schedule_is_unchanged(monkeypatch):
-    monkeypatch.setattr(trail.live_cost, "calculate_exact_breakeven_price", lambda *_a, **_k: _solver(658.35))
+    monkeypatch.setattr(trail.live_cost, "calculate_exact_breakeven_price", _solver(658.35))
     monkeypatch.setattr(trail, "FIRST_LOCK_TRIGGER_R", config.FIRST_LOCK_TRIGGER_R)
 
     result = trail._authoritative_trail(
@@ -75,7 +86,7 @@ def test_higher_r_runner_schedule_is_unchanged(monkeypatch):
     assert result["peak_r"] >= 2.0
     assert result["sl_price"] >= 664.70
     assert result["stage"] in {
-        "LOCK_1_00R_AFTER_2_00R",
-        "SMOOTH_TRAIL_1_00R_AFTER_2_50R",
-        "TIGHT_TRAIL_0_80R_AFTER_4_00R",
+        "RUNNER_TRAIL_0_65R_AFTER_2_00R",
+        "SMOOTH_TRAIL_0_55R_AFTER_2_50R",
+        "TIGHT_TRAIL_0_45R_AFTER_4_00R",
     }
