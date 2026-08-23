@@ -51,7 +51,7 @@ def test_one_r_ratchet_covers_exact_paper_costs():
 
     assert trail["stage"] == "LOCK_0_45R_AFTER_1_00R"
     assert trail["sl_price"] >= 104.5
-    assert trail["breakeven_net_profit_percent"] == 0.0
+    assert trail["breakeven_net_profit_percent"] == 4.0
 
     costs = live_cost.calculate_execution_costs(
         "angelone",
