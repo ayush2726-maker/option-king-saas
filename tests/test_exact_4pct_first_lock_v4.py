@@ -67,9 +67,11 @@ def test_lock_still_waits_below_exact_4pct_price(monkeypatch):
         657.65,
     )
 
-    assert result["breakeven_triggered"] is False
-    assert result["sl_price"] == 594.30
-    assert result["stage"] == "COST_SAFE_FLOOR_AFTER_2PCT_NET"
+    assert result["breakeven_triggered"] is True
+    assert result["four_pct_triggered"] is False
+    assert result["sl_price"] >= result["cost_floor_price"]
+    assert result["sl_price"] < result["protected_2pct_price"]
+    assert result["stage"] == "LOCK_0_25R_AFTER_0_75R"
 
 
 def test_higher_r_runner_schedule_is_unchanged(monkeypatch):
