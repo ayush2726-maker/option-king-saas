@@ -1,13 +1,15 @@
 """Authoritative smooth R-based runtime profit lock.
 
-The first protected stop must honour the configured charges + 4% net-profit rule.
-After that threshold is genuinely reached, profit is protected gradually with the
-existing R-based runner schedule. PAPER stop exits are simulated at the stored stop
-with at most one tick of adverse slippage; a slow quote/poll must not turn a valid
-profit-lock stop into a large artificial loss. LIVE fills remain broker-controlled.
+The first protected stop now arms before the old charges + 4% threshold: once the
+premium can cover all costs plus 2% net profit, the stop moves to a cost-safe floor.
+At charges + 4%, it protects charges + 2%, then ratchets through progressively
+tighter R-based runner stages. This keeps room for a winner while preventing a
+meaningful observed profit from returning to an unprotected loss.
 
-The stop can only move upward. Entries, quantities, structural exits, fixed-target
-behaviour and EOD rules are not changed.
+A latched profit stop is authoritative over danger, structural and CAS exits. PAPER
+stop exits are simulated at the saved stop with at most one tick of adverse
+slippage; LIVE fills remain broker-controlled. The stop can only move upward.
+Entries, quantities, initial ATR SL, fixed-target and EOD rules are not changed.
 """
 
 from __future__ import annotations
@@ -22,18 +24,26 @@ from bot.trade_visibility_metrics_patch import apply_trade_visibility_metrics_pa
 
 TICK_SIZE = 0.05
 COST_COVER_NET_PROFIT_PERCENT = 4.0
+EARLY_PROTECTION_TRIGGER_NET_PERCENT = 2.0
+EARLY_PROTECTION_LOCK_NET_PERCENT = 0.0
+FOUR_PCT_LOCK_NET_PERCENT = 2.0
 FIRST_LOCK_TRIGGER_R = 1.00
-LOCK_1_TRIGGER_R = 1.50
-LOCK_1_R = 0.50
-LOCK_2_TRIGGER_R = 2.00
-LOCK_2_R = 1.00
+LOCK_0_TRIGGER_R = 0.75
+LOCK_0_R = 0.25
+LOCK_1_TRIGGER_R = 1.00
+LOCK_1_R = 0.45
+LOCK_2_TRIGGER_R = 1.50
+LOCK_2_R = 0.80
+RUNNER_TRIGGER_R = 2.00
+RUNNER_MIN_LOCK_R = 1.20
+RUNNER_DISTANCE_R = 0.65
 SMOOTH_TRAIL_TRIGGER_R = 2.50
-SMOOTH_TRAIL_MIN_LOCK_R = 1.25
-SMOOTH_TRAIL_DISTANCE_R = 1.00
+SMOOTH_TRAIL_MIN_LOCK_R = 1.75
+SMOOTH_TRAIL_DISTANCE_R = 0.55
 TIGHT_TRAIL_TRIGGER_R = 4.00
-TIGHT_TRAIL_MIN_LOCK_R = 2.50
-TIGHT_TRAIL_DISTANCE_R = 0.80
-AUTHORITY_VERSION = "AUTHORITATIVE_4PCT_SMOOTH_R_TRAIL_V3"
+TIGHT_TRAIL_MIN_LOCK_R = 3.00
+TIGHT_TRAIL_DISTANCE_R = 0.45
+AUTHORITY_VERSION = "AUTHORITATIVE_EARLY_COST_FLOOR_PROFIT_RATCHET_V5"
 PAPER_FILL_VERSION = "PAPER_STOP_ONE_TICK_FILL_V1"
 
 
@@ -96,6 +106,22 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
     quantity = max(1, _i(runtime._v(trade, "qty", 1), 1))
     mode = runtime._mode(trade)
 
+    exact_floor = live_cost.calculate_exact_breakeven_price(
+        broker_name,
+        instrument,
+        round(entry, 4),
+        quantity,
+        mode,
+        EARLY_PROTECTION_LOCK_NET_PERCENT,
+    )
+    exact_early = live_cost.calculate_exact_breakeven_price(
+        broker_name,
+        instrument,
+        round(entry, 4),
+        quantity,
+        mode,
+        EARLY_PROTECTION_TRIGGER_NET_PERCENT,
+    )
     exact = live_cost.calculate_exact_breakeven_price(
         broker_name,
         instrument,
@@ -104,45 +130,77 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
         mode,
         COST_COVER_NET_PROFIT_PERCENT,
     )
-    # Keep one tick above the exact solver price so the PAPER one-tick fill cap
-    # still preserves the requested charges + 4% net-profit floor.
+
+    # Keep protected stops one tick above their exact solver price. The PAPER
+    # one-tick fill cap can then still preserve the requested net floor.
+    exact_floor_price = max(entry, _f(exact_floor.get("price"), entry))
+    exact_early_price = max(entry, _f(exact_early.get("price"), entry))
     exact_price = max(entry, _f(exact.get("price"), entry))
+    cost_floor_price = _round_up_tick(exact_floor_price + TICK_SIZE)
+    early_trigger_price = _round_up_tick(exact_early_price + TICK_SIZE)
+    protected_2pct_price = early_trigger_price
     cost_cover_price = _round_up_tick(exact_price + TICK_SIZE)
 
     new_sl = old_sl
-    stage = "WAITING_CHARGES_PLUS_4PCT_LOCK"
-    triggered = bool(
+    stage = "WAITING_EARLY_COST_SAFE_FLOOR"
+
+    early_triggered = bool(
+        peak + 1e-9 >= early_trigger_price + TICK_SIZE
+    )
+    four_pct_triggered = bool(
         peak_r + 1e-9 >= FIRST_LOCK_TRIGGER_R
         and peak + 1e-9 >= cost_cover_price + TICK_SIZE
     )
 
-    if triggered:
-        new_sl = max(new_sl, cost_cover_price)
-        stage = "CHARGES_PLUS_4PCT_LOCK"
+    if early_triggered:
+        new_sl = max(new_sl, cost_floor_price)
+        stage = "COST_SAFE_FLOOR_AFTER_2PCT_NET"
 
-        if peak_r + 1e-9 >= LOCK_1_TRIGGER_R:
-            new_sl = max(new_sl, entry + LOCK_1_R * risk)
-            stage = "LOCK_0_50R_AFTER_1_50R"
+    if four_pct_triggered:
+        new_sl = max(new_sl, protected_2pct_price)
+        stage = "LOCK_2PCT_AFTER_4PCT_NET"
 
-        if peak_r + 1e-9 >= LOCK_2_TRIGGER_R:
-            new_sl = max(new_sl, entry + LOCK_2_R * risk)
-            stage = "LOCK_1_00R_AFTER_2_00R"
+    # Progressive profit ratchet: protect more as the move proves itself, while
+    # keeping enough distance from the peak for ordinary option-premium noise.
+    if early_triggered and peak_r + 1e-9 >= LOCK_0_TRIGGER_R:
+        new_sl = max(new_sl, entry + LOCK_0_R * risk)
+        stage = "LOCK_0_25R_AFTER_0_75R"
 
-        if peak_r + 1e-9 >= SMOOTH_TRAIL_TRIGGER_R:
-            new_sl = max(
-                new_sl,
-                entry + SMOOTH_TRAIL_MIN_LOCK_R * risk,
-                peak - SMOOTH_TRAIL_DISTANCE_R * risk,
-            )
-            stage = "SMOOTH_TRAIL_1_00R_AFTER_2_50R"
+    if early_triggered and peak_r + 1e-9 >= LOCK_1_TRIGGER_R:
+        new_sl = max(new_sl, entry + LOCK_1_R * risk)
+        stage = "LOCK_0_45R_AFTER_1_00R"
 
-        if peak_r + 1e-9 >= TIGHT_TRAIL_TRIGGER_R:
-            new_sl = max(
-                new_sl,
-                entry + TIGHT_TRAIL_MIN_LOCK_R * risk,
-                peak - TIGHT_TRAIL_DISTANCE_R * risk,
-            )
-            stage = "TIGHT_TRAIL_0_80R_AFTER_4_00R"
+    if early_triggered and peak_r + 1e-9 >= LOCK_2_TRIGGER_R:
+        new_sl = max(
+            new_sl,
+            entry + LOCK_2_R * risk,
+            peak - 0.70 * risk,
+        )
+        stage = "LOCK_0_80R_AFTER_1_50R"
+
+    if early_triggered and peak_r + 1e-9 >= RUNNER_TRIGGER_R:
+        new_sl = max(
+            new_sl,
+            entry + RUNNER_MIN_LOCK_R * risk,
+            peak - RUNNER_DISTANCE_R * risk,
+        )
+        stage = "RUNNER_TRAIL_0_65R_AFTER_2_00R"
+
+    if early_triggered and peak_r + 1e-9 >= SMOOTH_TRAIL_TRIGGER_R:
+        new_sl = max(
+            new_sl,
+            entry + SMOOTH_TRAIL_MIN_LOCK_R * risk,
+            peak - SMOOTH_TRAIL_DISTANCE_R * risk,
+        )
+        stage = "SMOOTH_TRAIL_0_55R_AFTER_2_50R"
+
+    if early_triggered and peak_r + 1e-9 >= TIGHT_TRAIL_TRIGGER_R:
+        new_sl = max(
+            new_sl,
+            entry + TIGHT_TRAIL_MIN_LOCK_R * risk,
+            peak - TIGHT_TRAIL_DISTANCE_R * risk,
+        )
+        stage = "TIGHT_TRAIL_0_45R_AFTER_4_00R"
 
     # A protected stop must stay below the observed peak by at least one tick.
     peak_room = _round_down_tick(peak - TICK_SIZE)
@@ -162,9 +220,15 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
         "initial_risk": round(risk, 2),
         "cost_safe_breakeven_price": round(cost_cover_price, 2),
         "exact_4pct_solver_price": round(exact_price, 2),
-        "breakeven_triggered": triggered,
-        "breakeven_rule": "EXACT_CHARGES_PLUS_4PCT_THEN_SMOOTH_R_LOCKS",
+        "breakeven_triggered": early_triggered,
+        "four_pct_triggered": four_pct_triggered,
+        "breakeven_rule": "COST_FLOOR_AT_2PCT_THEN_2PCT_LOCK_AT_4PCT_AND_R_RATCHET",
         "breakeven_net_profit_percent": COST_COVER_NET_PROFIT_PERCENT,
+        "early_protection_trigger_net_percent": EARLY_PROTECTION_TRIGGER_NET_PERCENT,
+        "early_protection_lock_net_percent": EARLY_PROTECTION_LOCK_NET_PERCENT,
+        "early_trigger_price": round(early_trigger_price, 2),
+        "cost_floor_price": round(cost_floor_price, 2),
+        "protected_2pct_price": round(protected_2pct_price, 2),
         "breakeven_target_net_profit": exact.get("target_net_profit"),
         "breakeven_net_pnl_at_stop": exact.get("net_pnl_at_price"),
         "breakeven_total_charges": exact.get("total_charges_at_price"),
@@ -175,15 +239,33 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
         "breakeven_trading_mode_basis": exact.get("trading_mode_basis"),
         "profit_lock_authority": AUTHORITY_VERSION,
         "trail_schedule": {
-            "cost_cover_trigger_r": FIRST_LOCK_TRIGGER_R,
-            "lock_0_5r_trigger_r": LOCK_1_TRIGGER_R,
-            "lock_1r_trigger_r": LOCK_2_TRIGGER_R,
+            "early_cost_floor_trigger_net_percent": EARLY_PROTECTION_TRIGGER_NET_PERCENT,
+            "four_pct_trigger_r": FIRST_LOCK_TRIGGER_R,
+            "lock_0_25r_trigger_r": LOCK_0_TRIGGER_R,
+            "lock_0_45r_trigger_r": LOCK_1_TRIGGER_R,
+            "lock_0_80r_trigger_r": LOCK_2_TRIGGER_R,
+            "runner_trigger_r": RUNNER_TRIGGER_R,
+            "runner_distance_r": RUNNER_DISTANCE_R,
             "smooth_trail_trigger_r": SMOOTH_TRAIL_TRIGGER_R,
             "smooth_trail_distance_r": SMOOTH_TRAIL_DISTANCE_R,
             "tight_trail_trigger_r": TIGHT_TRAIL_TRIGGER_R,
             "tight_trail_distance_r": TIGHT_TRAIL_DISTANCE_R,
         },
     }
+
+
+def _protected_profit_stop_reason(trade, current_price: float, trail) -> str | None:
+    """Return the profit-stop reason that must outrank softer exit signals."""
+    entry = max(TICK_SIZE, _f(runtime._v(trade, "entry_price", TICK_SIZE)))
+    stop = max(TICK_SIZE, _f((trail or {}).get("sl_price"), TICK_SIZE))
+    current = max(TICK_SIZE, _f(current_price, TICK_SIZE))
+    if stop + 1e-9 < entry or current > stop + 1e-9:
+        return None
+    return (
+        "PROFIT LOCK TRAIL HIT"
+        f" | {(trail or {}).get('stage', 'PROTECTED_PROFIT_STOP')}"
+        f" | locked={_f((trail or {}).get('locked_r')):.2f}R"
+    )
 
 
 def _paper_stop_fill_price(conn, trade, observed_price: float, reason: str) -> float:
@@ -236,26 +318,23 @@ def apply_authoritative_profit_lock_runtime_patch() -> None:
         previous_updates = _i(runtime._v(trade, "trail_updates", 0), 0)
         result["updates"] = previous_updates + (1 if trail["updated"] else 0)
 
-        # Replace only a prior premium-SL/profit-lock decision. Structural and EOD
-        # exits from the wrapped evaluator remain authoritative.
         reason = result.get("reason")
         reason_text = str(reason or "").upper()
-        if (
-            "PURE ATR SL HIT" in reason_text
-            or "PROFIT LOCK TRAIL HIT" in reason_text
-        ):
-            reason = None
+        protected_reason = _protected_profit_stop_reason(trade, ltp, trail)
 
-        if reason is None and _f(ltp) <= _f(trail.get("sl_price")):
-            if _f(trail.get("sl_price")) >= _f(
-                runtime._v(trade, "entry_price", 0)
+        # Once a cost-safe profit stop has latched, it is the hard floor. Softer
+        # danger/structural/CAS decisions must not bypass the saved stop and turn
+        # an observed winner into a loss. EOD/manual exits above the stop remain
+        # untouched; if price is already through the stop, the stop reason wins.
+        if protected_reason is not None:
+            reason = protected_reason
+        else:
+            if (
+                "PURE ATR SL HIT" in reason_text
+                or "PROFIT LOCK TRAIL HIT" in reason_text
             ):
-                reason = (
-                    "PROFIT LOCK TRAIL HIT"
-                    f" | {trail['stage']}"
-                    f" | locked={trail['locked_r']}R"
-                )
-            else:
+                reason = None
+            if reason is None and _f(ltp) <= _f(trail.get("sl_price")):
                 reason = "PURE ATR SL HIT"
 
         result["reason"] = reason
