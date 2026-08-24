@@ -4,6 +4,8 @@ import math
 TICK_SIZE = 0.05
 MIN_PREMIUM_RISK_PERCENT = 10.0
 MAX_PREMIUM_RISK_PERCENT = 15.0
+EXPIRY_MIN_PREMIUM_RISK_PERCENT = 12.0
+EXPIRY_MAX_PREMIUM_RISK_PERCENT = 20.0
 TRUE_BE_NET_PROFIT_PERCENT = 2.0
 
 # Conservative basis used because this shared exit helper does not receive the
@@ -114,10 +116,14 @@ def calculate_option_atr_levels(
     if is_expiry_day:
         response = 1.0
         multiplier = 1.5
-        mode = "EXPIRY_SMART_ATR_10PCT_FLOOR"
+        minimum_risk_percent = EXPIRY_MIN_PREMIUM_RISK_PERCENT
+        maximum_risk_percent = EXPIRY_MAX_PREMIUM_RISK_PERCENT
+        mode = "EXPIRY_SMART_ATR_12PCT_FLOOR_20PCT_CAP"
     else:
         response = 0.5
         multiplier = 1.2
+        minimum_risk_percent = MIN_PREMIUM_RISK_PERCENT
+        maximum_risk_percent = MAX_PREMIUM_RISK_PERCENT
         mode = "NORMAL_SMART_ATR_10PCT_FLOOR"
 
     option_atr = atr * response
@@ -126,17 +132,18 @@ def calculate_option_atr_levels(
     # Avoid the old very-tight ATR stop. Every bought option gets at least 10%
     # premium room; ATR may widen it when volatility needs more space. A 15%
     # premium cap still limits runaway risk on abnormal candles. The caller's
-    # configured floor can ask for more, but never less than the protected 10%.
+    # configured floor can ask for more, but never less than the active
+    # session floor (10% normally, 12% on same-day expiry).
     requested_floor_percent = max(
-        MIN_PREMIUM_RISK_PERCENT,
+        minimum_risk_percent,
         float(sl_floor_percent or 0.0),
     )
     requested_floor_percent = min(
         requested_floor_percent,
-        MAX_PREMIUM_RISK_PERCENT,
+        maximum_risk_percent,
     )
     premium_risk_floor = entry * requested_floor_percent / 100.0
-    premium_risk_cap = entry * MAX_PREMIUM_RISK_PERCENT / 100.0
+    premium_risk_cap = entry * maximum_risk_percent / 100.0
     risk = min(
         max(TICK_SIZE, raw_risk, premium_risk_floor),
         max(TICK_SIZE, premium_risk_cap),
@@ -159,8 +166,8 @@ def calculate_option_atr_levels(
         "reward_multiple": None,
         "is_expiry_day": bool(is_expiry_day),
         "fixed_target_enabled": False,
-        "min_premium_risk_percent": MIN_PREMIUM_RISK_PERCENT,
-        "hard_premium_risk_cap_percent": MAX_PREMIUM_RISK_PERCENT,
+        "min_premium_risk_percent": minimum_risk_percent,
+        "hard_premium_risk_cap_percent": maximum_risk_percent,
         "premium_floor_applied": bool(premium_risk_floor > raw_risk + 1e-9),
         "hard_risk_cap_applied": bool(risk + 1e-9 < max(raw_risk, premium_risk_floor)),
         "quantity_preserved": True,

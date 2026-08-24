@@ -16,6 +16,7 @@ Entries, quantities, initial ATR SL, fixed-target and EOD rules are not changed.
 from __future__ import annotations
 
 import math
+from datetime import date, datetime
 from typing import Any, Dict
 
 from bot import auto_portfolio_runtime as runtime
@@ -29,6 +30,7 @@ EARLY_PROTECTION_TRIGGER_NET_PERCENT = 2.0
 EARLY_PROTECTION_LOCK_NET_PERCENT = 0.0
 FOUR_PCT_LOCK_NET_PERCENT = 2.0
 FOUR_PCT_MIN_PEAK_ROOM_R = 0.50
+EXPIRY_EARLY_FLOOR_MIN_PEAK_R = 0.75
 FIRST_LOCK_TRIGGER_R = 1.00
 LOCK_0_TRIGGER_R = 0.75
 LOCK_0_R = 0.25
@@ -74,6 +76,24 @@ def _round_down_tick(value: float) -> float:
     return round(max(TICK_SIZE, ticks * TICK_SIZE), 2)
 
 
+def _is_same_day_expiry_trade(trade: Any) -> bool:
+    value = runtime._v(trade, "expiry")
+    if isinstance(value, datetime):
+        expiry = value.date()
+    elif isinstance(value, date):
+        expiry = value
+    else:
+        expiry = None
+        text = str(value or "").strip().upper()
+        for fmt in ("%Y-%m-%d", "%d%b%Y", "%d-%m-%Y"):
+            try:
+                expiry = datetime.strptime(text, fmt).date()
+                break
+            except Exception:
+                pass
+    return bool(expiry and expiry == runtime._now_ist().date())
+
+
 def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
     entry = max(
         TICK_SIZE,
@@ -100,6 +120,7 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
     )
     peak = max(entry, saved_peak, current)
     peak_r = max(0.0, (peak - entry) / risk)
+    expiry_day_trade = _is_same_day_expiry_trade(trade)
 
     broker_name = str(
         runtime._v(trade, "broker_name", "angelone") or "angelone"
@@ -151,12 +172,23 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
     )
 
     new_sl = old_sl
-    stage = "WAITING_EARLY_COST_SAFE_FLOOR"
+    stage = (
+        "WAITING_EXPIRY_0_75R_COST_SAFE_FLOOR"
+        if expiry_day_trade
+        else "WAITING_EARLY_COST_SAFE_FLOOR"
+    )
 
-    early_triggered = bool(peak + 1e-9 >= early_trigger_price)
+    early_triggered = bool(
+        peak + 1e-9 >= early_trigger_price
+        and (
+            not expiry_day_trade
+            or peak_r + 1e-9 >= EXPIRY_EARLY_FLOOR_MIN_PEAK_R
+        )
+    )
     four_pct_triggered = bool(
         peak_r + 1e-9 >= FIRST_LOCK_TRIGGER_R
         and peak + 1e-9 >= cost_cover_price
+        and (not expiry_day_trade or early_triggered)
     )
 
     if early_triggered:
@@ -241,6 +273,10 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
         "exact_4pct_solver_price": round(exact_price, 2),
         "breakeven_triggered": early_triggered,
         "four_pct_triggered": four_pct_triggered,
+        "expiry_day_trade": expiry_day_trade,
+        "expiry_early_floor_min_peak_r": (
+            EXPIRY_EARLY_FLOOR_MIN_PEAK_R if expiry_day_trade else None
+        ),
         "breakeven_rule": (
             "COST_FLOOR_AT_2PCT_THEN_4PCT_LOCK_WITH_0_50R_ROOM_AND_R_RATCHET"
         ),

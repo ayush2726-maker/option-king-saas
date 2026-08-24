@@ -101,6 +101,9 @@ from bot.missed_trade_learning_v1 import (
 from bot.final_correlated_risk_guard import (
     apply_final_correlated_risk_guard,
 )
+from bot.expiry_day_risk_mode_patch import (
+    apply_expiry_day_risk_mode_patch,
+)
 from bot.authoritative_profit_lock_runtime_patch import (
     apply_authoritative_profit_lock_runtime_patch,
 )
@@ -168,11 +171,14 @@ apply_missed_trade_learning_patch()
 # Absolute final order authority: correlated exposure plus the exact 15-minute
 # same-index/same-side loss cooldown cannot be replaced by another wrapper.
 apply_final_correlated_risk_guard()
+# Expiry-only final authority: 88 score, completed momentum/5m agreement,
+# 14:45 cutoff, one-position limit and 1% planned-SL-loss sizing.
+apply_expiry_day_risk_mode_patch()
 # Strategy/exit patches above can replace the evaluator while leaving an old
 # installed flag behind. Re-assert the ratchet as the final exit authority.
 apply_authoritative_profit_lock_runtime_patch()
 
-RELEASE_VERSION = "profit-ratchet-half-r-room-v2"
+RELEASE_VERSION = "expiry-day-risk-mode-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
