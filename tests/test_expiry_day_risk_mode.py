@@ -89,6 +89,14 @@ def test_exact_same_day_expiry_resolution():
         {"expiry_date": "2026-09-01"}, now
     ) is False
 
+    # The exact resolved contract is authoritative even for an underlying
+    # whose exchange expiry weekday is not inferred by the scan layer.
+    assert expiry._entry_is_expiry_session(
+        {"underlying": "SENSEX"},
+        {"expiry_date": "2026-08-25"},
+        now,
+    ) is True
+
 
 def test_expiry_quantity_caps_planned_sl_loss_at_one_percent():
     base = {

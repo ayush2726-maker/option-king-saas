@@ -92,6 +92,19 @@ def _resolved_expires_today(resolved: Any, value: datetime | None = None) -> boo
     return expiry == now.date()
 
 
+def _entry_is_expiry_session(
+    selected: dict[str, Any],
+    resolved: dict[str, Any],
+    value: datetime,
+) -> bool:
+    underlying = str((selected or {}).get("underlying") or "").upper()
+    return bool(
+        _resolved_expires_today(resolved, value)
+        or (selected or {}).get("expiry_day_mode")
+        or _scan_is_expiry_session(underlying, value)
+    )
+
+
 def _candidate(signal: dict[str, Any]) -> str:
     side = str(
         signal.get("candidate_signal") or signal.get("signal") or "WAIT"
@@ -484,16 +497,14 @@ def apply_expiry_day_risk_mode_patch() -> bool:
     ):
         now_ist = _now_ist()
         underlying = str(selected.get("underlying") or "").upper()
-        expiry_session = bool(
-            selected.get("expiry_day_mode")
-            or _scan_is_expiry_session(underlying, now_ist)
-        )
+        resolved_today = _resolved_expires_today(resolved, now_ist)
+        expiry_session = _entry_is_expiry_session(selected, resolved, now_ist)
         if not expiry_session:
             return previous_open(
                 conn, user_id, broker_name, selected, settings, resolved,
                 quote_price, quality, lot_size, live_order, live_cash, state,
             )
-        if not _resolved_expires_today(resolved, now_ist):
+        if not resolved_today:
             return _record_block(
                 state,
                 selected,
