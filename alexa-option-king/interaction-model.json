@@ -1,0 +1,81 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "option king",
+      "intents": [
+        {
+          "name": "TodayPnlIntent",
+          "samples": [
+            "aaj ka p and l batao",
+            "today pnl",
+            "aaj profit loss kitna hai",
+            "aaj ka profit batao",
+            "aaj ka loss batao"
+          ]
+        },
+        {
+          "name": "OpenPositionsIntent",
+          "samples": [
+            "open positions batao",
+            "meri positions kya hain",
+            "abhi kaun si position open hai",
+            "active trades batao"
+          ]
+        },
+        {
+          "name": "AiSignalIntent",
+          "slots": [
+            {"name": "instrument", "type": "INSTRUMENT_NAME"}
+          ],
+          "samples": [
+            "AI signal batao",
+            "prediction kya hai",
+            "{instrument} ka signal batao",
+            "{instrument} prediction kya hai",
+            "{instrument} score batao"
+          ]
+        },
+        {
+          "name": "LastTradeIntent",
+          "samples": [
+            "last trade batao",
+            "pichla trade kya tha",
+            "last trade ka result batao"
+          ]
+        },
+        {
+          "name": "BotStatusIntent",
+          "samples": [
+            "bot status batao",
+            "bot running hai",
+            "bot chalu hai",
+            "bot band hai kya"
+          ]
+        },
+        {
+          "name": "WhyNoTradeIntent",
+          "samples": [
+            "trade kyu nahi liya",
+            "aaj trade kyu nahi hua",
+            "no trade reason batao",
+            "trade miss kyu hua"
+          ]
+        },
+        {"name": "AMAZON.HelpIntent", "samples": []},
+        {"name": "AMAZON.CancelIntent", "samples": []},
+        {"name": "AMAZON.StopIntent", "samples": []},
+        {"name": "AMAZON.NavigateHomeIntent", "samples": []}
+      ],
+      "types": [
+        {
+          "name": "INSTRUMENT_NAME",
+          "values": [
+            {"name": {"value": "NIFTY", "synonyms": ["nifty fifty", "nifty"]}},
+            {"name": {"value": "BANKNIFTY", "synonyms": ["bank nifty", "banknifty"]}},
+            {"name": {"value": "SENSEX", "synonyms": ["sensex"]}}
+          ]
+        }
+      ]
+    }
+  }
+}
