@@ -353,10 +353,27 @@ class UpstoxBroker(BaseBroker):
                         "quotes": quotes,
                         "quote_source": source,
                     }
-                errors.append(
+                error = (
                     f"{source}:{response.status_code}:"
                     f"{self._message(payload)}"
                 )
+                errors.append(error)
+                # V2 and V3 share the account's market-data quota. Retrying the
+                # fallback immediately on 429 doubles the pressure and delays
+                # recovery, so let the caller back off instead.
+                if response.status_code == 429:
+                    retry_after = getattr(response, "headers", {}).get("Retry-After")
+                    try:
+                        retry_after_seconds = max(1, int(float(retry_after)))
+                    except (TypeError, ValueError):
+                        retry_after_seconds = 45
+                    return {
+                        "success": False,
+                        "quotes": {},
+                        "message": error[:400],
+                        "rate_limited": True,
+                        "retry_after_seconds": retry_after_seconds,
+                    }
             except Exception as exc:
                 errors.append(f"{source}:{type(exc).__name__}:{str(exc)[:160]}")
 

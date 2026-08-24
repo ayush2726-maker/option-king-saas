@@ -28,7 +28,7 @@ from bot.news_intelligence import aggregate as aggregate_news
 from bot.shared_ai import predict
 
 
-VERSION = "OKAI-MISSED-TRADE-LEARNING-SHADOW-V2"
+VERSION = "OKAI-MISSED-TRADE-LEARNING-SHADOW-V3"
 SAMPLE_SOURCE = "MISSED_TRADE_SHADOW_V1"
 HORIZONS = (5, 15, 30)
 PRIMARY_HORIZON = 15
@@ -40,7 +40,9 @@ MAX_HYDRATION_ATTEMPTS = 6
 HYDRATION_RETRY_SECONDS = 30
 MAX_EVENT_AGE_MINUTES = 240
 MAX_HYDRATIONS_PER_CYCLE = 1
-MAX_OUTCOMES_PER_CYCLE = 4
+MAX_OUTCOMES_PER_CYCLE = 1
+RATE_LIMIT_RETRY_SECONDS = 45
+MAX_RATE_LIMIT_RETRY_SECONDS = 180
 
 NON_TRAINING_OPERATIONAL_MARKERS = (
     "MARKET_CLOSED",
@@ -72,6 +74,8 @@ _thread: Optional[threading.Thread] = None
 _last_cycle_at: Optional[str] = None
 _last_error: Optional[str] = None
 _last_capture_at: Optional[str] = None
+_quote_cooldown_until: Optional[datetime] = None
+_quote_rate_limit_streak = 0
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -193,9 +197,10 @@ def _due_tracking_events(now: datetime, limit: int = 80) -> list[Dict[str, Any]]
         rows = conn.execute(
             """SELECT * FROM ai_missed_trade_signals_v1
             WHERE status='TRACKING'
+              AND (next_retry_at IS NULL OR datetime(next_retry_at)<=datetime(?))
             ORDER BY datetime(updated_at),datetime(created_at),rowid
             LIMIT ?""",
-            (max(1, int(limit)),),
+            (_iso(now), max(1, int(limit))),
         ).fetchall()
         events = [dict(row) for row in rows]
         decision_ids = [
@@ -594,9 +599,44 @@ def _market_for_ai(event: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _is_rate_limit_error(value: Any) -> bool:
+    text = str(value or "").upper()
+    return "429" in text or "TOO MANY REQUEST" in text or "RATE_LIMIT" in text
+
+
+def _activate_quote_cooldown(now: datetime) -> int:
+    global _quote_cooldown_until, _quote_rate_limit_streak
+    with _lock:
+        _quote_rate_limit_streak = min(_quote_rate_limit_streak + 1, 3)
+        delay = min(
+            MAX_RATE_LIMIT_RETRY_SECONDS,
+            RATE_LIMIT_RETRY_SECONDS * (2 ** (_quote_rate_limit_streak - 1)),
+        )
+        _quote_cooldown_until = now + timedelta(seconds=delay)
+        return int(delay)
+
+
+def _clear_quote_cooldown() -> None:
+    global _quote_cooldown_until, _quote_rate_limit_streak
+    with _lock:
+        _quote_cooldown_until = None
+        _quote_rate_limit_streak = 0
+
+
+def _quote_cooldown_active(now: datetime) -> bool:
+    with _lock:
+        return bool(_quote_cooldown_until and now < _quote_cooldown_until)
+
+
 def _set_hydration_failure(event: Mapping[str, Any], error: str, now: datetime) -> None:
-    attempts = _i(event.get("hydration_attempts")) + 1
-    terminal = attempts >= MAX_HYDRATION_ATTEMPTS
+    rate_limited = _is_rate_limit_error(error)
+    # A broker throttle is transient and must not permanently invalidate an
+    # otherwise exact contract after six automatic retries.
+    attempts = _i(event.get("hydration_attempts")) + (0 if rate_limited else 1)
+    terminal = not rate_limited and attempts >= MAX_HYDRATION_ATTEMPTS
+    retry_seconds = HYDRATION_RETRY_SECONDS
+    if rate_limited:
+        retry_seconds = _activate_quote_cooldown(now)
     conn = get_db()
     try:
         conn.execute(
@@ -607,7 +647,7 @@ def _set_hydration_failure(event: Mapping[str, Any], error: str, now: datetime) 
                 attempts,
                 "CONTRACT_UNAVAILABLE" if terminal else "PENDING_CONTRACT",
                 str(error or "OPTION_CONTRACT_UNAVAILABLE")[:300],
-                None if terminal else _iso(now + timedelta(seconds=HYDRATION_RETRY_SECONDS)),
+                None if terminal else _iso(now + timedelta(seconds=retry_seconds)),
                 _iso(now),
                 event["id"],
             ),
@@ -723,6 +763,93 @@ def _quote_contract(user_id: int, broker_name: str, contract: Mapping[str, Any])
         return {"success": False, "reason": f"{type(exc).__name__}:{str(exc)[:220]}"}
 
 
+def _quote_contract_pair(
+    user_id: int,
+    broker_name: str,
+    ce_contract: Mapping[str, Any],
+    pe_contract: Mapping[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    """Quote an ATM CE/PE pair with one Upstox request when possible."""
+    active_broker, creds = _get_active_broker(int(user_id))
+    active = str(active_broker or "").lower()
+    expected = str(broker_name or "").lower()
+    if not active or not creds:
+        failure = {"success": False, "reason": "ACTIVE_BROKER_NOT_CONNECTED"}
+        return {"ce": dict(failure), "pe": dict(failure)}
+    if expected and active != expected:
+        failure = {
+            "success": False,
+            "reason": f"BROKER_CHANGED:{expected}->{active}",
+        }
+        return {"ce": dict(failure), "pe": dict(failure)}
+
+    exchanges = [
+        str(contract.get("exchange") or "NFO")
+        for contract in (ce_contract, pe_contract)
+    ]
+    if active == "upstox" and exchanges[0] == exchanges[1]:
+        try:
+            obj = _get_multi_session(int(user_id), active, creds)
+            if hasattr(obj, "get_ltps"):
+                identifiers = [
+                    str(
+                        contract.get("token")
+                        or contract.get("instrument_key")
+                        or contract.get("symbol")
+                        or ""
+                    )
+                    for contract in (ce_contract, pe_contract)
+                ]
+                raw = obj.get_ltps(identifiers, exchange=exchanges[0])
+                quotes = dict((raw or {}).get("quotes") or {})
+                if not isinstance(raw, dict) or not raw.get("success"):
+                    reason = str((raw or {}).get("message") or "OPTION_LTP_FAILED")
+                    if (raw or {}).get("rate_limited") or _is_rate_limit_error(reason):
+                        reason = "UPSTOX_RATE_LIMITED: automatic retry scheduled"
+                    failure = {"success": False, "reason": reason[:220]}
+                    return {"ce": dict(failure), "pe": dict(failure)}
+
+                segment = (
+                    "BSE_FO"
+                    if exchanges[0].upper().startswith(("BSE", "BFO"))
+                    else "NSE_FO"
+                )
+                result: Dict[str, Dict[str, Any]] = {}
+                for side, identifier in zip(("ce", "pe"), identifiers):
+                    full_key = identifier if "|" in identifier else f"{segment}|{identifier}"
+                    quote = quotes.get(identifier) or quotes.get(full_key) or {}
+                    ltp = _f(quote.get("ltp"))
+                    if ltp <= 0:
+                        result[side] = {
+                            "success": False,
+                            "reason": f"OPTION_LTP_MISSING:{full_key}"[:220],
+                        }
+                    else:
+                        result[side] = {
+                            "success": True,
+                            "ltp": round(ltp, 4),
+                            "source": str(
+                                quote.get("quote_source")
+                                or raw.get("quote_source")
+                                or "UPSTOX_BATCH_LTP"
+                            ),
+                        }
+                return result
+        except Exception as exc:
+            reason = f"{type(exc).__name__}:{str(exc)[:200]}"
+            if _is_rate_limit_error(reason):
+                reason = "UPSTOX_RATE_LIMITED: automatic retry scheduled"
+            failure = {"success": False, "reason": reason}
+            return {"ce": dict(failure), "pe": dict(failure)}
+
+    # Other brokers do not expose a compatible multi-quote API here. This also
+    # preserves safe fallback behavior for older Upstox session objects.
+    return {
+        "ce": _quote_contract(user_id, broker_name, ce_contract),
+        "pe": _quote_contract(user_id, broker_name, pe_contract),
+    }
+
+
 def _latest_spot(user_id: int, underlying: str, fallback: float) -> float:
     state = dict(get_user_bot_state(int(user_id)) or {})
     for scan in state.get("scan_results") or []:
@@ -737,6 +864,33 @@ def _latest_spot(user_id: int, underlying: str, fallback: float) -> float:
     return float(fallback)
 
 
+def _set_outcome_failure(event: Mapping[str, Any], reason: str, now: datetime) -> None:
+    rate_limited = _is_rate_limit_error(reason)
+    retry_seconds = (
+        _activate_quote_cooldown(now) if rate_limited else POLL_SECONDS
+    )
+    message = (
+        f"UPSTOX_RATE_LIMITED: retrying automatically after {retry_seconds}s"
+        if rate_limited
+        else str(reason or "OPTION_QUOTE_UNAVAILABLE")[:300]
+    )
+    conn = get_db()
+    try:
+        conn.execute(
+            """UPDATE ai_missed_trade_signals_v1
+            SET last_error=?,next_retry_at=?,updated_at=? WHERE id=?""",
+            (
+                message,
+                _iso(now + timedelta(seconds=retry_seconds)),
+                _iso(now),
+                event["id"],
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _insert_counterfactual_outcome(
     event: Mapping[str, Any],
     snapshot: Mapping[str, Any],
@@ -745,20 +899,19 @@ def _insert_counterfactual_outcome(
 ) -> bool:
     ce_entry = _loads(snapshot.get("ce_contract_json"), {})
     pe_entry = _loads(snapshot.get("pe_contract_json"), {})
-    ce_quote = _quote_contract(_i(event["user_id"]), str(event.get("broker")), ce_entry)
-    pe_quote = _quote_contract(_i(event["user_id"]), str(event.get("broker")), pe_entry)
+    quote_pair = _quote_contract_pair(
+        _i(event["user_id"]),
+        str(event.get("broker")),
+        ce_entry,
+        pe_entry,
+    )
+    ce_quote = dict(quote_pair.get("ce") or {})
+    pe_quote = dict(quote_pair.get("pe") or {})
     if not (ce_quote.get("success") and pe_quote.get("success")):
         reason = ce_quote.get("reason") or pe_quote.get("reason") or "OPTION_QUOTE_UNAVAILABLE"
-        conn = get_db()
-        try:
-            conn.execute(
-                "UPDATE ai_missed_trade_signals_v1 SET last_error=?,updated_at=? WHERE id=?",
-                (str(reason)[:300], _iso(now), event["id"]),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        _set_outcome_failure(event, str(reason), now)
         return False
+    _clear_quote_cooldown()
 
     ce_result = advanced._contract_pnl(
         str(event.get("broker") or "angelone"),
@@ -866,7 +1019,7 @@ def _insert_counterfactual_outcome(
         if cursor.rowcount:
             conn.execute(
                 """UPDATE ai_missed_trade_signals_v1
-                SET updated_at=?,last_error=NULL WHERE id=?""",
+                SET updated_at=?,last_error=NULL,next_retry_at=NULL WHERE id=?""",
                 (_iso(now), event["id"]),
             )
         conn.commit()
@@ -969,29 +1122,35 @@ def run_learning_cycle(now: Optional[datetime] = None) -> Dict[str, Any]:
     hydrated = outcomes = 0
     try:
         if _quote_window_open(current):
-            conn = get_db()
-            try:
-                pending = conn.execute(
-                    """SELECT * FROM ai_missed_trade_signals_v1
-                    WHERE status='PENDING_CONTRACT'
-                      AND (next_retry_at IS NULL OR datetime(next_retry_at)<=datetime(?))
-                    ORDER BY datetime(created_at),rowid LIMIT ?""",
-                    (_iso(current), MAX_HYDRATIONS_PER_CYCLE),
-                ).fetchall()
-            finally:
-                conn.close()
-            for row in pending:
-                hydrated += 1 if _hydrate_event(dict(row), current) else 0
+            # Due outcomes are time-sensitive and use already resolved exact
+            # contracts, so process one before the heavier contract hydration.
+            # A CE/PE pair is one batched Upstox request, preventing quote bursts.
+            if not _quote_cooldown_active(current):
+                tracking = _due_tracking_events(current)
+                attempted = 0
+                for event in tracking:
+                    created = _evaluate_event(event, current)
+                    if created:
+                        outcomes += created
+                    attempted += 1
+                    if attempted >= MAX_OUTCOMES_PER_CYCLE:
+                        break
 
-            tracking = _due_tracking_events(current)
-            attempted = 0
-            for event in tracking:
-                created = _evaluate_event(event, current)
-                if created:
-                    outcomes += created
-                attempted += 1
-                if attempted >= MAX_OUTCOMES_PER_CYCLE:
-                    break
+            # Do not immediately spend more broker quota after an observed 429.
+            if not _quote_cooldown_active(current):
+                conn = get_db()
+                try:
+                    pending = conn.execute(
+                        """SELECT * FROM ai_missed_trade_signals_v1
+                        WHERE status='PENDING_CONTRACT'
+                          AND (next_retry_at IS NULL OR datetime(next_retry_at)<=datetime(?))
+                        ORDER BY datetime(created_at),rowid LIMIT ?""",
+                        (_iso(current), MAX_HYDRATIONS_PER_CYCLE),
+                    ).fetchall()
+                finally:
+                    conn.close()
+                for row in pending:
+                    hydrated += 1 if _hydrate_event(dict(row), current) else 0
         _expire_stale_events(current)
         if outcomes:
             maybe_train_models(force=False)
@@ -1003,6 +1162,9 @@ def run_learning_cycle(now: Optional[datetime] = None) -> Dict[str, Any]:
         "success": _last_error is None,
         "hydrated": hydrated,
         "outcomes_created": outcomes,
+        "quote_cooldown_until": (
+            _iso(_quote_cooldown_until) if _quote_cooldown_until else None
+        ),
         "last_error": _last_error,
     }
 

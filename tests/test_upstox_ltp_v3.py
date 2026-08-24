@@ -83,6 +83,31 @@ def test_get_ltp_falls_back_to_v2_only_when_v3_has_no_quote(monkeypatch):
     ]
 
 
+def test_get_ltps_does_not_double_hit_quota_after_429(monkeypatch):
+    called = []
+
+    def fake_get(url, **kwargs):
+        called.append(url)
+        return FakeResponse(
+            {
+                "status": "error",
+                "errors": [
+                    {"errorCode": "UDAPI10005", "message": "Too Many Request Sent"}
+                ],
+            },
+            429,
+        )
+
+    monkeypatch.setattr("bot.brokers.upstox.requests.get", fake_get)
+
+    result = broker().get_ltps(["NSE_FO|50123", "NSE_FO|50124"])
+
+    assert result["success"] is False
+    assert result["rate_limited"] is True
+    assert result["retry_after_seconds"] == 45
+    assert called == ["https://api.upstox.com/v3/market-quote/ltp"]
+
+
 def test_sensex_symbol_fallback_uses_bse_fo_segment():
     assert (
         UpstoxBroker._quote_instrument("SENSEX2682077700CE", "BSE_FO")

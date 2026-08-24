@@ -243,10 +243,10 @@ def test_exact_cost_adjusted_outcomes_feed_existing_ai_dataset(monkeypatch, tmp_
 
     monkeypatch.setattr(
         missed,
-        "_quote_contract",
-        lambda user_id, broker_name, contract: {
-            "success": True,
-            "ltp": 5 if contract.get("side") == "CE" else 15,
+        "_quote_contract_pair",
+        lambda user_id, broker_name, ce_contract, pe_contract: {
+            "ce": {"success": True, "ltp": 5},
+            "pe": {"success": True, "ltp": 15},
         },
     )
     for horizon in (5, 15, 30):
@@ -289,8 +289,84 @@ def test_exact_cost_adjusted_outcomes_feed_existing_ai_dataset(monkeypatch, tmp_
 def test_late_counterfactual_is_visible_but_excluded_from_training(monkeypatch, tmp_path):
     missed, _, _ = _load_stack(monkeypatch, tmp_path)
     assert missed.MAX_TRAINING_QUOTE_DELAY_SECONDS < 180
-    assert missed.VERSION.endswith("SHADOW-V2")
+    assert missed.VERSION.endswith("SHADOW-V3")
     assert missed.SAMPLE_SOURCE == "MISSED_TRADE_SHADOW_V1"
+
+
+def test_upstox_counterfactual_pair_uses_one_batched_quote(monkeypatch, tmp_path):
+    missed, _, _ = _load_stack(monkeypatch, tmp_path)
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def get_ltps(self, identifiers, exchange="NFO"):
+            self.calls.append((list(identifiers), exchange))
+            return {
+                "success": True,
+                "quote_source": "UPSTOX_LTP_V3",
+                "quotes": {
+                    "NSE_FO|CE": {"ltp": 10.5},
+                    "NSE_FO|PE": {"ltp": 11.5},
+                },
+            }
+
+    session = Session()
+    monkeypatch.setattr(
+        missed,
+        "_get_active_broker",
+        lambda user_id: ("upstox", {"access_token": "token"}),
+    )
+    monkeypatch.setattr(missed, "_get_multi_session", lambda *args: session)
+
+    pair = missed._quote_contract_pair(
+        7,
+        "upstox",
+        {"token": "NSE_FO|CE", "exchange": "NSE_FO"},
+        {"token": "NSE_FO|PE", "exchange": "NSE_FO"},
+    )
+
+    assert pair["ce"]["ltp"] == 10.5
+    assert pair["pe"]["ltp"] == 11.5
+    assert session.calls == [(["NSE_FO|CE", "NSE_FO|PE"], "NSE_FO")]
+
+
+def test_rate_limited_outcome_gets_backoff_instead_of_hot_retry(monkeypatch, tmp_path):
+    missed, _, get_db = _load_stack(monkeypatch, tmp_path)
+    assert missed.capture_scan_misses(
+        {"user_id": 7, "entry_candidate_attempts": []},
+        [_scan()],
+        [],
+        now=START,
+    ) == 1
+    conn = get_db()
+    event = dict(conn.execute("SELECT * FROM ai_missed_trade_signals_v1").fetchone())
+    conn.close()
+
+    missed._set_outcome_failure(event, "UPSTOX LTP V3:429:Too Many Requests", START)
+
+    conn = get_db()
+    row = conn.execute(
+        "SELECT last_error,next_retry_at FROM ai_missed_trade_signals_v1"
+    ).fetchone()
+    conn.close()
+    assert "retrying automatically" in row["last_error"]
+    assert missed._parse(row["next_retry_at"]) == START + timedelta(seconds=45)
+    assert missed._quote_cooldown_active(START + timedelta(seconds=44)) is True
+    assert missed._quote_cooldown_active(START + timedelta(seconds=46)) is False
+
+    missed._set_hydration_failure(
+        event,
+        "RuntimeError:UPSTOX LTP V3:429:Too Many Requests",
+        START,
+    )
+    conn = get_db()
+    row = conn.execute(
+        "SELECT status,hydration_attempts FROM ai_missed_trade_signals_v1"
+    ).fetchone()
+    conn.close()
+    assert row["status"] == "PENDING_CONTRACT"
+    assert row["hydration_attempts"] == 0
 
 
 def test_only_missing_due_horizons_consume_worker_slots(monkeypatch, tmp_path):
