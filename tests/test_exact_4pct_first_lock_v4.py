@@ -53,9 +53,13 @@ def test_exact_4pct_lock_triggers_before_one_r(monkeypatch):
     assert result["peak_r"] < 1.0
     assert result["breakeven_triggered"] is True
     assert result["four_pct_triggered"] is True
-    assert result["sl_price"] >= result["protected_2pct_price"]
+    assert result["sl_price"] == result["four_pct_room_cap_price"]
+    assert result["sl_price"] < result["protected_2pct_price"]
+    assert result["four_pct_full_lock_armed"] is False
+    assert result["stage"] == "FOUR_PCT_LOCK_CAPPED_FOR_0_50R_ROOM"
     assert result["sl_price"] < result["peak_price"]
     assert result["trail_schedule"]["four_pct_trigger_r"] == 0.0
+    assert result["trail_schedule"]["four_pct_min_peak_room_r"] == 0.50
 
 
 def test_lock_still_waits_below_exact_4pct_price(monkeypatch):
@@ -71,7 +75,7 @@ def test_lock_still_waits_below_exact_4pct_price(monkeypatch):
     assert result["four_pct_triggered"] is False
     assert result["sl_price"] >= result["cost_floor_price"]
     assert result["sl_price"] < result["protected_2pct_price"]
-    assert result["stage"] == "LOCK_0_25R_AFTER_0_75R"
+    assert result["stage"] == "COST_SAFE_FLOOR_AFTER_2PCT_NET"
 
 
 def test_higher_r_runner_schedule_is_unchanged(monkeypatch):

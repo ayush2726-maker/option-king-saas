@@ -71,8 +71,8 @@ def test_gradual_lock_stages_ratchet_without_choking_runner():
     at_one_and_half = smooth._authoritative_trail(trade, 115.0)
     at_two = smooth._authoritative_trail(trade, 120.0)
 
-    assert before["stage"] == "LOCK_0_25R_AFTER_0_75R"
-    assert before["sl_price"] >= 102.5
+    assert before["stage"] == "LOCK_2PCT_AFTER_4PCT_NET"
+    assert before["sl_price"] >= before["protected_2pct_price"]
     assert at_one_and_half["stage"] == "LOCK_0_80R_AFTER_1_50R"
     assert at_one_and_half["sl_price"] >= 108.0
     assert at_two["stage"] == "RUNNER_TRAIL_0_65R_AFTER_2_00R"

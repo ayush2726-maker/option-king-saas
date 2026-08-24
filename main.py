@@ -172,7 +172,7 @@ apply_final_correlated_risk_guard()
 # installed flag behind. Re-assert the ratchet as the final exit authority.
 apply_authoritative_profit_lock_runtime_patch()
 
-RELEASE_VERSION = "live-quote-profit-ratchet-v1"
+RELEASE_VERSION = "profit-ratchet-half-r-room-v2"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
