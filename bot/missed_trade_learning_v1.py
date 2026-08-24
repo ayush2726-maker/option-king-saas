@@ -28,7 +28,7 @@ from bot.news_intelligence import aggregate as aggregate_news
 from bot.shared_ai import predict
 
 
-VERSION = "OKAI-MISSED-TRADE-LEARNING-SHADOW-V3.2"
+VERSION = "OKAI-MISSED-TRADE-LEARNING-SHADOW-V3.3"
 SAMPLE_SOURCE = "MISSED_TRADE_SHADOW_V1"
 HORIZONS = (5, 15, 30)
 PRIMARY_HORIZON = 15
@@ -1194,7 +1194,7 @@ def _revive_transient_contract_failures(now: datetime) -> int:
             """UPDATE ai_missed_trade_signals_v1
             SET status='PENDING_CONTRACT',hydration_attempts=0,
                 next_retry_at=?,completed_at=NULL,updated_at=?
-            WHERE status='CONTRACT_UNAVAILABLE'
+            WHERE status IN('CONTRACT_UNAVAILABLE','PENDING_CONTRACT')
               AND datetime(created_at)>=datetime(?)
               AND (UPPER(COALESCE(last_error,'')) LIKE ?
                 OR UPPER(COALESCE(last_error,'')) LIKE ?
@@ -1486,6 +1486,12 @@ def missed_trade_health() -> Dict[str, Any]:
             """SELECT status,COUNT(*) total
             FROM ai_missed_trade_signals_v1 GROUP BY status"""
         ).fetchall()
+        recent_error_rows = conn.execute(
+            """SELECT last_error FROM ai_missed_trade_signals_v1
+            WHERE status IN('PENDING_CONTRACT','CONTRACT_UNAVAILABLE')
+              AND datetime(created_at)>=datetime(?)""",
+            (_iso(_now() - timedelta(minutes=MAX_EVENT_AGE_MINUTES)),),
+        ).fetchall()
         outcomes = conn.execute(
             """SELECT COUNT(*) total,
             SUM(CASE WHEN training_eligible=1 THEN 1 ELSE 0 END) trainable
@@ -1496,6 +1502,27 @@ def missed_trade_health() -> Dict[str, Any]:
     finally:
         conn.close()
     due_outcome_backlog = len(_due_tracking_events(_now(), limit=200))
+    recent_error_categories: Dict[str, int] = {}
+    for row in recent_error_rows:
+        error = str(row["last_error"] or "").upper()
+        category = (
+            "UPSTOX_RATE_LIMIT"
+            if _is_rate_limit_error(error)
+            else "OPTION_PAIR_UNAVAILABLE"
+            if "ATM_CE_PE_CONTRACT_PAIR_UNAVAILABLE" in error
+            else "OPTION_INTELLIGENCE_UNAVAILABLE"
+            if "OPTION_INTELLIGENCE" in error or "OPTION_CONTRACT" in error
+            else "BROKER_NOT_CONNECTED"
+            if "BROKER_NOT_CONNECTED" in error or "BROKER_CHANGED" in error
+            else "BROKER_TOKEN_INVALID"
+            if "INVALID TOKEN" in error or "UDAPI100050" in error
+            else "TIMEOUT"
+            if "TIMEOUT" in error or "TIMED OUT" in error
+            else "OTHER"
+            if error
+            else "NO_ERROR_RECORDED"
+        )
+        recent_error_categories[category] = recent_error_categories.get(category, 0) + 1
     return {
         "success": True,
         "version": VERSION,
@@ -1511,6 +1538,7 @@ def missed_trade_health() -> Dict[str, Any]:
         "status_counts": {
             str(row["status"]): _i(row["total"]) for row in status_rows
         },
+        "recent_pending_error_categories": recent_error_categories,
         "outcome_count": _i(outcomes["total"] if outcomes else 0),
         "trainable_outcome_count": _i(outcomes["trainable"] if outcomes else 0),
         "due_outcome_backlog": due_outcome_backlog,

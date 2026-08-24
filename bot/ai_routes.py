@@ -219,6 +219,9 @@ def ai_health():
             "tracking": missed.get("tracking"),
             "complete": missed.get("complete"),
             "status_counts": missed.get("status_counts"),
+            "recent_pending_error_categories": missed.get(
+                "recent_pending_error_categories"
+            ),
             "outcome_count": missed.get("outcome_count"),
             "trainable_outcome_count": missed.get("trainable_outcome_count"),
             "due_outcome_backlog": missed.get("due_outcome_backlog"),
