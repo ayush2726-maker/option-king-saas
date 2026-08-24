@@ -289,7 +289,7 @@ def test_exact_cost_adjusted_outcomes_feed_existing_ai_dataset(monkeypatch, tmp_
 def test_late_counterfactual_is_visible_but_excluded_from_training(monkeypatch, tmp_path):
     missed, _, _ = _load_stack(monkeypatch, tmp_path)
     assert missed.MAX_TRAINING_QUOTE_DELAY_SECONDS < 180
-    assert missed.VERSION.endswith("SHADOW-V3.1")
+    assert missed.VERSION.endswith("SHADOW-V3.2")
     assert missed.SAMPLE_SOURCE == "MISSED_TRADE_SHADOW_V1"
 
 
@@ -434,6 +434,35 @@ def test_rate_limited_outcome_gets_backoff_instead_of_hot_retry(monkeypatch, tmp
     conn.close()
     assert row["status"] == "PENDING_CONTRACT"
     assert row["hydration_attempts"] == 0
+
+
+def test_recent_pre_v3_terminal_429_is_requeued_once(monkeypatch, tmp_path):
+    missed, _, get_db = _load_stack(monkeypatch, tmp_path)
+    assert missed.capture_scan_misses(
+        {"user_id": 7, "entry_candidate_attempts": []},
+        [_scan()],
+        [],
+        now=START,
+    ) == 1
+    conn = get_db()
+    conn.execute(
+        """UPDATE ai_missed_trade_signals_v1
+        SET status='CONTRACT_UNAVAILABLE',hydration_attempts=6,
+            last_error='RuntimeError:UPSTOX LTP V3:429:Too Many Request Sent'"""
+    )
+    conn.commit()
+    conn.close()
+
+    assert missed._revive_transient_contract_failures(START + timedelta(minutes=60)) == 1
+    assert missed._revive_transient_contract_failures(START + timedelta(minutes=61)) == 0
+    conn = get_db()
+    row = conn.execute(
+        "SELECT status,hydration_attempts,next_retry_at FROM ai_missed_trade_signals_v1"
+    ).fetchone()
+    conn.close()
+    assert row["status"] == "PENDING_CONTRACT"
+    assert row["hydration_attempts"] == 0
+    assert missed._parse(row["next_retry_at"]) == START + timedelta(minutes=60)
 
 
 def test_only_missing_due_horizons_consume_worker_slots(monkeypatch, tmp_path):

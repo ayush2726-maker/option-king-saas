@@ -28,7 +28,7 @@ from bot.news_intelligence import aggregate as aggregate_news
 from bot.shared_ai import predict
 
 
-VERSION = "OKAI-MISSED-TRADE-LEARNING-SHADOW-V3.1"
+VERSION = "OKAI-MISSED-TRADE-LEARNING-SHADOW-V3.2"
 SAMPLE_SOURCE = "MISSED_TRADE_SHADOW_V1"
 HORIZONS = (5, 15, 30)
 PRIMARY_HORIZON = 15
@@ -77,6 +77,7 @@ _last_error: Optional[str] = None
 _last_capture_at: Optional[str] = None
 _quote_cooldown_until: Optional[datetime] = None
 _quote_rate_limit_streak = 0
+_transient_recovery_sweep_done = False
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -1169,11 +1170,53 @@ def _expire_stale_events(now: datetime) -> None:
         conn.close()
 
 
+def _revive_transient_contract_failures(now: datetime) -> int:
+    """Requeue recent rows terminally failed by pre-V3 broker throttling."""
+    global _transient_recovery_sweep_done
+    with _lock:
+        if _transient_recovery_sweep_done:
+            return 0
+        _transient_recovery_sweep_done = True
+
+    cutoff = _iso(now - timedelta(minutes=MAX_EVENT_AGE_MINUTES))
+    markers = (
+        "%429%",
+        "%TOO MANY REQUEST%",
+        "%RATE_LIMIT%",
+        "%OPTION_LTP%",
+        "%OPTION_QUOTE%",
+        "%ATM_CE_PE_CONTRACT_PAIR_UNAVAILABLE%",
+        "%TIMEOUT%",
+    )
+    conn = get_db()
+    try:
+        cursor = conn.execute(
+            """UPDATE ai_missed_trade_signals_v1
+            SET status='PENDING_CONTRACT',hydration_attempts=0,
+                next_retry_at=?,completed_at=NULL,updated_at=?
+            WHERE status='CONTRACT_UNAVAILABLE'
+              AND datetime(created_at)>=datetime(?)
+              AND (UPPER(COALESCE(last_error,'')) LIKE ?
+                OR UPPER(COALESCE(last_error,'')) LIKE ?
+                OR UPPER(COALESCE(last_error,'')) LIKE ?
+                OR UPPER(COALESCE(last_error,'')) LIKE ?
+                OR UPPER(COALESCE(last_error,'')) LIKE ?
+                OR UPPER(COALESCE(last_error,'')) LIKE ?
+                OR UPPER(COALESCE(last_error,'')) LIKE ?)""",
+            (_iso(now), _iso(now), cutoff, *markers),
+        )
+        conn.commit()
+        return max(0, int(cursor.rowcount or 0))
+    finally:
+        conn.close()
+
+
 def run_learning_cycle(now: Optional[datetime] = None) -> Dict[str, Any]:
     global _last_cycle_at, _last_error
     current = (now or _now()).astimezone(timezone.utc)
     ensure_missed_trade_schema()
     hydrated = outcomes = 0
+    revived = _revive_transient_contract_failures(current)
     try:
         if _quote_window_open(current):
             # Due outcomes are time-sensitive and use already resolved exact
@@ -1215,6 +1258,7 @@ def run_learning_cycle(now: Optional[datetime] = None) -> Dict[str, Any]:
     return {
         "success": _last_error is None,
         "hydrated": hydrated,
+        "revived_transient_contracts": revived,
         "outcomes_created": outcomes,
         "quote_cooldown_until": (
             _iso(_quote_cooldown_until) if _quote_cooldown_until else None
@@ -1438,6 +1482,10 @@ def missed_trade_health() -> Dict[str, Any]:
             SUM(CASE WHEN status='COMPLETE' THEN 1 ELSE 0 END) complete
             FROM ai_missed_trade_signals_v1"""
         ).fetchone()
+        status_rows = conn.execute(
+            """SELECT status,COUNT(*) total
+            FROM ai_missed_trade_signals_v1 GROUP BY status"""
+        ).fetchall()
         outcomes = conn.execute(
             """SELECT COUNT(*) total,
             SUM(CASE WHEN training_eligible=1 THEN 1 ELSE 0 END) trainable
@@ -1460,6 +1508,9 @@ def missed_trade_health() -> Dict[str, Any]:
         "pending_contract": _i(counts["pending_contract"] if counts else 0),
         "tracking": _i(counts["tracking"] if counts else 0),
         "complete": _i(counts["complete"] if counts else 0),
+        "status_counts": {
+            str(row["status"]): _i(row["total"]) for row in status_rows
+        },
         "outcome_count": _i(outcomes["total"] if outcomes else 0),
         "trainable_outcome_count": _i(outcomes["trainable"] if outcomes else 0),
         "due_outcome_backlog": due_outcome_backlog,
