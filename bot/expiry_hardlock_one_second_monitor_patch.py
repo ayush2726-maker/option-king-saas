@@ -15,6 +15,10 @@ from datetime import date, datetime, timezone
 from bot import angel_fetcher
 from bot import auto_portfolio_runtime as runtime
 from bot import option_chain
+from bot.auto_hero_zero_runtime import (
+    attempt_auto_hero_zero_angel,
+    attempt_auto_hero_zero_multi,
+)
 from bot.brokers.upstox import UpstoxBroker
 
 
@@ -202,6 +206,11 @@ def _run_angel_one_second(user_id, creds, state):
                 rows = runtime._open_rows(conn, user_id)
                 blocked = {runtime._underlying(row) for row in rows}
                 selected = None
+                attempt_auto_hero_zero_angel(
+                    conn, user_id, obj, scans, settings, state
+                )
+                rows = runtime._open_rows(conn, user_id)
+                blocked = {runtime._underlying(row) for row in rows}
                 if runtime._can_enter(conn, user_id, settings, rows, state):
                     selected = _attempt_qualified_candidates(
                         scans,
@@ -303,6 +312,17 @@ def _run_multi_one_second(user_id, broker_name, creds, state):
                 rows = runtime._open_rows(conn, user_id)
                 blocked = {runtime._underlying(row) for row in rows}
                 selected = None
+                attempt_auto_hero_zero_multi(
+                    conn,
+                    user_id,
+                    broker_name,
+                    obj,
+                    scans,
+                    settings,
+                    state,
+                )
+                rows = runtime._open_rows(conn, user_id)
+                blocked = {runtime._underlying(row) for row in rows}
                 if runtime._can_enter(conn, user_id, settings, rows, state):
                     selected = _attempt_qualified_candidates(
                         scans,

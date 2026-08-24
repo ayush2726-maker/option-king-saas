@@ -21,6 +21,7 @@ from typing import Any, Dict
 
 from bot import auto_portfolio_runtime as runtime
 from bot import live_net_pnl_breakeven_patch as live_cost
+from bot import auto_hero_zero_runtime as auto_hero
 from bot.trade_visibility_metrics_patch import apply_trade_visibility_metrics_patch
 
 
@@ -397,6 +398,31 @@ def apply_authoritative_profit_lock_runtime_patch() -> None:
         reason = result.get("reason")
         reason_text = str(reason or "").upper()
         protected_reason = _protected_profit_stop_reason(trade, ltp, trail)
+
+        if auto_hero.is_auto_hero_zero_trade(trade):
+            hero_reason = auto_hero.auto_hero_zero_exit_reason(trade, ltp)
+            if hero_reason is not None:
+                reason = hero_reason
+            elif (
+                "SL HIT" not in reason_text
+                and "PROFIT LOCK TRAIL HIT" not in reason_text
+            ):
+                # Hero Zero intentionally ignores ordinary structural/EOD
+                # exits inside its short window. Its own 50% SL, profit trail,
+                # 2x target and 15:15 hard exit remain authoritative.
+                reason = None
+                reason_text = ""
+            result["reason"] = reason
+            result["auto_hero_zero"] = {
+                "active": True,
+                "paper_only": True,
+                "target_multiple": auto_hero.TARGET_MULTIPLE,
+                "force_exit_ist": "15:15",
+                "version": auto_hero.VERSION,
+            }
+            if hero_reason is not None:
+                result["profit_lock_authority"] = AUTHORITY_VERSION
+                return result
 
         # Once a cost-safe profit stop has latched, it is the hard floor. Softer
         # danger/structural/CAS decisions must not bypass the saved stop and turn

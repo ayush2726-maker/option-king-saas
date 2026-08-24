@@ -753,7 +753,10 @@ def _update_open(conn, trade, ltp, evaluation):
         """
         UPDATE paper_trades
         SET sl_price=?,
-            target_price=NULL,
+            target_price=CASE
+                WHEN reason LIKE 'AUTO HERO ZERO PAPER%' THEN target_price
+                ELSE NULL
+            END,
             initial_risk=?,
             peak_price=?,
             trail_stage=?,
