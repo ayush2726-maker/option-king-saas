@@ -28,7 +28,7 @@ from bot.news_intelligence import aggregate as aggregate_news
 from bot.shared_ai import predict
 
 
-VERSION = "OKAI-MISSED-TRADE-LEARNING-SHADOW-V3.3"
+VERSION = "OKAI-MISSED-TRADE-LEARNING-SHADOW-V3.4"
 SAMPLE_SOURCE = "MISSED_TRADE_SHADOW_V1"
 HORIZONS = (5, 15, 30)
 PRIMARY_HORIZON = 15
@@ -239,6 +239,23 @@ def _due_tracking_events(now: datetime, limit: int = 80) -> list[Dict[str, Any]]
             now,
         )
     ]
+
+
+def _pending_contract_events(now: datetime, limit: int) -> list[Dict[str, Any]]:
+    """Return retryable hydration rows in fair round-robin order."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """SELECT * FROM ai_missed_trade_signals_v1
+            WHERE status='PENDING_CONTRACT'
+              AND (next_retry_at IS NULL OR datetime(next_retry_at)<=datetime(?))
+            ORDER BY datetime(updated_at),datetime(created_at),rowid
+            LIMIT ?""",
+            (_iso(now), max(1, int(limit))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 def ensure_missed_trade_schema() -> None:
@@ -1235,19 +1252,11 @@ def run_learning_cycle(now: Optional[datetime] = None) -> Dict[str, Any]:
 
             # Do not immediately spend more broker quota after an observed 429.
             if not _quote_cooldown_active(current):
-                conn = get_db()
-                try:
-                    pending = conn.execute(
-                        """SELECT * FROM ai_missed_trade_signals_v1
-                        WHERE status='PENDING_CONTRACT'
-                          AND (next_retry_at IS NULL OR datetime(next_retry_at)<=datetime(?))
-                        ORDER BY datetime(created_at),rowid LIMIT ?""",
-                        (_iso(current), MAX_HYDRATIONS_PER_CYCLE),
-                    ).fetchall()
-                finally:
-                    conn.close()
-                for row in pending:
-                    hydrated += 1 if _hydrate_event(dict(row), current) else 0
+                for event in _pending_contract_events(
+                    current,
+                    MAX_HYDRATIONS_PER_CYCLE,
+                ):
+                    hydrated += 1 if _hydrate_event(event, current) else 0
         _expire_stale_events(current)
         if outcomes:
             maybe_train_models(force=False)

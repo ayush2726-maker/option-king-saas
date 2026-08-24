@@ -289,7 +289,7 @@ def test_exact_cost_adjusted_outcomes_feed_existing_ai_dataset(monkeypatch, tmp_
 def test_late_counterfactual_is_visible_but_excluded_from_training(monkeypatch, tmp_path):
     missed, _, _ = _load_stack(monkeypatch, tmp_path)
     assert missed.MAX_TRAINING_QUOTE_DELAY_SECONDS < 180
-    assert missed.VERSION.endswith("SHADOW-V3.3")
+    assert missed.VERSION.endswith("SHADOW-V3.4")
     assert missed.SAMPLE_SOURCE == "MISSED_TRADE_SHADOW_V1"
 
 
@@ -486,3 +486,30 @@ def test_only_missing_due_horizons_consume_worker_slots(monkeypatch, tmp_path):
         {5, 15},
         START + timedelta(minutes=31),
     ) == [30]
+
+
+def test_failed_hydration_moves_behind_unattempted_rows(monkeypatch, tmp_path):
+    missed, _, get_db = _load_stack(monkeypatch, tmp_path)
+    bank_scan = _scan()
+    bank_scan["underlying"] = "BANKNIFTY"
+    bank_scan["candle_id"] = "2026-08-12T10:30:00+05:30"
+    assert missed.capture_scan_misses(
+        {"user_id": 7, "entry_candidate_attempts": []},
+        [_scan(), bank_scan],
+        [],
+        now=START,
+    ) == 2
+    first = missed._pending_contract_events(START, 2)
+    assert [row["underlying"] for row in first] == ["NIFTY", "BANKNIFTY"]
+
+    conn = get_db()
+    conn.execute(
+        """UPDATE ai_missed_trade_signals_v1 SET updated_at=?
+        WHERE underlying='NIFTY'""",
+        (missed._iso(START + timedelta(seconds=30)),),
+    )
+    conn.commit()
+    conn.close()
+
+    retry_order = missed._pending_contract_events(START + timedelta(minutes=1), 2)
+    assert [row["underlying"] for row in retry_order] == ["BANKNIFTY", "NIFTY"]
