@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from bot import auto_portfolio_runtime as runtime
+from bot import expiry_hardlock_one_second_monitor_patch as one_second
 from bot import live_quote_runtime_recovery as recovery
 
 
@@ -178,3 +179,48 @@ def test_trade_live_response_forbids_http_cache():
     assert response.headers["cache-control"].startswith("no-store")
     assert response.headers["pragma"] == "no-cache"
     assert response.headers["x-okai-live-quote-version"] == recovery.VERSION
+
+
+def test_repeated_quote_failures_are_visible_and_request_fast_reconnect(monkeypatch):
+    conn = _memory_db()
+    conn.execute(
+        "INSERT INTO paper_trades (id, user_id, status, broker_name) "
+        "VALUES (31, 7, 'OPEN', 'upstox')"
+    )
+    conn.commit()
+    monkeypatch.setattr(recovery, "_quote_columns_ready", False)
+    recovery._ensure_quote_columns(conn)
+
+    state = {}
+    trade = conn.execute("SELECT * FROM paper_trades WHERE id=31").fetchone()
+    for _ in range(3):
+        runtime._manage_rows(
+            conn,
+            7,
+            [trade],
+            [],
+            lambda _trade: {
+                "success": False,
+                "message": "UPSTOX_LTP_V3:401:invalid token",
+            },
+            lambda *_args: {"success": False},
+            state,
+        )
+
+    row = conn.execute(
+        "SELECT quote_error, quote_failure_count, quote_failed_at "
+        "FROM paper_trades WHERE id=31"
+    ).fetchone()
+    assert "invalid token" in row["quote_error"]
+    assert row["quote_failure_count"] == 3
+    assert row["quote_failed_at"]
+    assert state["consecutive_open_quote_failures"] == 3
+
+    try:
+        one_second._raise_after_repeated_quote_failures(
+            state, "upstox", [trade]
+        )
+    except one_second.QuoteFeedStaleError as exc:
+        assert "UPSTOX_OPEN_QUOTE_FAILED_3X" in str(exc)
+    else:
+        raise AssertionError("three failed quote cycles must reset the session")

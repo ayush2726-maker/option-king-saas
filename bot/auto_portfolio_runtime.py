@@ -836,15 +836,48 @@ def _manage_rows(
     state,
 ):
     scan_lookup = _scan_map(scans)
+    quote_failures = []
+    quote_successes = 0
 
     for trade in rows:
         quote = quote_fetcher(trade)
         if not quote.get("success"):
+            message = str(quote.get("message") or "OPTION_LTP_FAILED")[:400]
+            quote_failures.append({"trade_id": trade["id"], "message": message})
+            try:
+                conn.execute(
+                    """
+                    UPDATE paper_trades
+                    SET quote_failed_at=?, quote_error=?,
+                        quote_failure_count=COALESCE(quote_failure_count, 0) + 1
+                    WHERE id=? AND status='OPEN'
+                    """,
+                    (datetime.now(timezone.utc).isoformat(), message, trade["id"]),
+                )
+                conn.commit()
+            except Exception:
+                pass
             continue
 
         ltp = _f(quote.get("ltp"), 0)
         if ltp <= 0:
+            message = "INVALID_OPTION_LTP"
+            quote_failures.append({"trade_id": trade["id"], "message": message})
+            try:
+                conn.execute(
+                    """
+                    UPDATE paper_trades
+                    SET quote_failed_at=?, quote_error=?,
+                        quote_failure_count=COALESCE(quote_failure_count, 0) + 1
+                    WHERE id=? AND status='OPEN'
+                    """,
+                    (datetime.now(timezone.utc).isoformat(), message, trade["id"]),
+                )
+                conn.commit()
+            except Exception:
+                pass
             continue
+        quote_successes += 1
 
         scan = scan_lookup.get(_underlying(trade))
         market = scan.get("market_data") if scan else None
@@ -918,6 +951,23 @@ def _manage_rows(
             state["live_order_error"] = order.get("message") or "Live SELL failed"
             if order.get("pending"):
                 state["live_order_lock"] = True
+
+    if rows:
+        if quote_successes:
+            state["consecutive_open_quote_failures"] = 0
+            state.pop("open_quote_error", None)
+        elif quote_failures:
+            state["consecutive_open_quote_failures"] = (
+                _i(state.get("consecutive_open_quote_failures"), 0) + 1
+            )
+            state["open_quote_error"] = quote_failures[-1]["message"]
+
+    return {
+        "open_count": len(rows),
+        "quote_successes": quote_successes,
+        "quote_failures": quote_failures,
+        "all_quotes_failed": bool(rows) and quote_successes == 0,
+    }
 
 
 def _insert(

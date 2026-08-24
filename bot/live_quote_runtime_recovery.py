@@ -28,9 +28,15 @@ from bot import auto_portfolio_runtime as runtime
 from database import get_db
 
 
-VERSION = "LIVE_QUOTE_RUNTIME_RECOVERY_V2"
+VERSION = "LIVE_QUOTE_RUNTIME_RECOVERY_V3"
 LIVE_PATHS = {"/bot/trade-live"}
-_QUOTE_COLUMNS = {"quote_updated_at", "quote_source"}
+_QUOTE_COLUMNS = {
+    "quote_updated_at",
+    "quote_source",
+    "quote_failed_at",
+    "quote_error",
+    "quote_failure_count",
+}
 _quote_columns_ready = False
 _quote_columns_lock = threading.Lock()
 STALE_RUNTIME_SECONDS = 20
@@ -80,6 +86,9 @@ def _ensure_quote_columns(conn) -> None:
         for name, kind in [
             ("quote_updated_at", "TEXT"),
             ("quote_source", "TEXT"),
+            ("quote_failed_at", "TEXT"),
+            ("quote_error", "TEXT"),
+            ("quote_failure_count", "INTEGER DEFAULT 0"),
         ]:
             if name in existing:
                 continue
@@ -111,7 +120,9 @@ def apply_live_quote_timestamp_patch() -> None:
             conn.execute(
                 """
                 UPDATE paper_trades
-                SET quote_updated_at=?, quote_source=?
+                SET quote_updated_at=?, quote_source=?,
+                    quote_failed_at=NULL, quote_error=NULL,
+                    quote_failure_count=0
                 WHERE id=? AND status='OPEN'
                 """,
                 (_utc_now(), f"{broker}_RUNTIME_LTP", trade["id"]),

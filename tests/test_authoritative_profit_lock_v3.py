@@ -181,3 +181,68 @@ def test_friday_style_winner_cannot_close_as_unprotected_loss(monkeypatch):
     reason = patch._protected_profit_stop_reason(trade, 450.40, trail)
     assert reason.startswith("PROFIT LOCK TRAIL HIT")
 
+
+def test_sensex_189r_winner_ratchets_from_legacy_half_r_stop(monkeypatch):
+    monkeypatch.setattr(
+        patch.live_cost,
+        "calculate_exact_breakeven_price",
+        lambda *_args, **_kwargs: {
+            "price": 293.0,
+            "target_net_profit": 400.0,
+            "net_pnl_at_price": 400.0,
+        },
+    )
+    result = patch._authoritative_trail(
+        _trade(
+            entry_price=286.95,
+            sl_price=302.10,
+            initial_risk=28.70,
+            peak_price=341.05,
+            qty=200,
+            underlying="SENSEX",
+        ),
+        341.05,
+    )
+
+    assert result["peak_r"] == 1.89
+    assert result["stage"] == "LOCK_0_80R_AFTER_1_50R"
+    assert result["sl_price"] == 321.0
+    assert result["updated"] is True
+
+
+def test_apply_reasserts_authority_after_later_exit_replacement(monkeypatch):
+    def replacement_exit(_trade, _ltp, _market_data, _candle_id):
+        return {"reason": None, "trail": {"sl_price": 95.0}}
+
+    def current_close(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(patch.runtime, "_evaluate_exit", replacement_exit)
+    monkeypatch.setattr(patch.runtime, "_close", current_close)
+    monkeypatch.setattr(
+        patch.runtime, "_okai_authoritative_profit_lock_v3", True, raising=False
+    )
+    monkeypatch.setattr(patch, "apply_trade_visibility_metrics_patch", lambda: None)
+    monkeypatch.setattr(
+        patch.live_cost,
+        "calculate_exact_breakeven_price",
+        lambda *_args, **_kwargs: {
+            "price": 101.0,
+            "target_net_profit": 0.0,
+            "net_pnl_at_price": 0.0,
+        },
+    )
+
+    patch.apply_authoritative_profit_lock_runtime_patch()
+
+    assert patch.runtime._evaluate_exit is not replacement_exit
+    assert getattr(
+        patch.runtime._evaluate_exit, "_okai_authoritative_profit_lock_v3", False
+    )
+    result = patch.runtime._evaluate_exit(
+        _trade(entry_price=100.0, sl_price=95.0, initial_risk=5.0),
+        110.0,
+        None,
+        None,
+    )
+    assert result["trail"]["sl_price"] > 100.0

@@ -101,6 +101,9 @@ from bot.missed_trade_learning_v1 import (
 from bot.final_correlated_risk_guard import (
     apply_final_correlated_risk_guard,
 )
+from bot.authoritative_profit_lock_runtime_patch import (
+    apply_authoritative_profit_lock_runtime_patch,
+)
 from bot.admin_morning_trade_cleanup_20260804 import (
     delete_admin_morning_paper_trades_20260804,
 )
@@ -165,8 +168,11 @@ apply_missed_trade_learning_patch()
 # Absolute final order authority: correlated exposure plus the exact 15-minute
 # same-index/same-side loss cooldown cannot be replaced by another wrapper.
 apply_final_correlated_risk_guard()
+# Strategy/exit patches above can replace the evaluator while leaving an old
+# installed flag behind. Re-assert the ratchet as the final exit authority.
+apply_authoritative_profit_lock_runtime_patch()
 
-RELEASE_VERSION = "admin-all-users-pnl-v1"
+RELEASE_VERSION = "live-quote-profit-ratchet-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",

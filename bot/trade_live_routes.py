@@ -122,6 +122,11 @@ def _quote_freshness(row, status):
         "quote_stale": stale,
         "quote_stale_after_seconds": LIVE_QUOTE_STALE_SECONDS,
         "quote_source": _row_value(row, "quote_source"),
+        "quote_failed_at": _row_value(row, "quote_failed_at"),
+        "quote_error": _row_value(row, "quote_error"),
+        "quote_failure_count": int(
+            _number(_row_value(row, "quote_failure_count"), 0)
+        ),
     }
 
 

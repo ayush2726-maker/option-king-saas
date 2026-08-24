@@ -18,6 +18,19 @@ from bot import option_chain
 from bot.brokers.upstox import UpstoxBroker
 
 
+class QuoteFeedStaleError(RuntimeError):
+    """Request a fresh broker object after repeated open-position LTP failures."""
+
+
+def _raise_after_repeated_quote_failures(state, broker_name, rows):
+    failures = runtime._i(state.get("consecutive_open_quote_failures"), 0)
+    if rows and failures >= 3:
+        message = str(state.get("open_quote_error") or "OPTION_LTP_FAILED")[:240]
+        raise QuoteFeedStaleError(
+            f"{str(broker_name).upper()}_OPEN_QUOTE_FAILED_{failures}X: {message}"
+        )
+
+
 def _parse_expiry(value):
     if isinstance(value, datetime):
         return value.date()
@@ -94,6 +107,7 @@ def _monitor_angel_for_one_minute(user_id, obj, state, scans):
                     lambda r, a, q, p: runtime._place_angel(obj, r, a, q, p),
                     state,
                 )
+                _raise_after_repeated_quote_failures(state, "angelone", rows)
                 rows = runtime._open_rows(conn, user_id)
             _sync_open_state(state, rows)
         finally:
@@ -143,6 +157,7 @@ def _monitor_multi_for_one_minute(user_id, broker_name, obj, state, scans):
                     lambda r, a, q, p: runtime._place_multi(obj, r, a, q, p),
                     state,
                 )
+                _raise_after_repeated_quote_failures(state, broker_name, rows)
                 rows = runtime._open_rows(conn, user_id)
             _sync_open_state(state, rows)
         finally:
@@ -209,7 +224,7 @@ def _run_angel_one_second(user_id, creds, state):
         except Exception as exc:
             obj = None
             state["status"] = "ERROR: " + str(exc)[:140]
-            time.sleep(30)
+            time.sleep(2 if isinstance(exc, QuoteFeedStaleError) else 30)
 
 
 def _run_multi_one_second(user_id, broker_name, creds, state):
@@ -228,6 +243,41 @@ def _run_multi_one_second(user_id, broker_name, creds, state):
                 if not login.get("success"):
                     raise RuntimeError(login.get("message", "Login failed"))
                 state["status"] = "LOGGED_IN"
+
+                # Protect existing positions before the slower index/strategy
+                # scan. This makes a stale-runtime restart refresh LTP and the
+                # ratcheting stop immediately after broker login.
+                conn = runtime.get_db()
+                try:
+                    runtime._ensure_schema(conn)
+                    for attempt in range(3):
+                        rows = runtime._open_rows(conn, user_id)
+                        if not rows:
+                            break
+                        runtime._manage_rows(
+                            conn,
+                            user_id,
+                            rows,
+                            [],
+                            lambda trade: runtime._ltp_multi(
+                                broker_name, obj, trade
+                            ),
+                            lambda r, a, q, p: runtime._place_multi(
+                                obj, r, a, q, p
+                            ),
+                            state,
+                        )
+                        if not runtime._i(
+                            state.get("consecutive_open_quote_failures"), 0
+                        ):
+                            break
+                        _raise_after_repeated_quote_failures(
+                            state, broker_name, rows
+                        )
+                        if attempt < 2:
+                            time.sleep(0.25)
+                finally:
+                    conn.close()
 
             settings = runtime._legacy()._read_settings(user_id)
             profile = runtime._legacy().get_active_profile_config(user_id)
@@ -281,7 +331,7 @@ def _run_multi_one_second(user_id, broker_name, creds, state):
         except Exception as exc:
             obj = None
             state["status"] = "ERROR: " + str(exc)[:140]
-            time.sleep(30)
+            time.sleep(2 if isinstance(exc, QuoteFeedStaleError) else 30)
 
 
 def apply_expiry_hardlock_one_second_monitor_patch():

@@ -43,7 +43,7 @@ SMOOTH_TRAIL_DISTANCE_R = 0.55
 TIGHT_TRAIL_TRIGGER_R = 4.00
 TIGHT_TRAIL_MIN_LOCK_R = 3.00
 TIGHT_TRAIL_DISTANCE_R = 0.45
-AUTHORITY_VERSION = "AUTHORITATIVE_EARLY_COST_FLOOR_PROFIT_RATCHET_V5"
+AUTHORITY_VERSION = "AUTHORITATIVE_EARLY_COST_FLOOR_PROFIT_RATCHET_V6"
 PAPER_FILL_VERSION = "PAPER_STOP_ONE_TICK_FILL_V1"
 
 
@@ -144,12 +144,10 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
     new_sl = old_sl
     stage = "WAITING_EARLY_COST_SAFE_FLOOR"
 
-    early_triggered = bool(
-        peak + 1e-9 >= early_trigger_price + TICK_SIZE
-    )
+    early_triggered = bool(peak + 1e-9 >= early_trigger_price)
     four_pct_triggered = bool(
         peak_r + 1e-9 >= FIRST_LOCK_TRIGGER_R
-        and peak + 1e-9 >= cost_cover_price + TICK_SIZE
+        and peak + 1e-9 >= cost_cover_price
     )
 
     if early_triggered:
@@ -300,12 +298,21 @@ def _paper_stop_fill_price(conn, trade, observed_price: float, reason: str) -> f
 
 
 def apply_authoritative_profit_lock_runtime_patch() -> None:
-    if getattr(runtime, "_okai_authoritative_profit_lock_v3", False):
+    previous_evaluate = runtime._evaluate_exit
+    evaluator_is_current = bool(
+        getattr(previous_evaluate, "_okai_authoritative_profit_lock_v3", False)
+    )
+    previous_close = runtime._close
+    close_is_current = bool(
+        getattr(previous_close, "_okai_paper_stop_fill_v1", False)
+    )
+
+    # A later strategy patch can replace the evaluator while leaving the old
+    # module-level installed flag set. Only skip when the currently callable
+    # exit and PAPER fill functions are still our final wrappers.
+    if evaluator_is_current and close_is_current:
         apply_trade_visibility_metrics_patch()
         return
-
-    previous_evaluate = runtime._evaluate_exit
-    previous_close = runtime._close
 
     def evaluate_with_authoritative_trail(trade, ltp, market_data, candle_id):
         result = dict(
@@ -368,8 +375,10 @@ def apply_authoritative_profit_lock_runtime_patch() -> None:
 
     evaluate_with_authoritative_trail._okai_authoritative_profit_lock_v3 = True
     close_with_bounded_paper_stop_fill._okai_paper_stop_fill_v1 = True
-    runtime._evaluate_exit = evaluate_with_authoritative_trail
-    runtime._close = close_with_bounded_paper_stop_fill
+    if not evaluator_is_current:
+        runtime._evaluate_exit = evaluate_with_authoritative_trail
+    if not close_is_current:
+        runtime._close = close_with_bounded_paper_stop_fill
     runtime._okai_authoritative_profit_lock_v3 = True
     runtime._okai_authoritative_profit_lock_v2 = True
     apply_trade_visibility_metrics_patch()
