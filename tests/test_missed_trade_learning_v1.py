@@ -289,8 +289,75 @@ def test_exact_cost_adjusted_outcomes_feed_existing_ai_dataset(monkeypatch, tmp_
 def test_late_counterfactual_is_visible_but_excluded_from_training(monkeypatch, tmp_path):
     missed, _, _ = _load_stack(monkeypatch, tmp_path)
     assert missed.MAX_TRAINING_QUOTE_DELAY_SECONDS < 180
-    assert missed.VERSION.endswith("SHADOW-V3")
+    assert missed.VERSION.endswith("SHADOW-V3.1")
     assert missed.SAMPLE_SOURCE == "MISSED_TRADE_SHADOW_V1"
+
+
+def test_hydration_reuses_nearby_live_option_snapshot(monkeypatch, tmp_path):
+    missed, advanced, get_db = _load_stack(monkeypatch, tmp_path)
+    assert missed.capture_scan_misses(
+        {"user_id": 7, "entry_candidate_attempts": []},
+        [_scan()],
+        [],
+        now=START,
+    ) == 1
+    conn = get_db()
+    event = dict(conn.execute("SELECT * FROM ai_missed_trade_signals_v1").fetchone())
+    conn.close()
+
+    option = {
+        "option_direction": "PE",
+        "option_confidence": 80,
+        "data_coverage_score": 100,
+        "risk_score": 0,
+        "ce": {
+            "side": "CE", "symbol": "NIFTYCE", "token": "CE",
+            "exchange": "NSE_FO", "ltp": 10, "ask": 10, "lot_size": 25,
+        },
+        "pe": {
+            "side": "PE", "symbol": "NIFTYPE", "token": "PE",
+            "exchange": "NSE_FO", "ltp": 11, "ask": 11, "lot_size": 25,
+        },
+    }
+    market = missed._market_for_ai(event)
+    base = {"decision": "PE", "confidence": 80, "probabilities": {}}
+    payload = {
+        "success": True,
+        "broker": "upstox",
+        "option_intelligence": option,
+        "global_market": {},
+    }
+    fused = {
+        "decision": "PE",
+        "confidence": 80,
+        "probabilities": {},
+        "reasons": [],
+        "feature": {},
+        "adaptive_model": {},
+    }
+    assert advanced.register_snapshot(
+        7,
+        market,
+        base,
+        payload,
+        {},
+        fused,
+        created_at=START + timedelta(seconds=30),
+    )
+    monkeypatch.setattr(
+        advanced,
+        "_option_payload",
+        lambda *args: (_ for _ in ()).throw(AssertionError("broker call not expected")),
+    )
+
+    assert missed._hydrate_event(event, START + timedelta(minutes=5)) is True
+    conn = get_db()
+    row = conn.execute(
+        "SELECT status,entry_quote_delay_seconds FROM ai_missed_trade_signals_v1"
+    ).fetchone()
+    conn.close()
+    assert row["status"] == "TRACKING"
+    assert row["entry_quote_delay_seconds"] == 30
 
 
 def test_upstox_counterfactual_pair_uses_one_batched_quote(monkeypatch, tmp_path):

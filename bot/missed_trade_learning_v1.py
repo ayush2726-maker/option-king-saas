@@ -28,7 +28,7 @@ from bot.news_intelligence import aggregate as aggregate_news
 from bot.shared_ai import predict
 
 
-VERSION = "OKAI-MISSED-TRADE-LEARNING-SHADOW-V3"
+VERSION = "OKAI-MISSED-TRADE-LEARNING-SHADOW-V3.1"
 SAMPLE_SOURCE = "MISSED_TRADE_SHADOW_V1"
 HORIZONS = (5, 15, 30)
 PRIMARY_HORIZON = 15
@@ -43,6 +43,7 @@ MAX_HYDRATIONS_PER_CYCLE = 1
 MAX_OUTCOMES_PER_CYCLE = 1
 RATE_LIMIT_RETRY_SECONDS = 45
 MAX_RATE_LIMIT_RETRY_SECONDS = 180
+REUSED_OPTION_SNAPSHOT_MAX_AGE_SECONDS = 180
 
 NON_TRAINING_OPERATIONAL_MARKERS = (
     "MARKET_CLOSED",
@@ -657,11 +658,65 @@ def _set_hydration_failure(event: Mapping[str, Any], error: str, now: datetime) 
         conn.close()
 
 
+def _reused_option_payload(event: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """Reuse the nearest successful live option snapshot before calling broker.
+
+    The advanced monitor already resolves the same user's ATM option pair. A
+    missed-trade row captured within three minutes can safely reuse that exact
+    pair, avoiding duplicate option-chain/LTP calls during broker throttling.
+    """
+    created_at = _parse(event.get("created_at"))
+    if created_at is None:
+        return None
+    lower = _iso(created_at - timedelta(seconds=REUSED_OPTION_SNAPSHOT_MAX_AGE_SECONDS))
+    upper = _iso(created_at + timedelta(seconds=REUSED_OPTION_SNAPSHOT_MAX_AGE_SECONDS))
+    conn = get_db()
+    try:
+        row = conn.execute(
+            """SELECT created_at,broker,option_summary_json,global_market_json
+            FROM ai_advanced_v2_snapshots
+            WHERE user_id=? AND symbol=?
+              AND COALESCE(sample_source,?)=?
+              AND datetime(created_at) BETWEEN datetime(?) AND datetime(?)
+            ORDER BY ABS(julianday(created_at)-julianday(?)),rowid DESC
+            LIMIT 1""",
+            (
+                _i(event.get("user_id")),
+                str(event.get("underlying") or "NIFTY").upper(),
+                advanced.LIVE_SAMPLE_SOURCE,
+                advanced.LIVE_SAMPLE_SOURCE,
+                lower,
+                upper,
+                _iso(created_at),
+            ),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    option = dict(_loads(row["option_summary_json"], {}))
+    if not advanced.selected_contract(option, "CE") or not advanced.selected_contract(option, "PE"):
+        return None
+    return {
+        "success": True,
+        "broker": str(row["broker"] or "").lower(),
+        "underlying": str(event.get("underlying") or "NIFTY").upper(),
+        "option_intelligence": option,
+        "global_market": _loads(row["global_market_json"], {}),
+        "as_of": row["created_at"],
+        "missed_trade_snapshot_reused": True,
+    }
+
+
 def _hydrate_event(event: Mapping[str, Any], now: Optional[datetime] = None) -> bool:
     current = (now or _now()).astimezone(timezone.utc)
     market = _market_for_ai(event)
     try:
-        option_payload = dict(advanced._option_payload(_i(event["user_id"]), market) or {})
+        option_payload = dict(
+            _reused_option_payload(event)
+            or advanced._option_payload(_i(event["user_id"]), market)
+            or {}
+        )
         option = dict(option_payload.get("option_intelligence") or {})
         if not option_payload.get("success"):
             raise RuntimeError(option_payload.get("reason") or "OPTION_INTELLIGENCE_UNAVAILABLE")
@@ -670,10 +725,9 @@ def _hydrate_event(event: Mapping[str, Any], now: Optional[datetime] = None) -> 
         base = predict(market)
         news = aggregate_news()
         fused = advanced.fuse_advanced(market, base, option_payload, news)
-        quote_delay = max(
-            0,
-            _i((current - (_parse(event.get("created_at")) or current)).total_seconds()),
-        )
+        source_time = _parse(option_payload.get("as_of")) or current
+        event_time = _parse(event.get("created_at")) or current
+        quote_delay = max(0, _i(abs((source_time - event_time).total_seconds())))
         learning_eligible = bool(
             _b(event.get("learning_eligible"))
             and quote_delay <= MAX_ENTRY_QUOTE_DELAY_SECONDS
