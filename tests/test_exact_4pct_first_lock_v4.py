@@ -24,6 +24,7 @@ def _solver(price):
         percent = float(args[-1])
         staged_price = {
             0.0: price - 15.0,
+            1.0: price - 11.25,
             2.0: price - 7.5,
             4.0: price,
         }[percent]
@@ -53,13 +54,14 @@ def test_exact_4pct_lock_triggers_before_one_r(monkeypatch):
     assert result["peak_r"] < 1.0
     assert result["breakeven_triggered"] is True
     assert result["four_pct_triggered"] is True
-    assert result["sl_price"] == result["four_pct_room_cap_price"]
+    assert result["sl_price"] == result["four_pct_min_lock_price"]
     assert result["sl_price"] < result["protected_2pct_price"]
     assert result["four_pct_full_lock_armed"] is False
-    assert result["stage"] == "FOUR_PCT_LOCK_CAPPED_FOR_0_50R_ROOM"
+    assert result["stage"] == "LOCK_MIN_1PCT_AFTER_4PCT_NET"
     assert result["sl_price"] < result["peak_price"]
     assert result["trail_schedule"]["four_pct_trigger_r"] == 0.0
     assert result["trail_schedule"]["four_pct_min_peak_room_r"] == 0.50
+    assert result["four_pct_min_lock_net_percent"] == 1.0
 
 
 def test_lock_still_waits_below_exact_4pct_price(monkeypatch):

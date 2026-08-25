@@ -21,6 +21,75 @@ from bot.capital_continuity_patch import (
 )
 
 
+PERSISTED_RUNNING_RECOVERY_VERSION = "PERSISTED_RUNNING_USER_RECOVERY_V1"
+
+
+def recover_persisted_running_user_engines() -> dict:
+    """Restart every persisted ON bot after a Railway deploy/restart.
+
+    The older startup recovery enumerated only users who already had an open
+    position.  A PAPER user with no open row therefore stayed ON in SQLite but
+    had no in-memory scan worker until that user opened the signal screen.  Use
+    the final owner-first recovery wrapper for every persisted ON user so shared
+    PAPER accounts resume automatically without needing an app refresh.
+    """
+    from database import get_db
+    from bot import routes
+
+    conn = get_db()
+    try:
+        routes.ensure_tables(conn)
+        rows = conn.execute(
+            """
+            SELECT user_id FROM user_bot_state WHERE is_running=1
+            UNION
+            SELECT user_id FROM bot_status WHERE is_running=1
+            ORDER BY user_id
+            """
+        ).fetchall()
+        user_ids = [int(row["user_id"]) for row in rows]
+    finally:
+        conn.close()
+
+    started = 0
+    already_running = 0
+    failed = []
+    for user_id in user_ids:
+        current = angel_fetcher.get_user_bot_state(user_id)
+        if current.get("running"):
+            already_running += 1
+            continue
+        try:
+            result = routes._start_saved_runtime_engine(user_id)
+        except Exception as exc:
+            result = {
+                "started": False,
+                "reason": f"RECOVERY_EXCEPTION:{type(exc).__name__}:{str(exc)[:120]}",
+            }
+        recovered_state = dict(result.get("state") or {})
+        recovered = bool(
+            result.get("started")
+            or recovered_state.get("running")
+        )
+        if recovered:
+            started += 1
+        else:
+            failed.append(
+                {
+                    "user_id": user_id,
+                    "reason": str(result.get("reason") or "ENGINE_START_FAILED")[:180],
+                }
+            )
+
+    return {
+        "eligible_users": len(user_ids),
+        "started": started,
+        "already_running": already_running,
+        "failed": failed,
+        "version": PERSISTED_RUNNING_RECOVERY_VERSION,
+    }
+
+
 def _install_shared_paper_owner_first_policy() -> None:
     """Never let a saved/expired user token shadow the owner's PAPER feed.
 

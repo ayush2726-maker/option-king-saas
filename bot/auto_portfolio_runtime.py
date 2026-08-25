@@ -12,7 +12,7 @@ AUTO Portfolio Runtime V1
 
 import math
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 
 from database import get_db
 from telegram.routes import notify_user
@@ -35,6 +35,26 @@ REJECT_STATUSES = {"rejected", "cancelled", "canceled", "failed"}
 
 def _now_ist():
     return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+
+
+def _resolved_expires_today(resolved, value=None):
+    """Use the resolved option contract date, never a global weekday guess."""
+    raw = (resolved or {}).get("expiry_date") or (resolved or {}).get("expiry")
+    if isinstance(raw, datetime):
+        expiry = raw.date()
+    elif isinstance(raw, date):
+        expiry = raw
+    else:
+        expiry = None
+        text = str(raw or "").strip().upper()
+        for fmt in ("%Y-%m-%d", "%d%b%Y", "%d-%m-%Y"):
+            try:
+                expiry = datetime.strptime(text, fmt).date()
+                break
+            except Exception:
+                pass
+    current = value or _now_ist()
+    return bool(expiry and expiry == current.date())
 
 
 def _f(value, default=0.0):
@@ -260,7 +280,7 @@ def _row_capital_used(row):
     )
 
 
-def _size(capital_base, slot, premium, lot_size, rows=None):
+def _size(capital_base, slot, premium, lot_size, rows=None, risk_points=None):
     """Lot-aware sizing with a hard 10% reserve.
 
     Slot 1/2 percentages are target allocations, not a reason to reject an
@@ -994,7 +1014,7 @@ def _insert(
         spot,
         entry,
         atr,
-        is_expiry_day=_now_ist().weekday() == 1,
+        is_expiry_day=_resolved_expires_today(resolved),
     )
     if not levels["atr_available"]:
         return None
@@ -1126,9 +1146,43 @@ def _open_common(
                 "CAPITAL",
             )
 
-    sizing = _size(capital_base, slot, quote_price, lot_size, rows=rows)
+    signal = selected["signal_data"]
+    market = selected["market_data"]
+    planned_levels = _legacy()._dynamic_atr_levels(
+        market["price"],
+        quote_price,
+        market["atr"],
+        is_expiry_day=_resolved_expires_today(resolved),
+    )
+    if not planned_levels.get("atr_available"):
+        return _record_preopen_failure(
+            state,
+            broker_name,
+            selected,
+            "ATR_LEVELS_OR_TRADE_INSERT_FAILED",
+            "TRADE_INSERT",
+            {"spot_atr": market.get("atr"), "option_ltp": quote_price},
+        )
+
+    sizing = _size(
+        capital_base,
+        slot,
+        quote_price,
+        lot_size,
+        rows=rows,
+        risk_points=planned_levels.get("risk_points"),
+    )
+    sizing["planned_risk_points"] = round(
+        _f(planned_levels.get("risk_points"), 0.0),
+        2,
+    )
+    sizing["same_day_expiry_contract"] = _resolved_expires_today(resolved)
     state["entry_sizing"] = dict(sizing)
     if sizing["lots"] < 1:
+        risk_blocked = bool(
+            sizing.get("risk_lots") == 0
+            and sizing.get("affordability_lots", 0) >= 1
+        )
         state["position_size_block"] = {
             "slot": slot,
             "slot_budget": sizing["slot_budget"],
@@ -1138,7 +1192,14 @@ def _open_common(
             "committed_capital": sizing.get("committed_capital"),
             "one_lot_cost": sizing.get("one_lot_cost"),
             "capital_base": round(capital_base, 2),
-            "reason": "10% reserve bachane ke baad ek complete lot afford nahi hota",
+            "reason": (
+                "Ek complete lot ka planned SL loss 1% equity limit se zyada hai"
+                if risk_blocked
+                else "10% reserve bachane ke baad ek complete lot afford nahi hota"
+            ),
+            "risk_lots": sizing.get("risk_lots"),
+            "planned_risk_per_lot": sizing.get("planned_risk_per_lot"),
+            "max_planned_loss_amount": sizing.get("max_planned_loss_amount"),
         }
         return _record_preopen_failure(
             state,
@@ -1192,9 +1253,6 @@ def _open_common(
             entry * sizing["qty"],
             2,
         )
-
-    signal = selected["signal_data"]
-    market = selected["market_data"]
 
     trade_id = _insert(
         conn,

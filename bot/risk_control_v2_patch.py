@@ -52,15 +52,18 @@ def _risk_percent_for_slot(slot):
     return float(RISK_PERCENT_BY_SLOT.get(_i(slot, 1), 0.75))
 
 
-def _risk_lots(capital_base, slot, premium, lot_size):
+def _risk_lots(capital_base, slot, premium, lot_size, risk_points=None):
     capital = max(0.0, _f(capital_base))
     price = max(0.05, _f(premium, 0.05))
     lot = max(1, _i(lot_size, 1))
     risk_percent = _risk_percent_for_slot(slot)
     risk_budget = capital * risk_percent / 100.0
-    planned_risk_per_lot = (
-        price * PLANNED_PREMIUM_RISK_PERCENT / 100.0 * lot
+    planned_risk_points = (
+        max(0.05, _f(risk_points, 0.05))
+        if risk_points is not None
+        else price * PLANNED_PREMIUM_RISK_PERCENT / 100.0
     )
+    planned_risk_per_lot = planned_risk_points * lot
     lots = (
         int(math.floor(risk_budget / planned_risk_per_lot))
         if planned_risk_per_lot > 0
@@ -71,6 +74,7 @@ def _risk_lots(capital_base, slot, premium, lot_size):
         "risk_percent": risk_percent,
         "risk_budget": round(risk_budget, 2),
         "planned_risk_per_lot": round(planned_risk_per_lot, 2),
+        "planned_risk_points": round(planned_risk_points, 2),
     }
 
 
@@ -80,9 +84,34 @@ def _install_runtime_risk_sizing():
 
     original_size = runtime._size
 
-    def risk_capped_size(capital_base, slot, premium, lot_size):
-        base = dict(original_size(capital_base, slot, premium, lot_size) or {})
-        risk = _risk_lots(capital_base, slot, premium, lot_size)
+    def risk_capped_size(
+        capital_base,
+        slot,
+        premium,
+        lot_size,
+        rows=None,
+        risk_points=None,
+    ):
+        base = dict(
+            original_size(
+                capital_base,
+                slot,
+                premium,
+                lot_size,
+                rows=rows,
+                risk_points=risk_points,
+            )
+            or {}
+        )
+        if risk_points is None:
+            return base
+        risk = _risk_lots(
+            capital_base,
+            slot,
+            premium,
+            lot_size,
+            risk_points=risk_points,
+        )
         original_lots = max(0, _i(base.get("lots"), 0))
         allowed_lots = min(original_lots, risk["lots"])
         lot = max(1, _i(lot_size, 1))

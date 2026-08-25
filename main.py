@@ -67,6 +67,9 @@ from bot.post_loss_reentry_guard_patch import apply_post_loss_reentry_guard_patc
 from bot.capital_based_sizing_restore_patch import apply_capital_based_sizing_restore_patch
 from bot.expectancy_engine_v1_patch import apply_expectancy_engine_v1_patch
 from bot.broker_session_reset_patch import apply_broker_session_reset_patch
+from bot.broker_session_reset_patch import (
+    recover_persisted_running_user_engines,
+)
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
 from bot.eod_safety_testing_access_patch import (
     TestingFullAccessAndFreshDataMiddleware,
@@ -178,7 +181,7 @@ apply_expiry_day_risk_mode_patch()
 # installed flag behind. Re-assert the ratchet as the final exit authority.
 apply_authoritative_profit_lock_runtime_patch()
 
-RELEASE_VERSION = "auto-hero-zero-paper-v1"
+RELEASE_VERSION = "multi-user-risk-profit-guard-v1"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
@@ -295,6 +298,15 @@ def startup():
         )
 
     migrate_default_strategy_profiles()
+
+    running_recovery = recover_persisted_running_user_engines()
+    print(
+        "Persisted bot runtime recovery | "
+        f"eligible={running_recovery['eligible_users']} | "
+        f"started={running_recovery['started']} | "
+        f"already={running_recovery['already_running']} | "
+        f"failed={len(running_recovery['failed'])}"
+    )
 
     quote_recovery = recover_persisted_open_trade_engines()
     print(

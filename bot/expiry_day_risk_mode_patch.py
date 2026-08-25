@@ -473,8 +473,25 @@ def apply_expiry_day_risk_mode_patch() -> bool:
     def build_scan_with_expiry_guard(*args, **kwargs):
         return _apply_scan_guard(previous_build_scan(*args, **kwargs))
 
-    def size_with_expiry_risk(capital_base, slot, premium, lot_size, rows=None):
-        base = dict(previous_size(capital_base, slot, premium, lot_size, rows=rows) or {})
+    def size_with_expiry_risk(
+        capital_base,
+        slot,
+        premium,
+        lot_size,
+        rows=None,
+        risk_points=None,
+    ):
+        base = dict(
+            previous_size(
+                capital_base,
+                slot,
+                premium,
+                lot_size,
+                rows=rows,
+                risk_points=risk_points,
+            )
+            or {}
+        )
         context = getattr(_context, "expiry", None)
         if not isinstance(context, dict):
             return base

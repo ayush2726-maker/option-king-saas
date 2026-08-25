@@ -101,7 +101,29 @@ def calculate_base_score_orb_neutral(
     orb_available = _orb_available(orb_high, orb_low)
     orb_direction = _orb_breakout_direction(price, orb_high, orb_low) if orb_available else "NA"
     orb_far = _orb_far_from_active_price(price, orb_high, orb_low, spot_atr)
-    orb_applicable = bool(orb_available and not orb_far)
+
+    # First determine the active side from the four non-ORB confirmations.
+    # A distant ORB is observation-only only when it is neutral or agrees with
+    # that side.  If price is far beyond the opposite ORB boundary, dropping the
+    # ORB denominator would incorrectly promote a counter-trend 4/5 setup to a
+    # perfect 4/4 setup (44 -> 55 base points).  Preserve the conflicting ORB
+    # vote so a bullish session cannot inflate a PE score, and vice versa.
+    if ce_score > pe_score:
+        non_orb_side = "CE"
+    elif pe_score > ce_score:
+        non_orb_side = "PE"
+    else:
+        non_orb_side = "WAIT"
+    orb_conflicts_with_active_side = bool(
+        orb_available
+        and orb_direction in {"CE", "PE"}
+        and non_orb_side in {"CE", "PE"}
+        and orb_direction != non_orb_side
+    )
+    orb_applicable = bool(
+        orb_available
+        and (not orb_far or orb_conflicts_with_active_side)
+    )
 
     if orb_applicable:
         if orb_direction == "CE":
@@ -129,8 +151,10 @@ def calculate_base_score_orb_neutral(
     reasons = []
     if not orb_available:
         reasons.append("ORB_NOT_APPLICABLE_UNAVAILABLE")
-    elif orb_far:
+    elif orb_far and not orb_conflicts_with_active_side:
         reasons.append("ORB_NOT_APPLICABLE_FAR")
+    elif orb_far and orb_conflicts_with_active_side:
+        reasons.append("ORB_FAR_OPPOSITE_DIRECTION_RETAINED")
     elif orb_direction == "WAIT":
         reasons.append("ORB_NEUTRAL_NO_BREAKOUT")
 
@@ -142,6 +166,7 @@ def calculate_base_score_orb_neutral(
         "orb_applicable": orb_applicable,
         "orb_available": orb_available,
         "orb_far_due_to_gap": orb_far,
+        "orb_conflicts_with_active_side": orb_conflicts_with_active_side,
         "orb_direction": orb_direction,
         "orb_score_denominator": denominator,
         "orb_neutral_reasons": reasons,

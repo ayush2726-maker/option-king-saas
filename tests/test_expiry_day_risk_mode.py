@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from bot import dynamic_exit
 from bot import expiry_day_risk_mode_patch as expiry
 from bot import authoritative_profit_lock_runtime_patch as trail
+from bot import auto_portfolio_runtime as runtime
 
 
 def _scan(score=88, side="CE", bullish=True, mtf_side="CE"):
@@ -98,6 +99,17 @@ def test_exact_same_day_expiry_resolution():
     ) is True
 
 
+def test_runtime_expiry_mode_uses_contract_date_not_tuesday_weekday(monkeypatch):
+    monkeypatch.setattr(
+        runtime,
+        "_now_ist",
+        lambda: datetime(2026, 8, 25, 10, 15),
+    )
+
+    assert runtime._resolved_expires_today({"expiry": "2026-08-25"}) is True
+    assert runtime._resolved_expires_today({"expiry": "2026-08-27"}) is False
+
+
 def test_expiry_quantity_caps_planned_sl_loss_at_one_percent():
     base = {
         "lots": 21,
@@ -159,7 +171,12 @@ def test_expiry_cost_floor_waits_for_point_seven_five_r(monkeypatch):
     )
 
     def fake_solver(_broker, _instrument, entry, _qty, _mode, percent):
-        prices = {0.0: entry, 2.0: entry + 2.0, 4.0: entry + 4.0}
+        prices = {
+            0.0: entry,
+            1.0: entry + 1.0,
+            2.0: entry + 2.0,
+            4.0: entry + 4.0,
+        }
         return {
             "price": prices[float(percent)],
             "target_net_profit": 0.0,

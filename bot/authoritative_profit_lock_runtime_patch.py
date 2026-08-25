@@ -29,6 +29,7 @@ TICK_SIZE = 0.05
 COST_COVER_NET_PROFIT_PERCENT = 4.0
 EARLY_PROTECTION_TRIGGER_NET_PERCENT = 2.0
 EARLY_PROTECTION_LOCK_NET_PERCENT = 0.0
+FOUR_PCT_MIN_LOCK_NET_PERCENT = 1.0
 FOUR_PCT_LOCK_NET_PERCENT = 2.0
 FOUR_PCT_MIN_PEAK_ROOM_R = 0.50
 EXPIRY_EARLY_FLOOR_MIN_PEAK_R = 0.75
@@ -146,6 +147,14 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
         mode,
         EARLY_PROTECTION_TRIGGER_NET_PERCENT,
     )
+    exact_four_pct_floor = live_cost.calculate_exact_breakeven_price(
+        broker_name,
+        instrument,
+        round(entry, 4),
+        quantity,
+        mode,
+        FOUR_PCT_MIN_LOCK_NET_PERCENT,
+    )
     exact = live_cost.calculate_exact_breakeven_price(
         broker_name,
         instrument,
@@ -159,17 +168,33 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
     # one-tick fill cap can then still preserve the requested net floor.
     exact_floor_price = max(entry, _f(exact_floor.get("price"), entry))
     exact_early_price = max(entry, _f(exact_early.get("price"), entry))
+    exact_four_pct_floor_price = max(
+        entry,
+        _f(exact_four_pct_floor.get("price"), entry),
+    )
     exact_price = max(entry, _f(exact.get("price"), entry))
     cost_floor_price = _round_up_tick(exact_floor_price + TICK_SIZE)
     early_trigger_price = _round_up_tick(exact_early_price + TICK_SIZE)
     protected_2pct_price = early_trigger_price
+    four_pct_min_lock_price = _round_up_tick(
+        exact_four_pct_floor_price + TICK_SIZE
+    )
     cost_cover_price = _round_up_tick(exact_price + TICK_SIZE)
     four_pct_room_cap_price = _round_down_tick(
         peak - FOUR_PCT_MIN_PEAK_ROOM_R * risk
     )
-    four_pct_breathing_lock_price = min(
+    preferred_four_pct_lock_price = min(
         protected_2pct_price,
         four_pct_room_cap_price,
+    )
+    # At charges + 4% net, never let the room cap push the protected stop all
+    # the way back to a zero-net cost floor.  Keep the requested 0.50R room when
+    # it is available; otherwise a modest 1% net floor wins.  This leaves much
+    # more breathing room than the old full +2% lock while preventing the
+    # observed winner from closing at only a few rupees after costs.
+    four_pct_breathing_lock_price = min(
+        protected_2pct_price,
+        max(four_pct_min_lock_price, preferred_four_pct_lock_price),
     )
 
     new_sl = old_sl
@@ -201,7 +226,11 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
         stage = (
             "LOCK_2PCT_AFTER_4PCT_NET"
             if four_pct_breathing_lock_price + 1e-9 >= protected_2pct_price
-            else "FOUR_PCT_LOCK_CAPPED_FOR_0_50R_ROOM"
+            else (
+                "LOCK_MIN_1PCT_AFTER_4PCT_NET"
+                if preferred_four_pct_lock_price + 1e-9 < four_pct_min_lock_price
+                else "FOUR_PCT_LOCK_WITH_0_50R_ROOM"
+            )
         )
 
     # Progressive profit ratchet: protect more as the move proves itself, while
@@ -287,6 +316,8 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
         "early_trigger_price": round(early_trigger_price, 2),
         "cost_floor_price": round(cost_floor_price, 2),
         "protected_2pct_price": round(protected_2pct_price, 2),
+        "four_pct_min_lock_net_percent": FOUR_PCT_MIN_LOCK_NET_PERCENT,
+        "four_pct_min_lock_price": round(four_pct_min_lock_price, 2),
         "four_pct_min_peak_room_r": FOUR_PCT_MIN_PEAK_ROOM_R,
         "four_pct_room_cap_price": round(four_pct_room_cap_price, 2),
         "four_pct_breathing_lock_price": round(
@@ -295,6 +326,10 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
         ),
         "four_pct_full_lock_armed": bool(
             four_pct_breathing_lock_price + 1e-9 >= protected_2pct_price
+        ),
+        "four_pct_preferred_room_preserved": bool(
+            four_pct_breathing_lock_price
+            <= four_pct_room_cap_price + 1e-9
         ),
         "breakeven_target_net_profit": exact.get("target_net_profit"),
         "breakeven_net_pnl_at_stop": exact.get("net_pnl_at_price"),

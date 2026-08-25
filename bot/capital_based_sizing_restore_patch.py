@@ -1,12 +1,16 @@
-"""Restore the user's capital-based position sizing as the final sizing layer.
+"""Final capital ceiling plus planned-stop risk sizing.
 
 Strategy quality, stops, costs and post-loss guards remain active.  This patch only
-removes equity-risk lot caps that silently reduced the quantity selected by the
-configured capital allocation:
+keeps the configured capital allocation as an affordability ceiling, while
+preventing a normal trade's planned ATR stop from risking a large part of the
+account:
 
 - Runtime AUTO keeps slot 1 = 50% and slot 2 = 40% of current capital.
 - Backtest AUTO keeps its configured capital allocation (including CAP90).
-- Lot quantity is floor(allocation / option premium / exchange lot size).
+- Runtime lot quantity is capped at 1% of current equity using the exact
+  planned option ATR-stop distance.
+- Backtests use the conservative 15% premium stop cap when the exact live ATR
+  context is unavailable.
 """
 
 import math
@@ -14,6 +18,10 @@ import math
 from backtest import routes as backtest_routes
 from backtest.range_capital_mode_patch import apply_range_capital_mode_patch
 from bot import auto_portfolio_runtime as runtime
+
+
+NORMAL_MAX_PLANNED_LOSS_PERCENT = 1.0
+BACKTEST_CONSERVATIVE_PREMIUM_RISK_PERCENT = 15.0
 
 
 def _f(value, default=0.0):
@@ -30,7 +38,14 @@ def _i(value, default=0):
         return int(default)
 
 
-def _runtime_capital_size(capital_base, slot, premium, lot_size, rows=None):
+def _runtime_capital_size(
+    capital_base,
+    slot,
+    premium,
+    lot_size,
+    rows=None,
+    risk_points=None,
+):
     """Size against the configured slot without breaking the runtime API.
 
     ``auto_portfolio_runtime._open_common`` passes the currently open rows so
@@ -66,7 +81,28 @@ def _runtime_capital_size(capital_base, slot, premium, lot_size, rows=None):
         if flex_used
         else min(target_budget, available_after_reserve)
     )
-    lots = int(math.floor(budget / one_lot_cost)) if one_lot_cost > 0 else 0
+    affordability_lots = (
+        int(math.floor(budget / one_lot_cost))
+        if one_lot_cost > 0
+        else 0
+    )
+    planned_risk = (
+        max(0.05, _f(risk_points, 0.05))
+        if risk_points is not None
+        else None
+    )
+    risk_budget = capital * NORMAL_MAX_PLANNED_LOSS_PERCENT / 100.0
+    planned_risk_per_lot = (
+        planned_risk * lot
+        if planned_risk is not None
+        else None
+    )
+    risk_lots = (
+        int(math.floor((risk_budget + 1e-9) / planned_risk_per_lot))
+        if planned_risk_per_lot is not None and planned_risk_per_lot > 0
+        else affordability_lots
+    )
+    lots = min(affordability_lots, max(0, risk_lots))
     qty = lots * lot
     capital_used = round(price * qty, 2)
     return {
@@ -93,9 +129,35 @@ def _runtime_capital_size(capital_base, slot, premium, lot_size, rows=None):
             if flex_used
             else "CAPITAL_BASED_ALLOCATION"
         ),
-        "risk_cap_applied": False,
-        "risk_sizing_mode": "CAPITAL_BASED_ALLOCATION",
-        "quantity_sizing_rule": "FLOOR_ALLOCATION_DIVIDED_BY_PREMIUM_AND_LOT",
+        "risk_cap_applied": lots < affordability_lots,
+        "risk_sizing_mode": (
+            "NORMAL_PLANNED_SL_LOSS_CAP_1PCT"
+            if planned_risk is not None
+            else "CAPITAL_BASED_ALLOCATION_NO_RISK_CONTEXT"
+        ),
+        "quantity_sizing_rule": (
+            "MIN_CAPITAL_ALLOCATION_AND_1PCT_PLANNED_SL_RISK"
+            if planned_risk is not None
+            else "FLOOR_ALLOCATION_DIVIDED_BY_PREMIUM_AND_LOT"
+        ),
+        "max_planned_loss_percent": (
+            NORMAL_MAX_PLANNED_LOSS_PERCENT
+            if planned_risk is not None
+            else None
+        ),
+        "max_planned_loss_amount": (
+            round(risk_budget, 2) if planned_risk is not None else None
+        ),
+        "planned_risk_points": (
+            round(planned_risk, 2) if planned_risk is not None else None
+        ),
+        "planned_risk_per_lot": (
+            round(planned_risk_per_lot, 2)
+            if planned_risk_per_lot is not None
+            else None
+        ),
+        "affordability_lots": affordability_lots,
+        "risk_lots": risk_lots,
     }
 
 
@@ -106,7 +168,20 @@ def _backtest_capital_size(capital, premium, lot_size, allocation):
     allocation_value = max(0.0, min(1.0, _f(allocation)))
     budget = capital_value * allocation_value
     one_lot_cost = price * lot
-    lots = int(math.floor(budget / one_lot_cost)) if one_lot_cost > 0 else 0
+    affordability_lots = (
+        int(math.floor(budget / one_lot_cost))
+        if one_lot_cost > 0
+        else 0
+    )
+    risk_budget = capital_value * NORMAL_MAX_PLANNED_LOSS_PERCENT / 100.0
+    planned_risk_points = price * BACKTEST_CONSERVATIVE_PREMIUM_RISK_PERCENT / 100.0
+    planned_risk_per_lot = planned_risk_points * lot
+    risk_lots = (
+        int(math.floor((risk_budget + 1e-9) / planned_risk_per_lot))
+        if planned_risk_per_lot > 0
+        else 0
+    )
+    lots = min(affordability_lots, max(0, risk_lots))
     quantity = lots * lot
     capital_used = round(price * quantity, 2)
     return {
@@ -131,11 +206,17 @@ def _backtest_capital_size(capital, premium, lot_size, allocation):
             2,
         ) if budget > 0 else 0.0,
         "affordable": lots >= 1,
-        "risk_cap_applied": False,
-        "quantity_risk_cap_enabled": False,
-        "quantity_preserved": True,
-        "risk_sizing_mode": "CAPITAL_BASED_ALLOCATION",
-        "quantity_sizing_rule": "PRESERVE_CAP90_OR_PORTFOLIO_ALLOCATION",
+        "risk_cap_applied": lots < affordability_lots,
+        "quantity_risk_cap_enabled": True,
+        "quantity_preserved": lots == affordability_lots,
+        "risk_sizing_mode": "CONSERVATIVE_PLANNED_SL_LOSS_CAP_1PCT",
+        "quantity_sizing_rule": "MIN_ALLOCATION_AND_1PCT_PLANNED_SL_RISK",
+        "max_planned_loss_percent": NORMAL_MAX_PLANNED_LOSS_PERCENT,
+        "max_planned_loss_amount": round(risk_budget, 2),
+        "planned_risk_points": round(planned_risk_points, 2),
+        "planned_risk_per_lot": round(planned_risk_per_lot, 2),
+        "affordability_lots": affordability_lots,
+        "risk_lots": risk_lots,
     }
 
 
@@ -144,27 +225,27 @@ def _annotate_result(result):
         return result
     output = result
     metadata = {
-        "quantity_risk_cap_enabled": False,
-        "quantity_preserved": True,
-        "position_sizing_mode": "CAPITAL_BASED_ALLOCATION",
-        "capital_use_rule": "PRESERVE_CAP90_OR_50_40_PORTFOLIO_ALLOCATION",
+        "quantity_risk_cap_enabled": True,
+        "position_sizing_mode": "CAPITAL_CEILING_PLUS_1PCT_PLANNED_SL_RISK",
+        "capital_use_rule": "MIN_ALLOCATION_AND_1PCT_PLANNED_SL_RISK",
     }
     output.update(metadata)
     sizing = dict(output.get("position_sizing") or {})
     sizing.update({
-        "mode": "CAPITAL_BASED_ALLOCATION",
+        "mode": "CAPITAL_CEILING_PLUS_1PCT_PLANNED_SL_RISK",
         "slot_1_allocation_percent": 50,
         "slot_2_allocation_percent": 40,
         "auto_backtest_capital_use_percent": 90,
-        "equity_risk_lot_cap": False,
+        "equity_risk_lot_cap": True,
+        "max_planned_loss_percent": NORMAL_MAX_PLANNED_LOSS_PERCENT,
     })
     output["position_sizing"] = sizing
     summary = dict(output.get("summary") or {})
     summary.update(metadata)
     output["summary"] = summary
     output["note"] = (
-        "Quantity is selected only from current capital allocation and option "
-        "premium. Strategy exits and the 8% premium stop remain separate."
+        "Quantity keeps the capital allocation ceiling and is additionally "
+        "capped so planned stop loss is at most 1% of current equity."
     )
     return output
 
@@ -172,11 +253,11 @@ def _annotate_result(result):
 def apply_capital_based_sizing_restore_patch():
     """Install after all portfolio/risk wrappers so it is the final sizing rule."""
     runtime._size = _runtime_capital_size
-    runtime._okai_risk_sizing_v2 = False
+    runtime._okai_risk_sizing_v2 = True
     runtime._okai_capital_based_sizing_final = True
 
     backtest_routes._okai_calculate_lot_sizing = _backtest_capital_size
-    backtest_routes._okai_risk_sizing_v2 = False
+    backtest_routes._okai_risk_sizing_v2 = True
     backtest_routes._okai_capital_based_sizing_final = True
 
     original_auto = getattr(backtest_routes, "_okai_run_auto_index_backtest", None)

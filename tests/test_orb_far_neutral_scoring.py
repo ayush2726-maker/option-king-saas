@@ -42,3 +42,27 @@ def test_near_orb_keeps_normal_five_factor_scoring():
     assert result["orb_available"] is True
     assert result["orb_applicable"] is True
     assert result["orb_score_denominator"] == 5
+
+
+def test_far_opposite_orb_is_not_removed_from_countertrend_score():
+    result = calculate_base_score_orb_neutral(
+        price=24620,
+        vwap=24630,
+        ema9=24610,
+        ema21=24618,
+        supertrend_dir="DOWN",
+        trend="DOWNTREND",
+        orb_high=24550,
+        orb_low=24480,
+        c1_bullish=False,
+        c2_bullish=False,
+        gap_day=False,
+        spot_atr=14,
+    )
+
+    assert result["signal"] == "PE"
+    assert result["base_score"] == 44
+    assert result["orb_applicable"] is True
+    assert result["orb_score_denominator"] == 5
+    assert result["orb_conflicts_with_active_side"] is True
+    assert "ORB_FAR_OPPOSITE_DIRECTION_RETAINED" in result["orb_neutral_reasons"]
