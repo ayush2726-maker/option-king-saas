@@ -7,6 +7,9 @@ At charges + 4%, the +2% lock is capped so the observed peak retains at least
 keeps room for a winner while preventing a meaningful observed profit from
 returning to an unprotected loss.
 
+From 1.50R onward at least 70% of the observed peak premium profit is retained.
+This caps giveback at 30% without tightening the early 2%/4% protection stages.
+
 A latched profit stop is authoritative over danger, structural and CAS exits. PAPER
 stop exits are simulated at the saved stop with at most one tick of adverse
 slippage; LIVE fills remain broker-controlled. The stop can only move upward.
@@ -40,6 +43,8 @@ LOCK_1_TRIGGER_R = 1.00
 LOCK_1_R = 0.45
 LOCK_2_TRIGGER_R = 1.50
 LOCK_2_R = 0.80
+PEAK_PROFIT_RETAIN_TRIGGER_R = 1.50
+PEAK_PROFIT_RETAIN_PERCENT = 70.0
 RUNNER_TRIGGER_R = 2.00
 RUNNER_MIN_LOCK_R = 1.20
 RUNNER_DISTANCE_R = 0.65
@@ -49,7 +54,7 @@ SMOOTH_TRAIL_DISTANCE_R = 0.55
 TIGHT_TRAIL_TRIGGER_R = 4.00
 TIGHT_TRAIL_MIN_LOCK_R = 3.00
 TIGHT_TRAIL_DISTANCE_R = 0.45
-AUTHORITY_VERSION = "AUTHORITATIVE_EARLY_COST_FLOOR_PROFIT_RATCHET_V7"
+AUTHORITY_VERSION = "AUTHORITATIVE_PEAK70_PROFIT_RATCHET_V8"
 PAPER_FILL_VERSION = "PAPER_STOP_ONE_TICK_FILL_V1"
 
 
@@ -247,14 +252,18 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
             new_sl = stage_candidate
             stage = "LOCK_0_45R_AFTER_1_00R"
 
-    if early_triggered and peak_r + 1e-9 >= LOCK_2_TRIGGER_R:
+    if early_triggered and peak_r + 1e-9 >= PEAK_PROFIT_RETAIN_TRIGGER_R:
+        peak_profit_lock = entry + (
+            peak - entry
+        ) * PEAK_PROFIT_RETAIN_PERCENT / 100.0
         stage_candidate = max(
             entry + LOCK_2_R * risk,
             peak - 0.70 * risk,
+            peak_profit_lock,
         )
         if stage_candidate > new_sl + 1e-9:
             new_sl = stage_candidate
-            stage = "LOCK_0_80R_AFTER_1_50R"
+            stage = "LOCK_70PCT_PEAK_PROFIT_AFTER_1_50R"
 
     if early_triggered and peak_r + 1e-9 >= RUNNER_TRIGGER_R:
         stage_candidate = max(
@@ -297,6 +306,13 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
         "peak_price": round(peak, 2),
         "peak_r": round(peak_r, 2),
         "locked_r": round((candidate - entry) / risk, 2),
+        "peak_profit_retained_percent": round(max(
+            0.0,
+            min(
+                100.0,
+                (candidate - entry) / max(TICK_SIZE, peak - entry) * 100.0,
+            ),
+        ), 2),
         "stage": stage,
         "initial_risk": round(risk, 2),
         "cost_safe_breakeven_price": round(cost_cover_price, 2),
@@ -347,6 +363,8 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
             "lock_0_25r_trigger_r": LOCK_0_TRIGGER_R,
             "lock_0_45r_trigger_r": LOCK_1_TRIGGER_R,
             "lock_0_80r_trigger_r": LOCK_2_TRIGGER_R,
+            "peak_profit_retain_trigger_r": PEAK_PROFIT_RETAIN_TRIGGER_R,
+            "peak_profit_retain_percent": PEAK_PROFIT_RETAIN_PERCENT,
             "runner_trigger_r": RUNNER_TRIGGER_R,
             "runner_distance_r": RUNNER_DISTANCE_R,
             "smooth_trail_trigger_r": SMOOTH_TRAIL_TRIGGER_R,

@@ -92,6 +92,7 @@ def test_higher_r_runner_schedule_is_unchanged(monkeypatch):
     assert result["peak_r"] >= 2.0
     assert result["sl_price"] >= 664.70
     assert result["stage"] in {
+        "LOCK_70PCT_PEAK_PROFIT_AFTER_1_50R",
         "RUNNER_TRAIL_0_65R_AFTER_2_00R",
         "SMOOTH_TRAIL_0_55R_AFTER_2_50R",
         "TIGHT_TRAIL_0_45R_AFTER_4_00R",

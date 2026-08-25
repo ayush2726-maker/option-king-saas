@@ -212,9 +212,46 @@ def test_sensex_189r_winner_ratchets_from_legacy_half_r_stop(monkeypatch):
     )
 
     assert result["peak_r"] == 1.89
-    assert result["stage"] == "LOCK_0_80R_AFTER_1_50R"
-    assert result["sl_price"] == 321.0
+    assert result["stage"] == "LOCK_70PCT_PEAK_PROFIT_AFTER_1_50R"
+    assert result["sl_price"] == 324.85
+    assert result["peak_profit_retained_percent"] >= 70.0
     assert result["updated"] is True
+
+
+def test_banknifty_expiry_winner_retains_seventy_percent_of_peak(monkeypatch):
+    def expiry_solver(*args, **_kwargs):
+        percent = float(args[-1])
+        prices = {0.0: 72.70, 1.0: 73.45, 2.0: 74.20, 4.0: 75.70}
+        return {
+            "price": prices[percent],
+            "target_net_profit": percent * 100.0,
+            "net_pnl_at_price": percent * 100.0,
+        }
+
+    monkeypatch.setattr(
+        patch.live_cost,
+        "calculate_exact_breakeven_price",
+        expiry_solver,
+    )
+    result = patch._authoritative_trail(
+        _trade(
+            entry_price=72.30,
+            sl_price=57.85,
+            initial_risk=14.45,
+            peak_price=95.60,
+            qty=690,
+            underlying="BANKNIFTY",
+            symbol="BANKNIFTY 57400 PE 25 AUG 26",
+            expiry="2026-08-25",
+        ),
+        95.60,
+    )
+
+    assert result["peak_r"] == 1.61
+    assert result["sl_price"] == 88.65
+    assert result["stage"] == "LOCK_70PCT_PEAK_PROFIT_AFTER_1_50R"
+    assert result["peak_profit_retained_percent"] >= 70.0
+    assert result["peak_price"] - result["sl_price"] <= 7.0
 
 
 def test_apply_reasserts_authority_after_later_exit_replacement(monkeypatch):
