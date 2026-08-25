@@ -133,6 +133,7 @@ def _feature_candidates(model) -> Dict[str, list[int]]:
     option_market = base_setup + [
         name for name in names
         if name.startswith("option_")
+        or name.startswith("gainzalgo_")
         or name in {
             "coverage", "pcr", "oi_direction", "depth_imbalance",
             "spread_percent", "average_iv", "trend_strength",
@@ -155,6 +156,9 @@ def _feature_candidates(model) -> Dict[str, list[int]]:
     ]
     candidates = {
         "BASE_SETUP_COMPACT": indices(base_setup),
+        "GAINZALGO_FUSION": indices(
+            base_setup + [name for name in names if name.startswith("gainzalgo_")]
+        ),
         "OPTION_MARKET_COMPACT": indices(option_market),
         "STABLE_INTERACTIONS": indices(stable_interactions),
         "ALL_NO_NEWS": [i for i, name in enumerate(names) if name not in news],

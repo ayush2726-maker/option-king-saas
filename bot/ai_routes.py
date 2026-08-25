@@ -25,6 +25,10 @@ from bot.advanced_intelligence_v2 import (
     start_advanced_intelligence,
 )
 from bot.adaptive_model_v2 import model_status
+from bot.gainzalgo_shadow_v1 import (
+    gainzalgo_status,
+    record_gainzalgo_signal,
+)
 from bot.broker_intelligence import BROKER_CAPABILITIES
 from bot.missed_trade_learning_v1 import (
     get_missed_trade_summary,
@@ -144,6 +148,18 @@ def _require_personal_ai_key(x_ai_key: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="Invalid AI API key")
 
 
+def _require_gainzalgo_secret(provided: Optional[str], payload: Dict[str, Any]) -> None:
+    expected = os.getenv("GAINZALGO_WEBHOOK_SECRET", "").strip()
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="GAINZALGO_WEBHOOK_SECRET is not configured on Railway",
+        )
+    supplied = str(provided or payload.get("secret") or "").strip()
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="Invalid GainzAlgo webhook secret")
+
+
 @router.get("/ai/health")
 def ai_health():
     monitor = shadow_monitor_health()
@@ -251,6 +267,20 @@ def shared_ai_predict(
     return result
 
 
+@router.post("/ai/gainzalgo/webhook")
+def gainzalgo_webhook(
+    payload: Dict[str, Any] = Body(...),
+    x_gainzalgo_secret: Optional[str] = Header(None, alias="X-GainzAlgo-Secret"),
+):
+    """Receive a TradingView GainzAlgo V2 Alpha alert for shadow learning."""
+    body = dict(payload or {})
+    _require_gainzalgo_secret(x_gainzalgo_secret, body)
+    try:
+        return record_gainzalgo_signal(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/bot/ai-snapshot")
 def get_ai_snapshot(authorization: str = Header(None)):
     user = get_current_user(authorization)
@@ -299,6 +329,15 @@ def get_ai_advanced_monitor(authorization: str = Header(None), recent_limit: int
 def get_ai_model_status(authorization: str = Header(None)):
     get_current_user(authorization)
     return model_status()
+
+
+@router.get("/bot/ai-gainzalgo-monitor")
+def get_ai_gainzalgo_monitor(
+    authorization: str = Header(None),
+    symbol: str = "NIFTY",
+):
+    get_current_user(authorization)
+    return gainzalgo_status(symbol)
 
 
 @router.get("/bot/ai-missed-trades")

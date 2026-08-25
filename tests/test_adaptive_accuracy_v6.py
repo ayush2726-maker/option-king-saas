@@ -20,6 +20,7 @@ def _model():
         "base_ce", "base_pe", "base_no_trade", "news_ce", "news_pe",
         "setup_candidate_ce", "setup_candidate_pe", "setup_score_margin",
         "adx", "rsi", "option_ce", "option_pe", "coverage",
+        "gainzalgo_ce", "gainzalgo_pe", "gainzalgo_available",
     ]
     model.NEWS_FEATURES = ("news_ce", "news_pe")
     model.NEWS_ABLATION_FEATURES = ("news_ce", "news_pe")
@@ -64,6 +65,16 @@ def test_candidate_sets_never_include_news_or_news_derived_fields():
         selected = {model.FEATURE_NAMES[index] for index in indices}
         assert "news_ce" not in selected
         assert "news_pe" not in selected
+
+
+def test_gainzalgo_can_compete_as_fusion_candidate_without_becoming_a_gate():
+    module = _module()
+    model = _model()
+    candidates = module._feature_candidates(model)
+    selected = {model.FEATURE_NAMES[index] for index in candidates["GAINZALGO_FUSION"]}
+    assert "gainzalgo_ce" in selected
+    assert "gainzalgo_pe" in selected
+    assert "setup_score_margin" in selected
 
 
 def test_baseline_blend_is_normalized_and_can_correct_noisy_model():

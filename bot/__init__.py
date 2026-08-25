@@ -104,6 +104,12 @@ try:
     apply_baseline_setup_training_v5_patch()
 except Exception: pass
 try:
+    # Closed-source GainzAlgo logic is never copied. Authenticated TradingView
+    # alerts become shadow features and must prove chronological value first.
+    from bot.gainzalgo_shadow_v1 import apply_gainzalgo_shadow_v1_patch
+    apply_gainzalgo_shadow_v1_patch()
+except Exception: pass
+try:
     from bot.adaptive_accuracy_v6_patch import apply_adaptive_accuracy_v6_patch
     apply_adaptive_accuracy_v6_patch()
 except Exception: pass
