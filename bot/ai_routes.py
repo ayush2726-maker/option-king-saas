@@ -29,7 +29,12 @@ from bot.gainzalgo_shadow_v1 import (
     gainzalgo_status,
     record_gainzalgo_signal,
 )
-from bot.free_regime_indicators_v1 import completed_chart_candles, free_regime_status
+from bot.free_regime_indicators_v1 import (
+    SQUEEZE_LENGTH,
+    completed_chart_candles,
+    free_regime_features,
+    free_regime_status,
+)
 from bot.broker_intelligence import BROKER_CAPABILITIES
 from bot.missed_trade_learning_v1 import (
     get_missed_trade_summary,
@@ -332,6 +337,22 @@ def get_ai_advanced_monitor(authorization: str = Header(None), recent_limit: int
 def get_ai_model_status(authorization: str = Header(None)):
     get_current_user(authorization)
     return model_status()
+
+
+@router.get("/bot/ai-free-indicators")
+def get_ai_free_indicators(authorization: str = Header(None)):
+    user = get_current_user(authorization)
+    snapshot = _user_snapshot(user["id"])
+    candles = snapshot.get("completed_candles") or []
+    return {
+        "success": True,
+        **free_regime_status(),
+        "symbol": snapshot.get("symbol") or "NIFTY",
+        "completed_candle_count": len(candles),
+        "minimum_candles_required": SQUEEZE_LENGTH * 2,
+        "engine_updated_at": snapshot.get("engine_updated_at"),
+        "features": free_regime_features(snapshot),
+    }
 
 
 @router.get("/bot/ai-gainzalgo-monitor")

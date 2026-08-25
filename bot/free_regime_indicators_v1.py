@@ -273,6 +273,7 @@ def apply_free_regime_indicators_v1_patch() -> bool:
 
 __all__ = [
     "FEATURES",
+    "SQUEEZE_LENGTH",
     "VERSION",
     "apply_free_regime_indicators_v1_patch",
     "completed_chart_candles",
