@@ -179,13 +179,13 @@ apply_missed_trade_learning_patch()
 # same-index/same-side loss cooldown cannot be replaced by another wrapper.
 apply_final_correlated_risk_guard()
 # Expiry-only final authority: 88 score, completed momentum/5m agreement,
-# 14:45 cutoff, one-position limit and 10% planned-SL-loss sizing.
+# 14:45 cutoff, one-position limit, unlimited trade count and 10% risk sizing.
 apply_expiry_day_risk_mode_patch()
 # Strategy/exit patches above can replace the evaluator while leaving an old
 # installed flag behind. Re-assert the ratchet as the final exit authority.
 apply_authoritative_profit_lock_runtime_patch()
 
-RELEASE_VERSION = "risk10-choppy-4pct-peak70-profit-v4"
+RELEASE_VERSION = "expiry-unlimited-4pct-peak70-profit-v5"
 
 app = FastAPI(
     title="Option King AI — SaaS API",

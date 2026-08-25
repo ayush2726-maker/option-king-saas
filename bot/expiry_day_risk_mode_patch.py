@@ -3,7 +3,8 @@
 Normal-day AUTO rules remain unchanged.  On a same-day index expiry this layer
 requires a stronger completed-candle setup, stops normal entries before the
 late-expiry noise window, sizes lots by planned SL loss, and limits repeated
-expiry losses.  ORB remains telemetry rather than a hard requirement.
+expiry losses. The expiry trade-count cap is disabled; ORB remains telemetry
+rather than a hard requirement.
 """
 
 from __future__ import annotations
@@ -22,7 +23,8 @@ EXPIRY_ENTRY_START_MINUTE = 9 * 60 + 30
 EXPIRY_ENTRY_CUTOFF_MINUTE = 14 * 60 + 45
 EXPIRY_MAX_PLANNED_LOSS_PERCENT = 10.0
 EXPIRY_DAILY_LOSS_LIMIT_PERCENT = 2.0
-EXPIRY_MAX_TRADES_PER_DAY = 2
+# Zero means unlimited. Risk, cooldown and one-open-position guards still apply.
+EXPIRY_MAX_TRADES_PER_DAY = 0
 EXPIRY_COOLDOWN_MINUTES = 30
 EXPIRY_MAX_SAME_SIDE_SL_LOSSES = 2
 EXPIRY_PREMIUM_DROP_POINTS = 0.10
@@ -285,6 +287,12 @@ def _net(row: Any) -> float:
     if value is None:
         value = runtime._v(row, "pnl", 0.0)
     return _f(value, 0.0)
+
+
+def _expiry_trade_count_limit_reached(count: int) -> bool:
+    """Return False while the expiry trade-count cap is configured as unlimited."""
+    limit = max(0, _i(EXPIRY_MAX_TRADES_PER_DAY, 0))
+    return bool(limit > 0 and max(0, _i(count, 0)) >= limit)
 
 
 def _active_loss_block(conn, user_id: int, underlying: str, side: str, now_ist: datetime) -> dict[str, Any] | None:
@@ -559,7 +567,7 @@ def apply_expiry_day_risk_mode_patch() -> bool:
 
         capital = _capital_base(conn, user_id, settings, live_cash, rows)
         today_rows = _today_expiry_rows(conn, user_id, now_ist)
-        if len(today_rows) >= EXPIRY_MAX_TRADES_PER_DAY:
+        if _expiry_trade_count_limit_reached(len(today_rows)):
             return _record_block(
                 state, selected, "EXPIRY_MAX_TRADES_PER_DAY_REACHED",
                 {"today_expiry_trades": len(today_rows), "maximum": EXPIRY_MAX_TRADES_PER_DAY},
@@ -601,7 +609,12 @@ def apply_expiry_day_risk_mode_patch() -> bool:
             "entry_window_ist": "09:30-14:45",
             "max_planned_loss_percent": EXPIRY_MAX_PLANNED_LOSS_PERCENT,
             "daily_loss_limit_percent": EXPIRY_DAILY_LOSS_LIMIT_PERCENT,
-            "max_trades_per_day": EXPIRY_MAX_TRADES_PER_DAY,
+            "max_trades_per_day": (
+                EXPIRY_MAX_TRADES_PER_DAY
+                if EXPIRY_MAX_TRADES_PER_DAY > 0
+                else None
+            ),
+            "trade_count_limit_enabled": EXPIRY_MAX_TRADES_PER_DAY > 0,
         }
         return opened
 

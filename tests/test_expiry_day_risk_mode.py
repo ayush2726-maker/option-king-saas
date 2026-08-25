@@ -99,6 +99,12 @@ def test_exact_same_day_expiry_resolution():
     ) is True
 
 
+def test_expiry_trade_count_cap_is_unlimited():
+    assert expiry.EXPIRY_MAX_TRADES_PER_DAY == 0
+    assert expiry._expiry_trade_count_limit_reached(2) is False
+    assert expiry._expiry_trade_count_limit_reached(999) is False
+
+
 def test_runtime_expiry_mode_uses_contract_date_not_tuesday_weekday(monkeypatch):
     monkeypatch.setattr(
         runtime,

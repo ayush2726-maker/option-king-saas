@@ -221,7 +221,7 @@ def _expiry_risk_permission(
     now_ist: datetime,
 ) -> tuple[bool, str, dict[str, Any]]:
     rows = expiry_risk._today_expiry_rows(conn, user_id, now_ist)
-    if len(rows) >= expiry_risk.EXPIRY_MAX_TRADES_PER_DAY:
+    if expiry_risk._expiry_trade_count_limit_reached(len(rows)):
         return False, "EXPIRY_MAX_TRADES_PER_DAY_REACHED", {
             "today_expiry_trades": len(rows),
         }

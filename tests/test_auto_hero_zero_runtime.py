@@ -42,6 +42,36 @@ def test_auto_hero_window_is_1430_to_1500():
     assert hero._window_open(datetime(2026, 8, 25, 15, 0)) is False
 
 
+def test_expiry_risk_permission_does_not_enforce_trade_count(monkeypatch):
+    class Rows:
+        def fetchone(self):
+            return {"paper_capital": 120000.0}
+
+    class Conn:
+        def execute(self, *_args, **_kwargs):
+            return Rows()
+
+    monkeypatch.setattr(
+        hero.expiry_risk,
+        "_today_expiry_rows",
+        lambda *_args, **_kwargs: [
+            {"status": "CLOSED", "net_pnl": 100.0}
+            for _ in range(25)
+        ],
+    )
+    monkeypatch.setattr(hero.runtime, "_paper_base", lambda *_args: 120000.0)
+
+    allowed, reason, _details = hero._expiry_risk_permission(
+        Conn(),
+        7,
+        {"paper_capital": 120000.0},
+        datetime(2026, 8, 25, 14, 45),
+    )
+
+    assert allowed is True
+    assert reason == "EXPIRY_RISK_PERMISSION_OK"
+
+
 def test_candidate_needs_score_90_two_candles_and_real_5m():
     assert hero._eligible_candidate(_scan()) is True
     assert hero._eligible_candidate(_scan(score=89)) is False
