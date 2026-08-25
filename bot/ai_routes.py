@@ -29,6 +29,7 @@ from bot.gainzalgo_shadow_v1 import (
     gainzalgo_status,
     record_gainzalgo_signal,
 )
+from bot.free_regime_indicators_v1 import completed_chart_candles, free_regime_status
 from bot.broker_intelligence import BROKER_CAPABILITIES
 from bot.missed_trade_learning_v1 import (
     get_missed_trade_summary,
@@ -127,6 +128,7 @@ def _user_snapshot(user_id: int) -> Dict[str, Any]:
         "spread_percent": _to_float(state.get("spread_percent"), 0.0),
         "mtf_confirmed": bool(state.get("mtf_confirmed", False)),
         "market_regime": state.get("market_regime") or state.get("regime") or "",
+        "completed_candles": completed_chart_candles(state),
         "warnings": state.get("warnings") or [],
         "strategy": strategy,
         "engine_status": status,
@@ -181,6 +183,7 @@ def ai_health():
         "trade_blocking": False,
         "personal_api_key_configured": bool(os.getenv("OKAI_AI_API_KEY", "").strip()),
         "order_execution": False,
+        "free_regime_indicators": free_regime_status(),
         "shadow_monitor": {
             "monitor_version": monitor.get("monitor_version"),
             "started": monitor.get("started"),

@@ -134,6 +134,9 @@ def _feature_candidates(model) -> Dict[str, list[int]]:
         name for name in names
         if name.startswith("option_")
         or name.startswith("gainzalgo_")
+        or name.startswith("choppiness_")
+        or name.startswith("squeeze_")
+        or name.startswith("free_indicator_")
         or name in {
             "coverage", "pcr", "oi_direction", "depth_imbalance",
             "spread_percent", "average_iv", "trend_strength",
@@ -158,6 +161,14 @@ def _feature_candidates(model) -> Dict[str, list[int]]:
         "BASE_SETUP_COMPACT": indices(base_setup),
         "GAINZALGO_FUSION": indices(
             base_setup + [name for name in names if name.startswith("gainzalgo_")]
+        ),
+        "FREE_REGIME_FUSION": indices(
+            base_setup + [
+                name for name in names
+                if name.startswith("choppiness_")
+                or name.startswith("squeeze_")
+                or name.startswith("free_indicator_")
+            ]
         ),
         "OPTION_MARKET_COMPACT": indices(option_market),
         "STABLE_INTERACTIONS": indices(stable_interactions),

@@ -21,6 +21,8 @@ def _model():
         "setup_candidate_ce", "setup_candidate_pe", "setup_score_margin",
         "adx", "rsi", "option_ce", "option_pe", "coverage",
         "gainzalgo_ce", "gainzalgo_pe", "gainzalgo_available",
+        "free_indicator_available", "choppiness_index",
+        "squeeze_momentum", "squeeze_direction_ce", "squeeze_direction_pe",
     ]
     model.NEWS_FEATURES = ("news_ce", "news_pe")
     model.NEWS_ABLATION_FEATURES = ("news_ce", "news_pe")
@@ -74,6 +76,20 @@ def test_gainzalgo_can_compete_as_fusion_candidate_without_becoming_a_gate():
     selected = {model.FEATURE_NAMES[index] for index in candidates["GAINZALGO_FUSION"]}
     assert "gainzalgo_ce" in selected
     assert "gainzalgo_pe" in selected
+    assert "setup_score_margin" in selected
+
+
+def test_free_regime_features_compete_without_becoming_a_gate():
+    module = _module()
+    model = _model()
+    candidates = module._feature_candidates(model)
+    selected = {
+        model.FEATURE_NAMES[index]
+        for index in candidates["FREE_REGIME_FUSION"]
+    }
+    assert "choppiness_index" in selected
+    assert "squeeze_momentum" in selected
+    assert "squeeze_direction_ce" in selected
     assert "setup_score_margin" in selected
 
 

@@ -110,6 +110,12 @@ try:
     apply_gainzalgo_shadow_v1_patch()
 except Exception: pass
 try:
+    # Free broker-candle regime inputs. They remain shadow features and cannot
+    # veto or reduce the baseline strategy's trade frequency.
+    from bot.free_regime_indicators_v1 import apply_free_regime_indicators_v1_patch
+    apply_free_regime_indicators_v1_patch()
+except Exception: pass
+try:
     from bot.adaptive_accuracy_v6_patch import apply_adaptive_accuracy_v6_patch
     apply_adaptive_accuracy_v6_patch()
 except Exception: pass
