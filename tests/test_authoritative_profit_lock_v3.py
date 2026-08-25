@@ -97,7 +97,7 @@ def _staged_solver(*args, **_kwargs):
     }
 
 
-def test_early_two_percent_move_arms_cost_safe_floor(monkeypatch):
+def test_two_percent_move_does_not_arm_profit_trail(monkeypatch):
     monkeypatch.setattr(
         patch.live_cost,
         "calculate_exact_breakeven_price",
@@ -112,10 +112,11 @@ def test_early_two_percent_move_arms_cost_safe_floor(monkeypatch):
         ),
         103.10,
     )
-    assert result["breakeven_triggered"] is True
+    assert result["breakeven_triggered"] is False
     assert result["four_pct_triggered"] is False
-    assert result["sl_price"] >= 101.05
-    assert result["stage"] == "COST_SAFE_FLOOR_AFTER_2PCT_NET"
+    assert result["sl_price"] == 90.0
+    assert result["stage"] == "WAITING_EARLY_COST_SAFE_FLOOR"
+    assert result["early_protection_trigger_net_percent"] == 4.0
 
 
 def test_four_percent_move_guarantees_one_percent_net_floor(monkeypatch):
@@ -136,7 +137,7 @@ def test_four_percent_move_guarantees_one_percent_net_floor(monkeypatch):
     )
     assert result["four_pct_triggered"] is True
     assert result["sl_price"] >= result["four_pct_min_lock_price"]
-    assert result["sl_price"] < result["protected_2pct_price"]
+    assert result["sl_price"] < result["protected_4pct_price"]
     assert result["sl_price"] < result["peak_price"]
     assert result["four_pct_full_lock_armed"] is False
     assert result["four_pct_preferred_room_preserved"] is False
@@ -147,12 +148,12 @@ def test_latched_profit_stop_outranks_structural_or_danger_exit():
     trade = _trade(entry_price=100.0, sl_price=90.0, initial_risk=10.0)
     trail = {
         "sl_price": 103.05,
-        "stage": "LOCK_2PCT_AFTER_4PCT_NET",
+        "stage": "LOCK_4PCT_AFTER_4PCT_NET",
         "locked_r": 0.31,
     }
     reason = patch._protected_profit_stop_reason(trade, 98.0, trail)
     assert reason.startswith("PROFIT LOCK TRAIL HIT")
-    assert "LOCK_2PCT_AFTER_4PCT_NET" in reason
+    assert "LOCK_4PCT_AFTER_4PCT_NET" in reason
 
 
 def test_friday_style_winner_cannot_close_as_unprotected_loss(monkeypatch):
@@ -183,7 +184,7 @@ def test_friday_style_winner_cannot_close_as_unprotected_loss(monkeypatch):
     assert trail["peak_price"] == 487.40
     assert trail["sl_price"] >= trail["cost_floor_price"]
     assert trail["sl_price"] >= trail["four_pct_min_lock_price"]
-    assert trail["sl_price"] < trail["protected_2pct_price"]
+    assert trail["sl_price"] < trail["protected_4pct_price"]
     assert trail["peak_price"] - trail["sl_price"] >= 0.50 * trail["initial_risk"]
     reason = patch._protected_profit_stop_reason(trade, 450.40, trail)
     assert reason.startswith("PROFIT LOCK TRAIL HIT")

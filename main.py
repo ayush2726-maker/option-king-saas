@@ -185,7 +185,7 @@ apply_expiry_day_risk_mode_patch()
 # installed flag behind. Re-assert the ratchet as the final exit authority.
 apply_authoritative_profit_lock_runtime_patch()
 
-RELEASE_VERSION = "risk10-choppy-peak70-profit-v3"
+RELEASE_VERSION = "risk10-choppy-4pct-peak70-profit-v4"
 
 app = FastAPI(
     title="Option King AI — SaaS API",

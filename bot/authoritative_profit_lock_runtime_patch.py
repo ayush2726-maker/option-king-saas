@@ -1,14 +1,13 @@
 """Authoritative smooth R-based runtime profit lock.
 
-The first protected stop now arms before the old charges + 4% threshold: once the
-premium can cover all costs plus 2% net profit, the stop moves to a cost-safe floor.
-At charges + 4%, the +2% lock is capped so the observed peak retains at least
-0.50R breathing room, then the existing R-based runner stages take over. This
-keeps room for a winner while preventing a meaningful observed profit from
-returning to an unprotected loss.
+The first protected stop now arms only at charges + 4% net profit. Before that
+threshold the initial ATR stop is left untouched. At charges + 4%, the protected
+stop is capped so the observed peak retains at least 0.50R breathing room, then
+the existing R-based runner stages take over. This keeps room for a winner while
+preventing a meaningful observed profit from returning to an unprotected loss.
 
 From 1.50R onward at least 70% of the observed peak premium profit is retained.
-This caps giveback at 30% without tightening the early 2%/4% protection stages.
+This caps giveback at 30% without reintroducing an early 2% trigger.
 
 A latched profit stop is authoritative over danger, structural and CAS exits. PAPER
 stop exits are simulated at the saved stop with at most one tick of adverse
@@ -30,10 +29,10 @@ from bot.trade_visibility_metrics_patch import apply_trade_visibility_metrics_pa
 
 TICK_SIZE = 0.05
 COST_COVER_NET_PROFIT_PERCENT = 4.0
-EARLY_PROTECTION_TRIGGER_NET_PERCENT = 2.0
+EARLY_PROTECTION_TRIGGER_NET_PERCENT = 4.0
 EARLY_PROTECTION_LOCK_NET_PERCENT = 0.0
 FOUR_PCT_MIN_LOCK_NET_PERCENT = 1.0
-FOUR_PCT_LOCK_NET_PERCENT = 2.0
+FOUR_PCT_LOCK_NET_PERCENT = 4.0
 FOUR_PCT_MIN_PEAK_ROOM_R = 0.50
 EXPIRY_EARLY_FLOOR_MIN_PEAK_R = 0.75
 FIRST_LOCK_TRIGGER_R = 1.00
@@ -54,7 +53,7 @@ SMOOTH_TRAIL_DISTANCE_R = 0.55
 TIGHT_TRAIL_TRIGGER_R = 4.00
 TIGHT_TRAIL_MIN_LOCK_R = 3.00
 TIGHT_TRAIL_DISTANCE_R = 0.45
-AUTHORITY_VERSION = "AUTHORITATIVE_PEAK70_PROFIT_RATCHET_V8"
+AUTHORITY_VERSION = "AUTHORITATIVE_4PCT_PEAK70_PROFIT_RATCHET_V9"
 PAPER_FILL_VERSION = "PAPER_STOP_ONE_TICK_FILL_V1"
 
 
@@ -180,7 +179,7 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
     exact_price = max(entry, _f(exact.get("price"), entry))
     cost_floor_price = _round_up_tick(exact_floor_price + TICK_SIZE)
     early_trigger_price = _round_up_tick(exact_early_price + TICK_SIZE)
-    protected_2pct_price = early_trigger_price
+    protected_4pct_price = early_trigger_price
     four_pct_min_lock_price = _round_up_tick(
         exact_four_pct_floor_price + TICK_SIZE
     )
@@ -189,16 +188,16 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
         peak - FOUR_PCT_MIN_PEAK_ROOM_R * risk
     )
     preferred_four_pct_lock_price = min(
-        protected_2pct_price,
+        protected_4pct_price,
         four_pct_room_cap_price,
     )
     # At charges + 4% net, never let the room cap push the protected stop all
     # the way back to a zero-net cost floor.  Keep the requested 0.50R room when
     # it is available; otherwise a modest 1% net floor wins.  This leaves much
-    # more breathing room than the old full +2% lock while preventing the
+    # more breathing room than a full +4% lock while preventing the
     # observed winner from closing at only a few rupees after costs.
     four_pct_breathing_lock_price = min(
-        protected_2pct_price,
+        protected_4pct_price,
         max(four_pct_min_lock_price, preferred_four_pct_lock_price),
     )
 
@@ -224,13 +223,13 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
 
     if early_triggered:
         new_sl = max(new_sl, cost_floor_price)
-        stage = "COST_SAFE_FLOOR_AFTER_2PCT_NET"
+        stage = "COST_SAFE_FLOOR_AFTER_4PCT_NET"
 
     if four_pct_triggered:
         new_sl = max(new_sl, four_pct_breathing_lock_price)
         stage = (
-            "LOCK_2PCT_AFTER_4PCT_NET"
-            if four_pct_breathing_lock_price + 1e-9 >= protected_2pct_price
+            "LOCK_4PCT_AFTER_4PCT_NET"
+            if four_pct_breathing_lock_price + 1e-9 >= protected_4pct_price
             else (
                 "LOCK_MIN_1PCT_AFTER_4PCT_NET"
                 if preferred_four_pct_lock_price + 1e-9 < four_pct_min_lock_price
@@ -294,7 +293,9 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
 
     # A protected stop must stay below the observed peak by at least one tick.
     peak_room = _round_down_tick(peak - TICK_SIZE)
-    desired = _round_up_tick(new_sl)
+    # Before the exact +4% trigger, preserve the initial ATR stop byte-for-byte;
+    # even tick-normalisation must not look like an early trailing update.
+    desired = _round_up_tick(new_sl) if early_triggered else old_sl
     candidate = min(desired, peak_room)
     candidate = max(old_sl, candidate)
     updated = candidate > old_sl + 1e-9
@@ -324,14 +325,16 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
             EXPIRY_EARLY_FLOOR_MIN_PEAK_R if expiry_day_trade else None
         ),
         "breakeven_rule": (
-            "COST_FLOOR_AT_2PCT_THEN_4PCT_LOCK_WITH_0_50R_ROOM_AND_R_RATCHET"
+            "COST_FLOOR_AT_4PCT_WITH_0_50R_ROOM_AND_R_RATCHET"
         ),
         "breakeven_net_profit_percent": COST_COVER_NET_PROFIT_PERCENT,
         "early_protection_trigger_net_percent": EARLY_PROTECTION_TRIGGER_NET_PERCENT,
         "early_protection_lock_net_percent": EARLY_PROTECTION_LOCK_NET_PERCENT,
         "early_trigger_price": round(early_trigger_price, 2),
         "cost_floor_price": round(cost_floor_price, 2),
-        "protected_2pct_price": round(protected_2pct_price, 2),
+        "protected_4pct_price": round(protected_4pct_price, 2),
+        # Backward-compatible telemetry alias; it now carries the 4% trigger.
+        "protected_2pct_price": round(protected_4pct_price, 2),
         "four_pct_min_lock_net_percent": FOUR_PCT_MIN_LOCK_NET_PERCENT,
         "four_pct_min_lock_price": round(four_pct_min_lock_price, 2),
         "four_pct_min_peak_room_r": FOUR_PCT_MIN_PEAK_ROOM_R,
@@ -341,7 +344,7 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
             2,
         ),
         "four_pct_full_lock_armed": bool(
-            four_pct_breathing_lock_price + 1e-9 >= protected_2pct_price
+            four_pct_breathing_lock_price + 1e-9 >= protected_4pct_price
         ),
         "four_pct_preferred_room_preserved": bool(
             four_pct_breathing_lock_price
