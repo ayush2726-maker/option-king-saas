@@ -7,7 +7,7 @@ account:
 
 - Runtime AUTO keeps slot 1 = 50% and slot 2 = 40% of current capital.
 - Backtest AUTO keeps its configured capital allocation (including CAP90).
-- Runtime lot quantity is capped at 1% of current equity using the exact
+- Runtime lot quantity is capped at 10% of current equity using the exact
   planned option ATR-stop distance.
 - Backtests use the conservative 15% premium stop cap when the exact live ATR
   context is unavailable.
@@ -20,7 +20,7 @@ from backtest.range_capital_mode_patch import apply_range_capital_mode_patch
 from bot import auto_portfolio_runtime as runtime
 
 
-NORMAL_MAX_PLANNED_LOSS_PERCENT = 1.0
+NORMAL_MAX_PLANNED_LOSS_PERCENT = 10.0
 BACKTEST_CONSERVATIVE_PREMIUM_RISK_PERCENT = 15.0
 
 
@@ -131,12 +131,12 @@ def _runtime_capital_size(
         ),
         "risk_cap_applied": lots < affordability_lots,
         "risk_sizing_mode": (
-            "NORMAL_PLANNED_SL_LOSS_CAP_1PCT"
+            "NORMAL_PLANNED_SL_LOSS_CAP_10PCT"
             if planned_risk is not None
             else "CAPITAL_BASED_ALLOCATION_NO_RISK_CONTEXT"
         ),
         "quantity_sizing_rule": (
-            "MIN_CAPITAL_ALLOCATION_AND_1PCT_PLANNED_SL_RISK"
+            "MIN_CAPITAL_ALLOCATION_AND_10PCT_PLANNED_SL_RISK"
             if planned_risk is not None
             else "FLOOR_ALLOCATION_DIVIDED_BY_PREMIUM_AND_LOT"
         ),
@@ -209,8 +209,8 @@ def _backtest_capital_size(capital, premium, lot_size, allocation):
         "risk_cap_applied": lots < affordability_lots,
         "quantity_risk_cap_enabled": True,
         "quantity_preserved": lots == affordability_lots,
-        "risk_sizing_mode": "CONSERVATIVE_PLANNED_SL_LOSS_CAP_1PCT",
-        "quantity_sizing_rule": "MIN_ALLOCATION_AND_1PCT_PLANNED_SL_RISK",
+        "risk_sizing_mode": "CONSERVATIVE_PLANNED_SL_LOSS_CAP_10PCT",
+        "quantity_sizing_rule": "MIN_ALLOCATION_AND_10PCT_PLANNED_SL_RISK",
         "max_planned_loss_percent": NORMAL_MAX_PLANNED_LOSS_PERCENT,
         "max_planned_loss_amount": round(risk_budget, 2),
         "planned_risk_points": round(planned_risk_points, 2),
@@ -226,13 +226,13 @@ def _annotate_result(result):
     output = result
     metadata = {
         "quantity_risk_cap_enabled": True,
-        "position_sizing_mode": "CAPITAL_CEILING_PLUS_1PCT_PLANNED_SL_RISK",
-        "capital_use_rule": "MIN_ALLOCATION_AND_1PCT_PLANNED_SL_RISK",
+        "position_sizing_mode": "CAPITAL_CEILING_PLUS_10PCT_PLANNED_SL_RISK",
+        "capital_use_rule": "MIN_ALLOCATION_AND_10PCT_PLANNED_SL_RISK",
     }
     output.update(metadata)
     sizing = dict(output.get("position_sizing") or {})
     sizing.update({
-        "mode": "CAPITAL_CEILING_PLUS_1PCT_PLANNED_SL_RISK",
+        "mode": "CAPITAL_CEILING_PLUS_10PCT_PLANNED_SL_RISK",
         "slot_1_allocation_percent": 50,
         "slot_2_allocation_percent": 40,
         "auto_backtest_capital_use_percent": 90,
@@ -245,7 +245,7 @@ def _annotate_result(result):
     output["summary"] = summary
     output["note"] = (
         "Quantity keeps the capital allocation ceiling and is additionally "
-        "capped so planned stop loss is at most 1% of current equity."
+        "capped so planned stop loss is at most 10% of current equity."
     )
     return output
 

@@ -1,10 +1,10 @@
-"""Soft accuracy confirmation layer for AUTO Portfolio scans.
+"""Regime confirmation and targeted choppy-market guard for AUTO scans.
 
 Adds DMI, RSI momentum, price structure and a simple market-regime read to each
-completed-candle scan.  This patch is deliberately non-blocking: it adjusts the
-existing decision score for confirmation/contradiction but never introduces a
-new hard veto.  Existing expiry, momentum, broker, option-quality, risk and
-order-safety rules remain authoritative.
+completed-candle scan. Normal confirmation remains score-based. A narrow hard
+guard is used only when low ADX combines with EMA compression, VWAP congestion
+or repeated candle flips. A score-88, real-MTF, two-candle range breakout is
+still allowed so early directional moves are not missed.
 """
 from __future__ import annotations
 
@@ -13,6 +13,13 @@ import math
 from bot import auto_portfolio_runtime as runtime
 
 VERSION = "OKAI-REGIME-ACCURACY-CONFIRMATION-V1"
+CHOPPY_ADX_MAX = 22.0
+CHOPPY_EMA_SPREAD_ATR_MAX = 0.25
+CHOPPY_VWAP_DISTANCE_ATR_MAX = 0.35
+CHOPPY_MIN_BODY_FLIPS = 3
+CHOPPY_BREAKOUT_BUFFER_ATR = 0.08
+CHOPPY_BREAKOUT_MIN_SCORE = 88
+CHOPPY_BLOCK_REASON = "CHOPPY_RANGE_NO_BREAKOUT"
 
 
 def _f(value, default=0.0):
@@ -75,6 +82,88 @@ def _structure(df):
     except Exception:
         pass
     return "NEUTRAL"
+
+
+def _choppy_assessment(df, market, candidate, score, minimum):
+    adx = _f(market.get("adx"), 0.0)
+    atr = max(0.01, _f(market.get("atr"), 0.01))
+    price = _f(market.get("price"), 0.0)
+    ema9 = _f(market.get("ema9"), price)
+    ema21 = _f(market.get("ema21"), price)
+    vwap = _f(market.get("vwap"), price)
+    vwap_reliable = not bool(market.get("vwap_fallback_used", False))
+
+    weak_adx = 0.0 < adx < CHOPPY_ADX_MAX
+    ema_compressed = abs(ema9 - ema21) / atr <= CHOPPY_EMA_SPREAD_ATR_MAX
+    near_vwap = bool(
+        vwap_reliable
+        and abs(price - vwap) / atr <= CHOPPY_VWAP_DISTANCE_ATR_MAX
+    )
+
+    body_flips = 0
+    breakout = False
+    two_candle_momentum = False
+    try:
+        completed = df.iloc[-8:-1]
+        directions = []
+        for _, row in completed.iterrows():
+            body = _f(row.get("close")) - _f(row.get("open"))
+            directions.append(1 if body > 0 else -1 if body < 0 else 0)
+        nonzero = [value for value in directions if value]
+        body_flips = sum(
+            1 for left, right in zip(nonzero, nonzero[1:]) if left != right
+        )
+
+        latest = df.iloc[-2]
+        previous = df.iloc[-3]
+        prior_range = df.iloc[-8:-2]
+        latest_close = _f(latest.get("close"), price)
+        if candidate == "CE":
+            breakout = latest_close >= (
+                max(_f(value) for value in prior_range["high"])
+                + CHOPPY_BREAKOUT_BUFFER_ATR * atr
+            )
+            two_candle_momentum = bool(
+                _f(previous.get("close")) > _f(previous.get("open"))
+                and latest_close > _f(latest.get("open"))
+            )
+        elif candidate == "PE":
+            breakout = latest_close <= (
+                min(_f(value) for value in prior_range["low"])
+                - CHOPPY_BREAKOUT_BUFFER_ATR * atr
+            )
+            two_candle_momentum = bool(
+                _f(previous.get("close")) < _f(previous.get("open"))
+                and latest_close < _f(latest.get("open"))
+            )
+    except Exception:
+        body_flips = 0
+        breakout = False
+        two_candle_momentum = False
+
+    repeated_flips = body_flips >= CHOPPY_MIN_BODY_FLIPS
+    congestion_votes = sum((ema_compressed, near_vwap, repeated_flips))
+    choppy = bool(weak_adx and congestion_votes >= 2)
+    strong_breakout = bool(
+        candidate in {"CE", "PE"}
+        and score >= max(minimum, CHOPPY_BREAKOUT_MIN_SCORE)
+        and market.get("mtf_confirmed", False)
+        and breakout
+        and two_candle_momentum
+    )
+    return {
+        "choppy": choppy,
+        "hard_block": bool(choppy and not strong_breakout),
+        "strong_breakout_override": strong_breakout,
+        "weak_adx": weak_adx,
+        "ema_compressed": ema_compressed,
+        "near_vwap": near_vwap,
+        "repeated_body_flips": repeated_flips,
+        "body_flips": body_flips,
+        "congestion_votes": congestion_votes,
+        "breakout": breakout,
+        "two_candle_momentum": two_candle_momentum,
+    }
 
 
 def _confirmation(df, scan):
@@ -153,6 +242,21 @@ def _confirmation(df, scan):
         reasons.append("RANGE_WEAK_CONFIRMATION")
 
     adjustment = max(-8, min(7, int(adjustment)))
+    minimum = int(round(_f(signal.get("min_score", 82), 82.0)))
+    chop = _choppy_assessment(
+        df,
+        market,
+        candidate,
+        max(0, min(100, int(round(_f(signal.get("score"), 0))) + adjustment)),
+        minimum,
+    )
+    if chop["choppy"]:
+        regime = "CHOPPY_RANGE"
+        reasons.append(
+            "CHOPPY_BREAKOUT_OVERRIDE"
+            if chop["strong_breakout_override"]
+            else CHOPPY_BLOCK_REASON
+        )
     return {
         "version": VERSION,
         "candidate": candidate,
@@ -166,7 +270,8 @@ def _confirmation(df, scan):
         "structure": structure,
         "vwap_aligned": bool(vwap_ok),
         "reasons": reasons,
-        "hard_block": False,
+        "hard_block": chop["hard_block"],
+        "choppy_guard": chop,
     }
 
 
@@ -187,6 +292,12 @@ def apply_regime_accuracy_confirmation_patch() -> None:
                 return scan
 
             layer = _confirmation(df, scan)
+            candidate = str(
+                layer.get("candidate")
+                or signal.get("candidate_signal")
+                or signal.get("signal")
+                or "WAIT"
+            ).upper()
             adjustment = int(layer.get("adjustment", 0) or 0)
             old_score = int(round(_f(signal.get("score"), 0.0)))
             min_score = int(round(_f(signal.get("min_score", signal.get("min_score_required", 82)), 82.0)))
@@ -198,10 +309,14 @@ def apply_regime_accuracy_confirmation_patch() -> None:
             signal["score"] = new_score
             signal["regime"] = layer.get("regime")
 
-            # This layer is score-only. Preserve all existing hard gates, but if
-            # the original setup was score-qualified, reflect the adjusted score
-            # against the same threshold. It never turns an originally blocked
-            # setup into an allowed trade.
+            # The final guard is installed after real 5-minute MTF and pullback
+            # wrappers. This early layer records the assessment only.
+            signal["choppy_market_detected"] = bool(
+                (layer.get("choppy_guard") or {}).get("choppy", False)
+            )
+
+            # Confirmation is score-based except for the targeted choppy guard.
+            # It never turns an originally blocked setup into an allowed trade.
             was_allowed = bool(signal.get("trade_allowed", False))
             if was_allowed and new_score < min_score:
                 signal["trade_allowed"] = False
@@ -217,6 +332,7 @@ def apply_regime_accuracy_confirmation_patch() -> None:
             market["regime"] = layer.get("regime")
             market["accuracy_confirmation"] = layer
             market["signal_score"] = new_score
+            market["choppy_guard"] = layer.get("choppy_guard")
         except Exception as exc:
             try:
                 signal = scan.get("signal_data") if isinstance(scan, dict) else None

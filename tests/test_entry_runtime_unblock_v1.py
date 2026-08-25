@@ -55,24 +55,24 @@ def test_final_capital_sizer_accepts_runtime_rows_keyword():
     assert sizing["reserve_floor"] == 10000
 
 
-def test_normal_runtime_quantity_caps_exact_planned_sl_loss_at_one_percent():
+def test_normal_runtime_quantity_caps_exact_planned_sl_loss_at_ten_percent():
     sizing = _runtime_capital_size(
         120000,
         1,
-        216.35,
+        100.0,
         20,
         rows=[],
         risk_points=26.0,
     )
 
     assert sizing["affordability_lots"] > sizing["lots"]
-    assert sizing["risk_lots"] == 2
-    assert sizing["lots"] == 2
-    assert sizing["qty"] == 40
-    assert sizing["max_planned_loss_amount"] == 1200.0
+    assert sizing["risk_lots"] == 23
+    assert sizing["lots"] == 23
+    assert sizing["qty"] == 460
+    assert sizing["max_planned_loss_amount"] == 12000.0
     assert sizing["planned_risk_per_lot"] == 520.0
-    assert sizing["planned_risk_per_lot"] * sizing["lots"] <= 1200.0
-    assert sizing["risk_sizing_mode"] == "NORMAL_PLANNED_SL_LOSS_CAP_1PCT"
+    assert sizing["planned_risk_per_lot"] * sizing["lots"] <= 12000.0
+    assert sizing["risk_sizing_mode"] == "NORMAL_PLANNED_SL_LOSS_CAP_10PCT"
 
 
 def test_third_slot_can_use_only_remainder_above_reserve():

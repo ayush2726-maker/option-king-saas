@@ -20,7 +20,7 @@ VERSION = "OKAI-EXPIRY-DAY-RISK-MODE-V1"
 EXPIRY_MIN_SCORE = 88
 EXPIRY_ENTRY_START_MINUTE = 9 * 60 + 30
 EXPIRY_ENTRY_CUTOFF_MINUTE = 14 * 60 + 45
-EXPIRY_MAX_PLANNED_LOSS_PERCENT = 1.0
+EXPIRY_MAX_PLANNED_LOSS_PERCENT = 10.0
 EXPIRY_DAILY_LOSS_LIMIT_PERCENT = 2.0
 EXPIRY_MAX_TRADES_PER_DAY = 2
 EXPIRY_COOLDOWN_MINUTES = 30
@@ -387,8 +387,8 @@ def _cap_expiry_size(
         "qty": qty,
         "capital_used": round(max(0.0, _f(premium)) * qty, 2),
         "risk_cap_applied": allowed_lots < original_lots,
-        "risk_sizing_mode": "EXPIRY_PLANNED_SL_LOSS_CAP_1PCT",
-        "sizing_mode": "EXPIRY_PLANNED_SL_LOSS_CAP_1PCT",
+        "risk_sizing_mode": "EXPIRY_PLANNED_SL_LOSS_CAP_10PCT",
+        "sizing_mode": "EXPIRY_PLANNED_SL_LOSS_CAP_10PCT",
         "expiry_day_mode": True,
         "max_planned_loss_percent": EXPIRY_MAX_PLANNED_LOSS_PERCENT,
         "max_planned_loss_amount": round(risk_budget, 2),

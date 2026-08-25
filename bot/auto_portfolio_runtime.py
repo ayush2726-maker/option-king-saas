@@ -1193,7 +1193,7 @@ def _open_common(
             "one_lot_cost": sizing.get("one_lot_cost"),
             "capital_base": round(capital_base, 2),
             "reason": (
-                "Ek complete lot ka planned SL loss 1% equity limit se zyada hai"
+                "Ek complete lot ka planned SL loss 10% equity limit se zyada hai"
                 if risk_blocked
                 else "10% reserve bachane ke baad ek complete lot afford nahi hota"
             ),

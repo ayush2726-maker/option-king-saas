@@ -4,8 +4,8 @@ The score remains 82 and entry-quality rules remain unchanged. This patch limits
 position size by planned ATR-stop risk instead of spending the whole 50%/40%
 slot, and prevents repeated same-index/same-side ATR-stop losses:
 
-- Slot 1 planned risk: at most 1.25% of current equity.
-- Slot 2 planned risk: at most 0.75% of current equity.
+- Slot 1 planned risk: at most 10% of current equity.
+- Slot 2 planned risk: at most 10% of current equity.
 - The existing 50%/40% allocation remains an affordability ceiling only.
 - After the first PURE ATR SL, the same index+side waits 30 minutes.
 - After the second PURE ATR SL on the same index+side in a day, it is blocked
@@ -26,7 +26,7 @@ from bot import dynamic_exit
 from bot import post_loss_reentry_guard_patch as runtime_reentry
 
 
-RISK_PERCENT_BY_SLOT = {1: 1.25, 2: 0.75}
+RISK_PERCENT_BY_SLOT = {1: 10.0, 2: 10.0}
 FIRST_LOSS_COOLDOWN_MINUTES = 30
 FIRST_LOSS_REASON = "POST_ATR_SL_SAME_SIDE_COOLDOWN_30M"
 SECOND_LOSS_REASON = "POST_ATR_SL_SAME_SIDE_BLOCK_REST_OF_DAY_AFTER_2"

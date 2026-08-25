@@ -110,7 +110,7 @@ def test_runtime_expiry_mode_uses_contract_date_not_tuesday_weekday(monkeypatch)
     assert runtime._resolved_expires_today({"expiry": "2026-08-27"}) is False
 
 
-def test_expiry_quantity_caps_planned_sl_loss_at_one_percent():
+def test_expiry_quantity_caps_planned_sl_loss_at_ten_percent():
     base = {
         "lots": 21,
         "qty": 1365,
@@ -122,15 +122,15 @@ def test_expiry_quantity_caps_planned_sl_loss_at_one_percent():
         capital_base=120000.0,
         premium=43.45,
         lot_size=65,
-        risk_points=6.0,
+        risk_points=10.0,
     )
 
-    assert result["risk_lots"] == 3
-    assert result["lots"] == 3
-    assert result["qty"] == 195
-    assert result["max_planned_loss_amount"] == 1200.0
-    assert result["planned_risk_per_lot"] == 390.0
-    assert result["capital_used"] == 8472.75
+    assert result["risk_lots"] == 18
+    assert result["lots"] == 18
+    assert result["qty"] == 1170
+    assert result["max_planned_loss_amount"] == 12000.0
+    assert result["planned_risk_per_lot"] == 650.0
+    assert result["capital_used"] == 50836.5
 
 
 def test_expiry_atr_has_wider_12_to_20_percent_room():

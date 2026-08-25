@@ -98,6 +98,7 @@ from bot.qualified_entry_release_patch import (
 from bot.pullback_continuation_entry_patch import (
     apply_pullback_continuation_entry_patch,
 )
+from bot.choppy_market_guard_patch import apply_choppy_market_guard_patch
 from bot.missed_trade_learning_v1 import (
     apply_missed_trade_learning_patch,
 )
@@ -168,6 +169,9 @@ apply_cas_closing_guard_patch()
 # Final scan-selection layer: remember mature extended setups and release them
 # only after a safe EMA pullback plus same-direction continuation candle.
 apply_pullback_continuation_entry_patch()
+# Final range protection: low-ADX EMA/VWAP congestion and repeated candle
+# flips wait for a score-88, real-5m-confirmed two-candle breakout.
+apply_choppy_market_guard_patch()
 # Final observability/learning layer. It records post-decision missed setups and
 # evaluates them in a background shadow worker; it cannot mutate scans/orders.
 apply_missed_trade_learning_patch()
@@ -175,13 +179,13 @@ apply_missed_trade_learning_patch()
 # same-index/same-side loss cooldown cannot be replaced by another wrapper.
 apply_final_correlated_risk_guard()
 # Expiry-only final authority: 88 score, completed momentum/5m agreement,
-# 14:45 cutoff, one-position limit and 1% planned-SL-loss sizing.
+# 14:45 cutoff, one-position limit and 10% planned-SL-loss sizing.
 apply_expiry_day_risk_mode_patch()
 # Strategy/exit patches above can replace the evaluator while leaving an old
 # installed flag behind. Re-assert the ratchet as the final exit authority.
 apply_authoritative_profit_lock_runtime_patch()
 
-RELEASE_VERSION = "multi-user-risk-profit-guard-v1"
+RELEASE_VERSION = "multi-user-risk10-profit-guard-v2"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
