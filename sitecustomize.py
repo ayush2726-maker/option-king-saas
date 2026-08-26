@@ -168,3 +168,113 @@ def _install() -> None:
 
 
 _install()
+
+
+# One-time production recovery for the active PAPER account that was showing
+# STOPPED / ₹0 / "Could not load status" even after pressing Start.  This is
+# deliberately limited to PAPER mode: it cannot place live broker orders.
+def _repair_rakesh_paper_runtime_once() -> None:
+    # Let FastAPI startup finish creating/migrating the database first.
+    time.sleep(12)
+
+    for attempt in range(6):
+        conn = None
+        try:
+            from database import get_db
+            import bot.routes as routes
+
+            # bot.routes has a broad Angel import fallback.  Older fallback
+            # code did not define get_user_bot_state, which can turn /bot/signal
+            # into HTTP 500.  Fill the runtime symbol safely if that happened.
+            if not hasattr(routes, "get_user_bot_state"):
+                try:
+                    from bot import angel_fetcher as af
+                    routes.get_user_bot_state = af.get_user_bot_state
+                    routes.start_user_bot = af.start_user_bot
+                    routes.stop_user_bot = af.stop_user_bot
+                    routes.INDEX_TOKENS = af.INDEX_TOKENS
+                    routes.INDEX_EXCHANGE = af.INDEX_EXCHANGE
+                except Exception as import_exc:
+                    def _safe_state(_user_id: int) -> dict[str, Any]:
+                        return {
+                            "running": False,
+                            "status": "ENGINE_IMPORT_FAILED",
+                            "signal": "WAITING",
+                            "score": 0,
+                            "error": str(import_exc)[:160],
+                        }
+                    routes.get_user_bot_state = _safe_state
+
+            conn = get_db()
+            routes.ensure_tables(conn)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS runtime_repairs (
+                    repair_key TEXT PRIMARY KEY,
+                    applied_at TEXT DEFAULT (datetime('now'))
+                )
+                """
+            )
+
+            marker = conn.execute(
+                "SELECT repair_key FROM runtime_repairs WHERE repair_key=?",
+                ("rakesh_paper_runtime_20260826_v1",),
+            ).fetchone()
+            if marker:
+                return
+
+            user = conn.execute(
+                """
+                SELECT id, name FROM users
+                WHERE lower(name) LIKE '%rakesh%'
+                  AND lower(name) LIKE '%vijay%'
+                ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+            if not user:
+                raise RuntimeError("Rakesh Vijayvargiya user not found")
+
+            settings = routes.get_strategy_settings(conn, user["id"])
+            mode = str(settings.get("trading_mode", "paper")).lower()
+            if mode != "paper":
+                raise RuntimeError(
+                    f"Safety stop: Rakesh account mode is {mode}, not PAPER"
+                )
+
+            # Persist ON first so normal Railway/runtime recovery owns the engine.
+            routes.save_bot_status(conn, user["id"], 1, "PAPER_MODE")
+            conn.execute(
+                "INSERT OR IGNORE INTO runtime_repairs (repair_key) VALUES (?)",
+                ("rakesh_paper_runtime_20260826_v1",),
+            )
+            conn.commit()
+            user_id = int(user["id"])
+            conn.close()
+            conn = None
+
+            recovery = routes._start_saved_runtime_engine(user_id)
+            print(
+                "Rakesh PAPER runtime hotfix | "
+                f"user={user_id} | started={recovery.get('started')} | "
+                f"reason={recovery.get('reason')}"
+            )
+            return
+        except Exception as exc:
+            print(
+                "Rakesh PAPER runtime hotfix retry | "
+                f"attempt={attempt + 1} | error={str(exc)[:180]}"
+            )
+            time.sleep(5)
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+
+threading.Thread(
+    target=_repair_rakesh_paper_runtime_once,
+    name="rakesh-paper-runtime-hotfix",
+    daemon=True,
+).start()
