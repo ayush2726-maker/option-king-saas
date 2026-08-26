@@ -211,3 +211,12 @@ try:
     from bot.upstox_open_quote_batch_patch import schedule_upstox_open_quote_batch_patch
     schedule_upstox_open_quote_batch_patch()
 except Exception: pass
+
+# LIVE-only broker resident protection. Paper and live continue to share the
+# exact same strategy/entry/exit/risk engine; after a live fill, the current
+# runtime SL is mirrored to a real Upstox/Angel STOPLOSS order and only tightened.
+# If the app/feed stalls, the last broker SL remains active independently.
+try:
+    from bot.live_broker_protection_v1 import schedule_live_broker_protection
+    schedule_live_broker_protection()
+except Exception: pass
