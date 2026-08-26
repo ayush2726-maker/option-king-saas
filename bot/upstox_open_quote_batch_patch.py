@@ -1,18 +1,15 @@
 """Batch Upstox OPEN-position LTP reads per monitor cycle.
 
-Avoid one market-quote request per open trade. The old 5-second monitor could
-multiply requests across positions/recovery loops and push the Upstox market-data
-API into 429/rate-limit behaviour, after which last_ltp stayed frozen and every
-trade card showed STALE.
-
-This patch changes quote transport only. Entry, exit, SL, sizing and strategy
-logic remain unchanged.
+Avoid one market-quote request per open trade. Successful batched quotes also
+stamp quote_updated_at directly here so freshness cannot depend on patch order.
+Entry, exit, SL, sizing and strategy logic remain unchanged.
 """
 from __future__ import annotations
 
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 
 _PATCHED = False
 _LOCK = threading.Lock()
@@ -93,6 +90,30 @@ def _batch_quotes(runtime, obj, rows):
     return output
 
 
+def _stamp_success(conn, trade, result):
+    try:
+        ltp = float((result or {}).get("ltp") or 0)
+        if not (isinstance(result, dict) and result.get("success") and ltp > 0):
+            return
+        conn.execute(
+            """
+            UPDATE paper_trades
+            SET quote_updated_at=?, quote_source=?,
+                quote_failed_at=NULL, quote_error=NULL,
+                quote_failure_count=0
+            WHERE id=? AND status='OPEN'
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                "UPSTOX_BATCH_LTP_V2",
+                trade["id"],
+            ),
+        )
+        conn.commit()
+    except Exception:
+        pass
+
+
 def _patch(runtime):
     global _PATCHED
     with _LOCK:
@@ -112,14 +133,17 @@ def _patch(runtime):
             def fetch_from_batch(trade):
                 result = batched.get(trade["id"])
                 if result is not None:
+                    _stamp_success(conn, trade, result)
                     return result
-                return quote_fetcher(trade)
+                result = quote_fetcher(trade)
+                _stamp_success(conn, trade, result)
+                return result
 
-            state["open_quote_transport"] = "UPSTOX_BATCH_LTP_V1"
+            state["open_quote_transport"] = "UPSTOX_BATCH_LTP_V2"
             return original(conn, user_id, rows, scans, fetch_from_batch, live_order, state)
 
         runtime._manage_rows = manage_rows_batched
-        runtime.UPSTOX_OPEN_QUOTE_BATCH_PATCH = "V1"
+        runtime.UPSTOX_OPEN_QUOTE_BATCH_PATCH = "V2"
         _PATCHED = True
 
 
