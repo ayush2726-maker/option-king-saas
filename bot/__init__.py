@@ -104,14 +104,10 @@ try:
     apply_baseline_setup_training_v5_patch()
 except Exception: pass
 try:
-    # Closed-source GainzAlgo logic is never copied. Authenticated TradingView
-    # alerts become shadow features and must prove chronological value first.
     from bot.gainzalgo_shadow_v1 import apply_gainzalgo_shadow_v1_patch
     apply_gainzalgo_shadow_v1_patch()
 except Exception: pass
 try:
-    # Free broker-candle regime inputs. They remain shadow features and cannot
-    # veto or reduce the baseline strategy's trade frequency.
     from bot.free_regime_indicators_v1 import apply_free_regime_indicators_v1_patch
     apply_free_regime_indicators_v1_patch()
 except Exception: pass
@@ -124,7 +120,6 @@ try:
     apply_adaptive_runtime_binding_v3()
 except Exception: pass
 
-# Keep same-index + same-side cooldown, but do not globally freeze all setups.
 try:
     from bot import opening_orb_loss_circuit_patch as _opening_loss_circuit
     def _no_global_loss_block(conn, user_id):
@@ -136,95 +131,59 @@ try:
     from bot.execution_reason_visibility_patch import apply_execution_reason_visibility_patch
     apply_execution_reason_visibility_patch()
 except Exception: pass
-
-# Accuracy layer: DMI + RSI momentum + market structure + regime awareness.
-# It is deliberately score-based rather than a new hard blocker, so a single
-# indicator disagreement cannot freeze otherwise valid AUTO setups.
 try:
     from bot.regime_accuracy_confirmation_patch import apply_regime_accuracy_confirmation_patch
     apply_regime_accuracy_confirmation_patch()
 except Exception: pass
-
-# Risk control must be active in PAPER/LIVE runtime, not just backtests.
-# This caps planned loss by equity risk and enables the post-ATR-loss guard.
 try:
     from bot.risk_control_v2_patch import apply_risk_control_v2_patch
     apply_risk_control_v2_patch()
 except Exception: pass
-
-# First profit lock: exact broker/instrument/quantity costs + 4% net profit.
-# It latches immediately at that exact price; later R-based runner stages remain.
 try:
     from bot.breakeven_4pct_patch import apply_breakeven_4pct_patch
     apply_breakeven_4pct_patch()
 except Exception: pass
-
-# Exit an invalidated CE/PE as soon as the completed-candle scan confirms a
-# strong opposite trend. Do not wait for the wider premium SL to be touched.
 try:
     from bot.fast_opposite_trend_exit_patch import apply_fast_opposite_trend_exit_patch
     apply_fast_opposite_trend_exit_patch()
 except Exception: pass
-
-# Extended F&O close timing: no fresh entries after 15:25 IST, while existing
-# positions may continue until 15:35 unless another exit rule triggers first.
 try:
     from bot.market_close_1540_cutoff_patch import apply_market_close_1540_cutoff_patch
     apply_market_close_1540_cutoff_patch()
 except Exception: pass
-
-# Non-live SaaS data source: PAPER, charts/sector rotation and backtests may use
-# the owner's broker market-data session. LIVE execution is deliberately not
-# touched and still requires each user's own broker.
 try:
     from bot.shared_nonlive_data_feed_patch import apply_shared_nonlive_data_feed_patch
     apply_shared_nonlive_data_feed_patch()
 except Exception: pass
-
-# Open-position quote recovery: if a broker session becomes stale, re-login the
-# same broker object and retry token/symbol LTP variants before leaving STALE.
 try:
     from bot.live_quote_broker_relogin_patch import schedule_live_quote_broker_relogin_patch
     schedule_live_quote_broker_relogin_patch()
 except Exception: pass
-
-# Last-resort stale quote path: for OPEN rows still stale after runtime/session
-# recovery, create a fresh broker session and fetch the premium directly. This
-# keeps P&L and premium SL management alive even if the main AUTO session wedges.
 try:
     from bot.direct_stale_quote_recovery_v1 import schedule_direct_stale_quote_recovery
     schedule_direct_stale_quote_recovery()
 except Exception: pass
-
-# Freshness authority: timestamp the row at the exact moment a broker LTP read
-# succeeds. This prevents false STALE badges when later exit wrappers replace
-# _update_open while the quote feed itself is actually healthy.
 try:
     from bot.quote_success_timestamp_v1 import schedule_quote_success_timestamp_patch
     schedule_quote_success_timestamp_patch()
 except Exception: pass
-
-# Upstox OPEN trades refresh in one batched market-quote request per exchange
-# instead of one request per trade. This removes the quote-request multiplication
-# that can drive the shared paper-data session into 429/rate-limit stalls.
 try:
     from bot.upstox_open_quote_batch_patch import schedule_upstox_open_quote_batch_patch
     schedule_upstox_open_quote_batch_patch()
 except Exception: pass
-
-# LIVE-only broker resident protection. Paper and live continue to share the
-# exact same strategy/entry/exit/risk engine; after a live fill, the current
-# runtime SL is mirrored to a real Upstox/Angel STOPLOSS order and only tightened.
-# If the app/feed stalls, the last broker SL remains active independently.
 try:
     from bot.live_broker_protection_v1 import schedule_live_broker_protection
     schedule_live_broker_protection()
 except Exception: pass
-
-# UI and runtime freshness must match the lower-frequency batched/recovery quote
-# cadence. A quote is now shown STALE only after 45s without a successful LTP,
-# preventing false STALE labels and unnecessary broker-session restarts.
 try:
     from bot.quote_freshness_harmonizer_v1 import schedule_quote_freshness_harmonizer
     schedule_quote_freshness_harmonizer()
+except Exception: pass
+
+# PAPER stale recovery must follow the same market-data broker chain as PAPER
+# itself. If the selected broker changes while a trade is open, try the effective
+# personal/shared-owner data brokers before leaving the card frozen.
+try:
+    from bot.paper_quote_multi_broker_recovery_v1 import schedule_paper_quote_multi_broker_recovery
+    schedule_paper_quote_multi_broker_recovery()
 except Exception: pass
