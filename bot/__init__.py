@@ -203,3 +203,11 @@ try:
     from bot.quote_success_timestamp_v1 import schedule_quote_success_timestamp_patch
     schedule_quote_success_timestamp_patch()
 except Exception: pass
+
+# Upstox OPEN trades refresh in one batched market-quote request per exchange
+# instead of one request per trade. This removes the quote-request multiplication
+# that can drive the shared paper-data session into 429/rate-limit stalls.
+try:
+    from bot.upstox_open_quote_batch_patch import schedule_upstox_open_quote_batch_patch
+    schedule_upstox_open_quote_batch_patch()
+except Exception: pass
