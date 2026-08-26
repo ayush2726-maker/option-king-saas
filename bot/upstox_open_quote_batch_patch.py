@@ -1,8 +1,10 @@
 """Batch Upstox OPEN-position LTP reads per monitor cycle.
 
-Avoid one market-quote request per open trade. Successful batched quotes also
-stamp quote_updated_at directly here so freshness cannot depend on patch order.
-Entry, exit, SL, sizing and strategy logic remain unchanged.
+Avoid one market-quote request per open trade. Upstox returns batch quote keys
+as full instrument keys (for example NSE_FO|12345), while paper_trades may store
+only the numeric token. Normalize both forms so a successful batch response is
+actually matched back to the trade. Successful quotes stamp quote_updated_at
+immediately. Entry, exit, SL, sizing and strategy logic remain unchanged.
 """
 from __future__ import annotations
 
@@ -38,6 +40,43 @@ def _upstox_obj_from_fetcher(fetcher):
             obj = value
     if broker_name == "upstox" and obj is not None:
         return obj
+    return None
+
+
+def _full_key(obj, ref, exchange):
+    try:
+        return str(obj._quote_instrument(ref, exchange))
+    except Exception:
+        raw = str(ref or "").strip()
+        if "|" in raw:
+            return raw
+        segment = "BSE_FO" if str(exchange or "").upper().startswith(("BSE", "BFO")) else "NSE_FO"
+        return f"{segment}|{raw}"
+
+
+def _find_quote(obj, quotes, ref, exchange):
+    """Match Upstox batch output regardless of response key representation."""
+    raw = str(ref or "").strip()
+    full = _full_key(obj, raw, exchange)
+
+    # Fast exact forms first.
+    for key in (raw, full, full.replace("|", ":", 1)):
+        quote = quotes.get(key)
+        if isinstance(quote, dict) and quote.get("success"):
+            return quote
+
+    # Upstox can key by trading symbol while returning instrument_token inside
+    # the quote. Match that token as the authoritative fallback.
+    raw_tail = raw.split("|", 1)[-1]
+    full_tail = full.split("|", 1)[-1]
+    for key, quote in quotes.items():
+        if not isinstance(quote, dict) or not quote.get("success"):
+            continue
+        returned = str(quote.get("instrument_token") or "").strip()
+        key_norm = str(key or "").replace(":", "|", 1)
+        key_tail = key_norm.split("|", 1)[-1]
+        if returned in {raw, raw_tail, full, full_tail} or key_tail in {raw, raw_tail, full_tail}:
+            return quote
     return None
 
 
@@ -79,13 +118,13 @@ def _batch_quotes(runtime, obj, rows):
             ref, ex = trade_ref.get(trade["id"], (None, None))
             if ex != exchange:
                 continue
-            quote = quotes.get(ref)
-            if quote and quote.get("success"):
+            quote = _find_quote(obj, quotes, ref, exchange)
+            if quote:
                 output[trade["id"]] = dict(quote)
             else:
                 output[trade["id"]] = {
                     "success": False,
-                    "message": f"No batched LTP data for {ref}",
+                    "message": f"No batched LTP data for {ref}; keys={list(quotes)[:4]}",
                 }
     return output
 
@@ -105,7 +144,7 @@ def _stamp_success(conn, trade, result):
             """,
             (
                 datetime.now(timezone.utc).isoformat(),
-                "UPSTOX_BATCH_LTP_V2",
+                str(result.get("quote_source") or "UPSTOX_BATCH_LTP_V3"),
                 trade["id"],
             ),
         )
@@ -139,11 +178,11 @@ def _patch(runtime):
                 _stamp_success(conn, trade, result)
                 return result
 
-            state["open_quote_transport"] = "UPSTOX_BATCH_LTP_V2"
+            state["open_quote_transport"] = "UPSTOX_BATCH_LTP_V3_KEYFIX"
             return original(conn, user_id, rows, scans, fetch_from_batch, live_order, state)
 
         runtime._manage_rows = manage_rows_batched
-        runtime.UPSTOX_OPEN_QUOTE_BATCH_PATCH = "V2"
+        runtime.UPSTOX_OPEN_QUOTE_BATCH_PATCH = "V3_KEYFIX"
         _PATCHED = True
 
 
