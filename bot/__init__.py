@@ -195,3 +195,11 @@ try:
     from bot.direct_stale_quote_recovery_v1 import schedule_direct_stale_quote_recovery
     schedule_direct_stale_quote_recovery()
 except Exception: pass
+
+# Freshness authority: timestamp the row at the exact moment a broker LTP read
+# succeeds. This prevents false STALE badges when later exit wrappers replace
+# _update_open while the quote feed itself is actually healthy.
+try:
+    from bot.quote_success_timestamp_v1 import schedule_quote_success_timestamp_patch
+    schedule_quote_success_timestamp_patch()
+except Exception: pass
