@@ -220,3 +220,11 @@ try:
     from bot.live_broker_protection_v1 import schedule_live_broker_protection
     schedule_live_broker_protection()
 except Exception: pass
+
+# UI and runtime freshness must match the lower-frequency batched/recovery quote
+# cadence. A quote is now shown STALE only after 45s without a successful LTP,
+# preventing false STALE labels and unnecessary broker-session restarts.
+try:
+    from bot.quote_freshness_harmonizer_v1 import schedule_quote_freshness_harmonizer
+    schedule_quote_freshness_harmonizer()
+except Exception: pass
