@@ -13,10 +13,14 @@ from datetime import datetime, timezone
 from auth.utils import decrypt_credential
 from database import get_db
 
-_INTERVAL = 5
-_STALE_SECONDS = 10
+# Recovery is intentionally slower than the normal open-position monitor. The
+# previous 5-second fallback could amplify Upstox market-data calls during a
+# stale/rate-limited period and keep the account throttled indefinitely.
+_INTERVAL = 30
+_STALE_SECONDS = 20
 _started = False
 _lock = threading.Lock()
+_last_attempt = {}
 
 
 def _parse(value):
@@ -93,13 +97,22 @@ def _quote(obj, broker, trade):
             result = obj.get_ltp(ref, exchange=exchange)
             if result.get("success") and float(result.get("ltp") or 0) > 0:
                 return float(result["ltp"])
-            errors.append(str(result.get("message") or "LTP_FAILED"))
+            message = str(result.get("message") or "LTP_FAILED")
+            if result.get("rate_limited") or "429" in message:
+                raise RuntimeError("UPSTOX_RATE_LIMIT | " + message[:220])
+            errors.append(message)
         except Exception as exc:
             errors.append(str(exc))
     raise RuntimeError(" | ".join(errors[-3:]) or "LTP_FAILED")
 
 
 def _recover_user(user_id, rows):
+    now = time.monotonic()
+    last = _last_attempt.get(int(user_id), 0.0)
+    if now - last < 30:
+        return
+    _last_attempt[int(user_id)] = now
+
     conn = get_db()
     try:
         broker, creds = _credentials(conn, user_id)
