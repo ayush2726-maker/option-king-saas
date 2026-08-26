@@ -3,6 +3,9 @@
 from bot.bullish_balance_cas_guard_v2 import (
     CAS_EFFECTIVE_DATE,
     CAS_END_MINUTE,
+    FORCE_EXIT_MINUTE,
+    FRESH_ENTRY_BLOCK_REASON,
+    FRESH_ENTRY_CUTOFF_MINUTE,
     CAS_SAFE_EXIT_MINUTE,
     CAS_START_MINUTE,
     DERIVATIVES_CLOSE_MINUTE,
@@ -12,6 +15,7 @@ from bot.bullish_balance_cas_guard_v2 import (
     apply_cas_closing_guard_patch,
     classify_completed_candle,
     eod_exit_minute_for,
+    fresh_entry_blocked,
     momentum_pattern,
     momentum_score_flags,
 )
@@ -19,6 +23,9 @@ from bot.bullish_balance_cas_guard_v2 import (
 __all__ = [
     "CAS_EFFECTIVE_DATE",
     "CAS_END_MINUTE",
+    "FORCE_EXIT_MINUTE",
+    "FRESH_ENTRY_BLOCK_REASON",
+    "FRESH_ENTRY_CUTOFF_MINUTE",
     "CAS_SAFE_EXIT_MINUTE",
     "CAS_START_MINUTE",
     "DERIVATIVES_CLOSE_MINUTE",
@@ -28,6 +35,7 @@ __all__ = [
     "apply_cas_closing_guard_patch",
     "classify_completed_candle",
     "eod_exit_minute_for",
+    "fresh_entry_blocked",
     "momentum_pattern",
     "momentum_score_flags",
 ]

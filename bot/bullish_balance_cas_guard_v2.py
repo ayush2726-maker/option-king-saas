@@ -2,7 +2,8 @@
 
 - Neutral/doji candles never count as PE momentum.
 - A trend-aligned pullback/reclaim is accepted symmetrically for CE and PE.
-- From 03-Aug-2026, AUTO positions exit at 15:12 IST before CAS starts at 15:15.
+- Fresh AUTO entries stop at 15:15 IST and open positions force-exit at 15:25 IST.
+- The entry lock resets automatically at the next trading session.
 
 The protected score threshold, MTF, ADX, anti-chase, sizing, cooldown, broker
 orders, ATR SL and profit-lock logic are not changed.
@@ -16,9 +17,12 @@ from bot import angel_fetcher
 from bot import auto_portfolio_runtime as runtime
 
 
-PATCH_VERSION = "BULLISH_BALANCE_CAS_GUARD_V2"
+PATCH_VERSION = "ENTRY_1515_FORCE_EXIT_1525_V3"
+FRESH_ENTRY_CUTOFF_MINUTE = 15 * 60 + 15
+FORCE_EXIT_MINUTE = 15 * 60 + 25
+FRESH_ENTRY_BLOCK_REASON = "FRESH_ENTRY_CUTOFF_15_15_IST"
 CAS_EFFECTIVE_DATE = date(2026, 8, 3)
-CAS_SAFE_EXIT_MINUTE = 15 * 60 + 12
+CAS_SAFE_EXIT_MINUTE = FORCE_EXIT_MINUTE
 CAS_START_MINUTE = 15 * 60 + 15
 CAS_END_MINUTE = 15 * 60 + 35
 DERIVATIVES_CLOSE_MINUTE = 15 * 60 + 40
@@ -58,7 +62,12 @@ def _cas_day(value=None):
 
 
 def eod_exit_minute_for(value=None):
-    return CAS_SAFE_EXIT_MINUTE if _cas_day(value) else LEGACY_EOD_EXIT_MINUTE
+    return FORCE_EXIT_MINUTE if _cas_day(value) else LEGACY_EOD_EXIT_MINUTE
+
+
+def fresh_entry_blocked(value=None):
+    current = value or _now_ist()
+    return _cas_day(current) and _minute(current) >= FRESH_ENTRY_CUTOFF_MINUTE
 
 
 def classify_completed_candle(row, atr=0.0):
@@ -242,11 +251,18 @@ def apply_balanced_momentum_patch():
 
 
 def apply_cas_closing_guard_patch():
-    if getattr(runtime, "_okai_cas_closing_guard_v2", False):
+    if getattr(runtime, "_okai_entry_1515_force_exit_1525_v3", False):
         return
 
     original_evaluate_exit = runtime._evaluate_exit
     original_state_update = runtime._state_update
+    original_open_common = runtime._open_common
+    original_live_gateway_entry = getattr(
+        angel_fetcher,
+        "_manage_live_gateway_entry",
+        None,
+    )
+    original_queue_live_entry = getattr(angel_fetcher, "queue_live_entry", None)
 
     def evaluate_exit_cas_safe(trade, ltp, market_data, candle_id):
         result = original_evaluate_exit(trade, ltp, market_data, candle_id)
@@ -256,18 +272,105 @@ def apply_cas_closing_guard_patch():
         current = _now_ist()
         if (
             _cas_day(current)
-            and _minute(current) >= CAS_SAFE_EXIT_MINUTE
+            and _minute(current) >= FORCE_EXIT_MINUTE
             and not result.get("reason")
         ):
             result = dict(result)
-            result["reason"] = "CAS SAFETY EXIT 15:12 IST"
+            actual_exit_ist = current.strftime("%H:%M")
+            result["reason"] = f"FORCE EXIT {actual_exit_ist} IST"
             result["cas_guard"] = {
                 "version": PATCH_VERSION,
-                "safe_exit_ist": "15:12",
+                "fresh_entry_cutoff_ist": "15:15",
+                "force_exit_ist": "15:25",
+                "actual_exit_ist": actual_exit_ist,
                 "cas_window_ist": "15:15-15:35",
                 "derivatives_close_ist": "15:40",
             }
         return result
+
+    def open_common_with_1515_cutoff(
+        conn,
+        user_id,
+        broker_name,
+        selected,
+        settings,
+        resolved,
+        quote_price,
+        quality,
+        lot_size,
+        live_order,
+        live_cash,
+        state,
+    ):
+        current = _now_ist()
+        if fresh_entry_blocked(current):
+            details = {
+                "fresh_entry_cutoff": "15:15",
+                "force_exit": "15:25",
+                "version": PATCH_VERSION,
+                "blocked_at_ist": current.strftime("%H:%M"),
+            }
+            try:
+                return runtime._record_preopen_failure(
+                    state,
+                    broker_name,
+                    selected,
+                    FRESH_ENTRY_BLOCK_REASON,
+                    "TIME_GUARD",
+                    details,
+                )
+            except Exception:
+                attempt = {
+                    "allowed": False,
+                    "reason": FRESH_ENTRY_BLOCK_REASON,
+                    "stage": "TIME_GUARD",
+                    **details,
+                }
+                state["entry_guard"] = dict(attempt)
+                state["entry_attempt"] = dict(attempt)
+                state["last_entry_attempt"] = dict(attempt)
+                state["entry_block_reason"] = FRESH_ENTRY_BLOCK_REASON
+                state["last_entry_block_reason"] = FRESH_ENTRY_BLOCK_REASON
+                return False
+
+        return original_open_common(
+            conn,
+            user_id,
+            broker_name,
+            selected,
+            settings,
+            resolved,
+            quote_price,
+            quality,
+            lot_size,
+            live_order,
+            live_cash,
+            state,
+        )
+
+    def live_gateway_entry_with_1515_cutoff(*args, **kwargs):
+        current = _now_ist()
+        if fresh_entry_blocked(current):
+            return {
+                "queued": False,
+                "reason": FRESH_ENTRY_BLOCK_REASON,
+                "fresh_entry_cutoff": "15:15",
+                "force_exit": "15:25",
+                "version": PATCH_VERSION,
+                "blocked_at_ist": current.strftime("%H:%M"),
+            }
+        return original_live_gateway_entry(*args, **kwargs)
+
+    def queue_live_entry_with_1525_exit(user_id, payload, *args, **kwargs):
+        safe_payload = dict(payload or {})
+        safe_payload["fresh_entry_cutoff"] = "15:15"
+        safe_payload["force_exit_at"] = "15:25"
+        return original_queue_live_entry(
+            user_id,
+            safe_payload,
+            *args,
+            **kwargs,
+        )
 
     def state_update_cas_safe(state, scans, selected, settings, rows):
         original_state_update(state, scans, selected, settings, rows)
@@ -279,11 +382,20 @@ def apply_cas_closing_guard_patch():
                     "cas_effective_date": CAS_EFFECTIVE_DATE.isoformat(),
                     "cas_window_ist": "15:15-15:35",
                     "derivatives_close_ist": "15:40",
-                    "hard_eod_exit_ist": "15:12",
+                    "hard_eod_exit_ist": "15:25",
+                    "fresh_entry_cutoff_ist": "15:15",
+                    "force_exit_ist": "15:25",
+                    "fresh_entry_locked": fresh_entry_blocked(),
                     "cas_feed_mode": "NO_INDICATIVE_AUCTION_FEED_PRE_CLOSE_EXIT",
                 }
             )
 
     runtime._evaluate_exit = evaluate_exit_cas_safe
+    runtime._open_common = open_common_with_1515_cutoff
     runtime._state_update = state_update_cas_safe
+    if callable(original_live_gateway_entry):
+        angel_fetcher._manage_live_gateway_entry = live_gateway_entry_with_1515_cutoff
+    if callable(original_queue_live_entry):
+        angel_fetcher.queue_live_entry = queue_live_entry_with_1525_exit
     runtime._okai_cas_closing_guard_v2 = True
+    runtime._okai_entry_1515_force_exit_1525_v3 = True
