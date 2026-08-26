@@ -2,9 +2,12 @@ from datetime import datetime, timezone
 
 from bot.bullish_balance_cas_guard_patch import (
     CAS_SAFE_EXIT_MINUTE,
+    FORCE_EXIT_MINUTE,
+    FRESH_ENTRY_CUTOFF_MINUTE,
     LEGACY_EOD_EXIT_MINUTE,
     classify_completed_candle,
     eod_exit_minute_for,
+    fresh_entry_blocked,
     momentum_pattern,
     momentum_score_flags,
 )
@@ -112,3 +115,22 @@ def test_cas_exit_is_date_aware():
     # Values represent IST-like wall-clock timestamps passed directly to helper.
     assert eod_exit_minute_for(before_cas) == LEGACY_EOD_EXIT_MINUTE
     assert eod_exit_minute_for(after_cas) == CAS_SAFE_EXIT_MINUTE
+
+
+def test_fresh_entry_stops_at_1515_and_resets_next_session():
+    before_cutoff = datetime(2026, 8, 26, 15, 14, tzinfo=timezone.utc)
+    at_cutoff = datetime(2026, 8, 26, 15, 15, tzinfo=timezone.utc)
+    next_session = datetime(2026, 8, 27, 9, 15, tzinfo=timezone.utc)
+
+    assert FRESH_ENTRY_CUTOFF_MINUTE == 15 * 60 + 15
+    assert fresh_entry_blocked(before_cutoff) is False
+    assert fresh_entry_blocked(at_cutoff) is True
+    assert fresh_entry_blocked(next_session) is False
+
+
+def test_force_exit_is_1525():
+    after_rule_start = datetime(2026, 8, 26, 15, 25, tzinfo=timezone.utc)
+
+    assert FORCE_EXIT_MINUTE == 15 * 60 + 25
+    assert CAS_SAFE_EXIT_MINUTE == FORCE_EXIT_MINUTE
+    assert eod_exit_minute_for(after_rule_start) == FORCE_EXIT_MINUTE
