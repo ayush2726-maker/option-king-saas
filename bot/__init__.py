@@ -71,22 +71,16 @@ try:
     apply_supertrend_replay_final_patch()
 except Exception: pass
 
-# Upstox option-chain must use an explicit nearest expiry date. Never allow the
-# API's generic current-week selection to silently jump NIFTY to a farther week.
 try:
     from bot.upstox_nearest_expiry_fix_v1 import apply_upstox_nearest_expiry_fix
     apply_upstox_nearest_expiry_fix()
 except Exception: pass
 
-# EMA/VWAP distance stretch is learning/telemetry only now; it must not veto a
-# qualified setup. All other score/safety/risk gates remain intact.
 try:
     from bot.ema_anti_chase_observation_only_patch import apply_ema_anti_chase_observation_only_patch
     apply_ema_anti_chase_observation_only_patch()
 except Exception: pass
 
-# Adaptive learning stack. All remains shadow-only until chronological
-# validation beats baseline and calibration gates.
 try:
     from bot.adaptive_learning_v3_patch import apply_adaptive_learning_v3_patch
     apply_adaptive_learning_v3_patch()
@@ -180,18 +174,20 @@ try:
     schedule_quote_freshness_harmonizer()
 except Exception: pass
 
-# PAPER stale recovery must follow the same market-data broker chain as PAPER
-# itself. If the selected broker changes while a trade is open, try the effective
-# personal/shared-owner data brokers before leaving the card frozen.
 try:
     from bot.paper_quote_multi_broker_recovery_v1 import schedule_paper_quote_multi_broker_recovery
     schedule_paper_quote_multi_broker_recovery()
 except Exception: pass
 
-# One authority takes over only when the normal runtime misses fresh PAPER LTPs.
-# It disables the older duplicate pollers, batches Upstox, respects 429 backoff,
-# and stamps freshness directly after a successful quote.
 try:
     from bot.paper_quote_authority_v2 import schedule_paper_quote_authority_v2
     schedule_paper_quote_authority_v2()
+except Exception: pass
+
+# If Upstox market-quote LTP still stalls, recover the exact strike/side from the
+# official option-chain endpoint and feed that LTP through the same exit/trailing
+# evaluator. This is PAPER-only and does not change entry/risk/strategy rules.
+try:
+    from bot.upstox_option_chain_quote_fallback_v1 import schedule_upstox_option_chain_quote_fallback
+    schedule_upstox_option_chain_quote_fallback()
 except Exception: pass
