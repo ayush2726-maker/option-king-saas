@@ -187,3 +187,11 @@ try:
     from bot.paper_quote_multi_broker_recovery_v1 import schedule_paper_quote_multi_broker_recovery
     schedule_paper_quote_multi_broker_recovery()
 except Exception: pass
+
+# One authority takes over only when the normal runtime misses fresh PAPER LTPs.
+# It disables the older duplicate pollers, batches Upstox, respects 429 backoff,
+# and stamps freshness directly after a successful quote.
+try:
+    from bot.paper_quote_authority_v2 import schedule_paper_quote_authority_v2
+    schedule_paper_quote_authority_v2()
+except Exception: pass
