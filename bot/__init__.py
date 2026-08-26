@@ -180,3 +180,10 @@ try:
     from bot.shared_nonlive_data_feed_patch import apply_shared_nonlive_data_feed_patch
     apply_shared_nonlive_data_feed_patch()
 except Exception: pass
+
+# Open-position quote recovery: if a broker session becomes stale, re-login the
+# same broker object and retry token/symbol LTP variants before leaving STALE.
+try:
+    from bot.live_quote_broker_relogin_patch import schedule_live_quote_broker_relogin_patch
+    schedule_live_quote_broker_relogin_patch()
+except Exception: pass
