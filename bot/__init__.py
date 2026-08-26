@@ -187,3 +187,11 @@ try:
     from bot.live_quote_broker_relogin_patch import schedule_live_quote_broker_relogin_patch
     schedule_live_quote_broker_relogin_patch()
 except Exception: pass
+
+# Last-resort stale quote path: for OPEN rows still stale after runtime/session
+# recovery, create a fresh broker session and fetch the premium directly. This
+# keeps P&L and premium SL management alive even if the main AUTO session wedges.
+try:
+    from bot.direct_stale_quote_recovery_v1 import schedule_direct_stale_quote_recovery
+    schedule_direct_stale_quote_recovery()
+except Exception: pass
