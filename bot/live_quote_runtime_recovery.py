@@ -8,6 +8,7 @@ quote. This module:
 * timestamps every successful runtime quote persisted for an open position;
 * restarts persisted running users that still have OPEN positions at startup;
 * self-recovers the runtime when /bot/trade-live is requested after a restart;
+* runs a 5-second watchdog so stale open quotes recover even without UI refresh;
 * disables HTTP/proxy caching for live-trade responses.
 
 No signal, entry, exit, SL, quantity, broker-fill or strategy rule is changed.
@@ -28,7 +29,7 @@ from bot import auto_portfolio_runtime as runtime
 from database import get_db
 
 
-VERSION = "LIVE_QUOTE_RUNTIME_RECOVERY_V3"
+VERSION = "LIVE_QUOTE_RUNTIME_RECOVERY_V4"
 LIVE_PATHS = {"/bot/trade-live"}
 _QUOTE_COLUMNS = {
     "quote_updated_at",
@@ -39,11 +40,14 @@ _QUOTE_COLUMNS = {
 }
 _quote_columns_ready = False
 _quote_columns_lock = threading.Lock()
-STALE_RUNTIME_SECONDS = 20
-STALE_RESTART_COOLDOWN_SECONDS = 45
+STALE_RUNTIME_SECONDS = 10
+STALE_RESTART_COOLDOWN_SECONDS = 15
+WATCHDOG_INTERVAL_SECONDS = 5
 _restart_locks: dict[int, threading.Lock] = {}
 _restart_locks_guard = threading.Lock()
 _last_restart_attempt: dict[int, float] = {}
+_watchdog_started = False
+_watchdog_lock = threading.Lock()
 
 
 def _utc_now() -> str:
@@ -103,6 +107,7 @@ def _ensure_quote_columns(conn) -> None:
 def apply_live_quote_timestamp_patch() -> None:
     """Persist the actual successful broker-quote time on every monitor tick."""
     if getattr(runtime, "_okai_live_quote_timestamp_v1", False):
+        start_live_quote_watchdog()
         return
 
     previous_ensure_schema = runtime._ensure_schema
@@ -135,6 +140,7 @@ def apply_live_quote_timestamp_patch() -> None:
     runtime._update_open = update_open_with_quote_time
     runtime._okai_live_quote_timestamp_v1 = True
     runtime._okai_live_quote_timestamp_version = VERSION
+    start_live_quote_watchdog()
 
 
 def _parse_utc(value: Any) -> datetime | None:
@@ -178,10 +184,7 @@ def _open_quote_health(conn, user_id: int) -> dict[str, Any]:
         parsed = _parse_utc(value)
         ages.append(max(0.0, (now - parsed).total_seconds()) if parsed else None)
 
-    stale_count = sum(
-        age is None or age > STALE_RUNTIME_SECONDS
-        for age in ages
-    )
+    stale_count = sum(age is None or age > STALE_RUNTIME_SECONDS for age in ages)
     return {
         "open_count": len(ages),
         "stale_count": stale_count,
@@ -229,6 +232,10 @@ def _restart_stale_runtime(user_id: int) -> dict[str, Any]:
         except Exception:
             pass
 
+        # stop_user_bot removes the old in-memory state immediately. Give the
+        # old daemon loop a tiny window to observe running=False before a new
+        # authenticated broker session replaces it.
+        time.sleep(0.25)
         recovery = _start_runtime(uid)
         return {
             "attempted": True,
@@ -257,7 +264,7 @@ def _persisted_running(conn, user_id: int) -> bool:
     return False
 
 
-def _open_user_ids(conn) -> list[int]:
+def _all_open_user_ids(conn) -> list[int]:
     try:
         rows = conn.execute(
             """
@@ -273,15 +280,17 @@ def _open_user_ids(conn) -> list[int]:
     output: list[int] = []
     for row in rows:
         try:
-            user_id = int(row["user_id"])
+            output.append(int(row["user_id"]))
         except Exception:
             try:
-                user_id = int(row[0])
+                output.append(int(row[0]))
             except Exception:
-                continue
-        if _persisted_running(conn, user_id):
-            output.append(user_id)
+                pass
     return output
+
+
+def _open_user_ids(conn) -> list[int]:
+    return [uid for uid in _all_open_user_ids(conn) if _persisted_running(conn, uid)]
 
 
 def _runtime_state(user_id: int) -> dict[str, Any]:
@@ -313,15 +322,17 @@ def recover_user_runtime_if_needed(user_id: int) -> dict[str, Any]:
     if state.get("running"):
         conn = get_db()
         try:
-            should_run = _persisted_running(conn, int(user_id))
             health = _open_quote_health(conn, int(user_id))
         except Exception:
-            should_run = False
             health = {"open_count": 0, "stale_count": 0, "all_stale": False}
         finally:
             conn.close()
 
-        if should_run and health.get("all_stale"):
+        # If memory says this bot is RUNNING and every open quote is stale,
+        # restart it even when the persisted run flag drifted out of sync.
+        # The in-memory running state itself is enough proof that this is not a
+        # stopped user's trade being resurrected.
+        if health.get("all_stale"):
             restarted = _restart_stale_runtime(user_id)
             return {
                 **restarted,
@@ -393,12 +404,7 @@ def recover_persisted_open_trade_engines() -> dict[str, Any]:
         if result.get("started") or result.get("already_running"):
             started += 1
         elif result.get("attempted"):
-            failed.append(
-                {
-                    "user_id": user_id,
-                    "reason": result.get("reason"),
-                }
-            )
+            failed.append({"user_id": user_id, "reason": result.get("reason")})
 
     return {
         "eligible_users": len(user_ids),
@@ -406,6 +412,57 @@ def recover_persisted_open_trade_engines() -> dict[str, Any]:
         "failed": failed,
         "version": VERSION,
     }
+
+
+def _watchdog_loop() -> None:
+    """Continuously recover stale quote sessions for open positions."""
+    while True:
+        try:
+            conn = get_db()
+            try:
+                _ensure_quote_columns(conn)
+                user_ids = _all_open_user_ids(conn)
+            finally:
+                conn.close()
+
+            for user_id in user_ids:
+                try:
+                    state = _runtime_state(user_id)
+                    if state.get("running"):
+                        recover_user_runtime_if_needed(user_id)
+                        continue
+
+                    # A missing in-memory runtime is recoverable only when the
+                    # saved bot switch is still ON; stopped users stay stopped.
+                    conn = get_db()
+                    try:
+                        should_run = _persisted_running(conn, user_id)
+                    finally:
+                        conn.close()
+                    if should_run:
+                        recover_user_runtime_if_needed(user_id)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        time.sleep(WATCHDOG_INTERVAL_SECONDS)
+
+
+def start_live_quote_watchdog() -> None:
+    """Start one process-local 5-second stale quote watchdog."""
+    global _watchdog_started
+    if _watchdog_started:
+        return
+    with _watchdog_lock:
+        if _watchdog_started:
+            return
+        thread = threading.Thread(
+            target=_watchdog_loop,
+            name="okai-live-quote-watchdog",
+            daemon=True,
+        )
+        thread.start()
+        _watchdog_started = True
 
 
 class TradeLiveRuntimeRecoveryMiddleware(BaseHTTPMiddleware):
