@@ -244,6 +244,73 @@ def resolve_option_for_date(
     }
 
 
+def resolve_exact_option(
+    underlying: str,
+    expiry,
+    strike: float,
+    option_type: str,
+):
+    """Resolve one exact active Angel contract without changing its strike.
+
+    Open PAPER rows can outlive a selected data-broker change.  Their saved
+    token/symbol then belong to the old broker, so Angel must translate the
+    canonical underlying/expiry/strike/side back to an Angel token before LTP
+    recovery.  Never substitute a nearby strike or a later expiry here.
+    """
+    options = _load_cache()
+    if not options:
+        return None
+
+    name = str(underlying or "").upper().replace(" ", "")
+    side = str(option_type or "").upper()
+    target_expiry = _parse_expiry(expiry)
+    try:
+        target_strike = float(strike)
+    except Exception:
+        return None
+
+    if name not in STRIKE_STEP or side not in ("CE", "PE"):
+        return None
+    if target_expiry is None or target_strike <= 0:
+        return None
+
+    candidates = []
+    for row in options:
+        if str(row.get("name") or "").upper() != name:
+            continue
+        if not str(row.get("symbol") or "").upper().endswith(side):
+            continue
+        if _parse_expiry(row.get("expiry")) != target_expiry:
+            continue
+        row_strike = _strike_of(row)
+        if row_strike is None or abs(row_strike - target_strike) > 0.001:
+            continue
+        candidates.append(row)
+
+    if not candidates:
+        return None
+
+    best = min(candidates, key=lambda row: str(row.get("symbol") or ""))
+    return {
+        "token": str(best.get("token") or ""),
+        "symbol": str(best.get("symbol") or ""),
+        "exch_seg": str(
+            best.get("exch_seg")
+            or EXCHANGE_FOR.get(name, "NFO")
+        ),
+        "exchange": str(
+            best.get("exch_seg")
+            or EXCHANGE_FOR.get(name, "NFO")
+        ),
+        "strike": target_strike,
+        "expiry": target_expiry.isoformat(),
+        "lot_size": _lot_size_of(best, name),
+        "underlying": name,
+        "option_type": side,
+        "selection": "EXACT_ACTIVE_ANGEL_CONTRACT",
+    }
+
+
 def resolve_option(underlying: str, spot_price: float, option_type: str):
     """Resolve today's nearest-expiry ATM option for PAPER/LIVE execution."""
     return resolve_option_for_date(

@@ -85,8 +85,49 @@ def _login(row):
 
 def _quote(obj, broker, trade):
     if broker == "angelone":
-        q = obj.ltpData(trade["exch_seg"], trade["symbol"], trade["token"])
-        return float(q["data"]["ltp"])
+        errors = []
+
+        # Fast path for trades originally opened with Angel identifiers.
+        try:
+            q = obj.ltpData(
+                trade["exch_seg"],
+                trade["symbol"],
+                trade["token"],
+            )
+            ltp = float((q.get("data") or {}).get("ltp") or 0)
+            if ltp > 0:
+                return ltp
+            errors.append(str(q.get("message") or "ANGEL_DIRECT_LTP_EMPTY"))
+        except Exception as exc:
+            errors.append(str(exc))
+
+        # A PAPER trade may have been opened while the shared feed was Upstox.
+        # Its stored token/symbol cannot be sent to Angel. Resolve the exact
+        # canonical contract—never a nearby strike/expiry—and retry Angel LTP.
+        try:
+            from bot.option_chain import resolve_exact_option
+
+            resolved = resolve_exact_option(
+                _row_value(trade, "underlying"),
+                _row_value(trade, "expiry"),
+                _row_value(trade, "strike"),
+                _row_value(trade, "side"),
+            )
+            if not resolved:
+                raise RuntimeError("ANGEL_EXACT_CONTRACT_NOT_FOUND")
+            q = obj.ltpData(
+                resolved["exch_seg"],
+                resolved["symbol"],
+                resolved["token"],
+            )
+            ltp = float((q.get("data") or {}).get("ltp") or 0)
+            if ltp > 0:
+                return ltp
+            errors.append(str(q.get("message") or "ANGEL_RESOLVED_LTP_EMPTY"))
+        except Exception as exc:
+            errors.append(str(exc))
+
+        raise RuntimeError(" | ".join(errors[-3:]) or "ANGEL_LTP_FAILED")
 
     exchange = _row_value(trade, "exch_seg") or ("NSE_FO" if broker == "upstox" else "NFO")
     refs = []
