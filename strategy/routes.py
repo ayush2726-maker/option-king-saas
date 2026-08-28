@@ -7,7 +7,8 @@ from telegram.routes import notify_user
 
 router = APIRouter(prefix="/strategy", tags=["Strategy"])
 
-ALLOWED_INSTRUMENTS = ["NIFTY", "BANKNIFTY", "SENSEX"]
+# BANKNIFTY is intentionally excluded: no new paper/live entries may be saved.
+ALLOWED_INSTRUMENTS = ["NIFTY", "SENSEX"]
 
 DEFAULT_SETTINGS = {
     "mode": "default",
@@ -29,7 +30,7 @@ DEFAULT_SETTINGS = {
     "live_lots": 1,
     "local_gateway_required": True,
     "primary_instrument": "NIFTY",
-    "enabled_instruments": ["NIFTY", "BANKNIFTY", "SENSEX"],
+    "enabled_instruments": ["NIFTY", "SENSEX"],
     "auto_scan": True,
     "max_concurrent_trades": 2,
     "slot_one_percent": 50,
@@ -69,6 +70,32 @@ def clamp_num(v, lo, hi, default):
         return x
     except Exception:
         return default
+
+
+def _sanitize_instrument_settings(settings: dict):
+    """Remove disabled indices from new-entry settings without changing risk rules."""
+    cleaned = dict(settings or {})
+    raw = cleaned.get("enabled_instruments", ALLOWED_INSTRUMENTS)
+    if isinstance(raw, str):
+        raw = [x.strip().upper() for x in raw.split(",")]
+    if not isinstance(raw, list):
+        raw = list(ALLOWED_INSTRUMENTS)
+
+    enabled = []
+    for item in raw:
+        name = str(item).upper()
+        if name in ALLOWED_INSTRUMENTS and name not in enabled:
+            enabled.append(name)
+    if not enabled:
+        enabled = ["NIFTY"]
+
+    primary = str(cleaned.get("primary_instrument", "NIFTY")).upper()
+    if primary not in enabled:
+        primary = enabled[0]
+
+    cleaned["enabled_instruments"] = enabled
+    cleaned["primary_instrument"] = primary
+    return cleaned
 
 def normalize_settings(body: dict):
     base = dict(DEFAULT_SETTINGS)
@@ -153,7 +180,7 @@ def ensure_settings(conn, user_id: int):
             saved = json.loads(row["settings_json"])
             final = dict(DEFAULT_SETTINGS)
             final.update(saved)
-            return final
+            return _sanitize_instrument_settings(final)
         except Exception:
             pass
 
