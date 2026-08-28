@@ -1,7 +1,7 @@
 """
 AUTO Portfolio Runtime V1
 
-- Scan NIFTY, BANKNIFTY and SENSEX.
+- Scan NIFTY and SENSEX; BANKNIFTY is disabled for new entries.
 - Pick the highest-quality eligible setup.
 - Slot 1 uses 50% capital.
 - Slot 2 uses 40% capital in a different index.
@@ -24,7 +24,9 @@ def _legacy():
 
 
 AUTO_ENGINE_MODE = "AUTO_PORTFOLIO_V1"
-ALLOWED_INSTRUMENTS = ("NIFTY", "BANKNIFTY", "SENSEX")
+# Global entry allow-list. BANKNIFTY remains recognizable for managing any
+# already-open position, but it is never scanned or selected for a new entry.
+ALLOWED_INSTRUMENTS = ("NIFTY", "SENSEX")
 SLOT_ALLOCATIONS = {1: 0.50, 2: 0.40, 3: 0.00}
 RESERVE_ALLOCATION = 0.10
 # One position per enabled index; removes the old hard two-position cap.
