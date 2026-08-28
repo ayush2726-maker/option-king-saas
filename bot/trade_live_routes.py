@@ -17,6 +17,7 @@ from bot.net_pnl_history_patch import (
     calculate_row_net_costs,
 )
 from bot.authoritative_ledger import build_authoritative_ledger
+from bot.index_report_card import build_index_report_card
 
 # Imported for startup side effects. It installs equity-risk sizing and stronger
 # post-loss re-entry protection before the bot/backtest patches are activated.
@@ -335,6 +336,42 @@ def _today_summary(trades):
         "closed_pnl": realized,
         "open_pnl": open_pnl,
         "total_pnl": round(realized + open_pnl, 2),
+    }
+
+
+@router.get("/index-report-card")
+def get_index_report_card(
+    authorization: str = Header(None),
+    mode: str = "all",
+):
+    """Return an all-time, user-scoped performance comparison by index."""
+    user = get_current_user(authorization)
+
+    try:
+        backfill_closed_trade_costs(user["id"])
+    except Exception:
+        # The report remains readable when an old cost row cannot be repaired.
+        pass
+
+    conn = get_db()
+    try:
+        report = build_index_report_card(
+            conn,
+            user["id"],
+            mode=mode,
+        )
+    except Exception as exc:
+        return {
+            "success": False,
+            "message": "Index report unavailable: " + str(exc)[:160],
+            "indices": [],
+        }
+    finally:
+        conn.close()
+
+    return {
+        "success": True,
+        **report,
     }
 
 
