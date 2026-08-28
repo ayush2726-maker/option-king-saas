@@ -25,6 +25,11 @@ except Exception:
 router = APIRouter(prefix="/bot", tags=["Bot"])
 
 
+# New-entry allow-list. Keep BANKNIFTY contract metadata below so any position
+# that was already open before this release can still be quoted and exited.
+TRADE_ENABLED_INSTRUMENTS = ("NIFTY", "SENSEX")
+
+
 DEFAULT_SETTINGS = {
     "mode": "default",
     "base_score": 40,
@@ -44,7 +49,7 @@ DEFAULT_SETTINGS = {
     "trading_mode": "paper",
     "paper_capital": 100000,
     "primary_instrument": "NIFTY",
-    "enabled_instruments": ["NIFTY", "BANKNIFTY", "SENSEX"],
+    "enabled_instruments": list(TRADE_ENABLED_INSTRUMENTS),
 }
 
 
@@ -496,9 +501,38 @@ def get_strategy_settings(conn, user_id: int):
 
     settings.setdefault("trading_mode", "paper")
     settings.setdefault("paper_capital", 100000)
-    settings.setdefault("primary_instrument", "NIFTY")
-    settings.setdefault("enabled_instruments", ["NIFTY", "BANKNIFTY", "SENSEX"])
 
+    raw_enabled = settings.get(
+        "enabled_instruments",
+        list(TRADE_ENABLED_INSTRUMENTS),
+    )
+    if isinstance(raw_enabled, str):
+        raw_enabled = [
+            value.strip().upper()
+            for value in raw_enabled.split(",")
+        ]
+    if not isinstance(raw_enabled, list):
+        raw_enabled = list(TRADE_ENABLED_INSTRUMENTS)
+
+    enabled = []
+    for value in raw_enabled:
+        instrument = str(value).upper()
+        if (
+            instrument in TRADE_ENABLED_INSTRUMENTS
+            and instrument not in enabled
+        ):
+            enabled.append(instrument)
+    if not enabled:
+        enabled = ["NIFTY"]
+
+    primary = str(
+        settings.get("primary_instrument", "NIFTY")
+    ).upper()
+    if primary not in enabled:
+        primary = enabled[0]
+
+    settings["primary_instrument"] = primary
+    settings["enabled_instruments"] = enabled
     return settings
 
 
@@ -668,7 +702,7 @@ def get_signal(authorization: str = Header(None)):
     trading_mode = settings.get("trading_mode", "paper")
     paper_capital = float(settings.get("paper_capital", 100000) or 100000)
     primary = settings.get("primary_instrument", "NIFTY")
-    enabled = settings.get("enabled_instruments", ["NIFTY", "BANKNIFTY", "SENSEX"])
+    enabled = settings.get("enabled_instruments", list(TRADE_ENABLED_INSTRUMENTS))
 
     entry_threshold = int(settings.get("entry_threshold", 82))
     adx_threshold = int(settings.get("adx_threshold", 25))
