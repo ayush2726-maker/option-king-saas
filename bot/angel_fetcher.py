@@ -31,6 +31,7 @@ BANK_SYMBOL  = "Nifty Bank"
 LOT_SIZES = {"NIFTY": 65, "BANKNIFTY": 30, "SENSEX": 20}
 INDEX_TOKENS = {"NIFTY": "26000", "BANKNIFTY": "26009", "SENSEX": "99919000"}
 INDEX_EXCHANGE = {"NIFTY": "NSE", "BANKNIFTY": "NSE", "SENSEX": "BSE"}
+ENTRY_ENABLED_INSTRUMENTS = ("NIFTY", "SENSEX")
 
 
 def _read_settings(user_id):
@@ -57,6 +58,38 @@ def _read_settings(user_id):
             defaults.update(saved)
     except Exception:
         pass
+
+    raw_enabled = defaults.get(
+        "enabled_instruments",
+        list(ENTRY_ENABLED_INSTRUMENTS),
+    )
+    if isinstance(raw_enabled, str):
+        raw_enabled = [
+            value.strip().upper()
+            for value in raw_enabled.split(",")
+        ]
+    if not isinstance(raw_enabled, list):
+        raw_enabled = list(ENTRY_ENABLED_INSTRUMENTS)
+
+    enabled = []
+    for value in raw_enabled:
+        instrument = str(value).upper()
+        if (
+            instrument in ENTRY_ENABLED_INSTRUMENTS
+            and instrument not in enabled
+        ):
+            enabled.append(instrument)
+    if not enabled:
+        enabled = ["NIFTY"]
+
+    primary = str(
+        defaults.get("primary_instrument", "NIFTY")
+    ).upper()
+    if primary not in enabled:
+        primary = enabled[0]
+
+    defaults["primary_instrument"] = primary
+    defaults["enabled_instruments"] = enabled
     return defaults
 
 
@@ -195,6 +228,11 @@ def _manage_live_gateway_entry(
     candle_id=None,
 ):
     """Queue one live entry for execution by the owner's static-IP phone."""
+    if str(underlying or "").upper() not in ENTRY_ENABLED_INSTRUMENTS:
+        return {
+            "queued": False,
+            "reason": "INSTRUMENT_DISABLED_FOR_NEW_ENTRY",
+        }
     if not trade_allowed or side not in ("CE", "PE"):
         return {"queued": False, "reason": "NO_QUALIFYING_LIVE_SIGNAL"}
 
