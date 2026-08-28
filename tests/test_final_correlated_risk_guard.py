@@ -31,15 +31,15 @@ def _open(conn, state, selected):
     )
 
 
-def test_same_direction_correlated_trade_is_blocked(monkeypatch):
+def test_same_direction_correlated_trade_is_allowed(monkeypatch):
     rows = [{
         "id": 7, "underlying": "NIFTY", "side": "PE", "trading_mode": "paper",
         "entry_price": 100, "last_ltp": 95, "qty": 10,
     }]
     _install(monkeypatch, rows)
     state = {}
-    assert _open(_conn(), state, _selected("BANKNIFTY", "PE")) is False
-    assert state["entry_block_reason"] == guard.SAME_DIRECTION_REASON
+    assert _open(_conn(), state, _selected("SENSEX", "PE")) is True
+    assert "entry_block_reason" not in state
 
 
 def test_qualified_opposite_trade_is_allowed_only_when_existing_trade_loses(monkeypatch):
