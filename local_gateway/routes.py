@@ -222,7 +222,13 @@ def gateway_poll(
 ):
     gateway = authenticate_gateway(_gateway_token(x_gateway_token))
     observed_ip = _observed_client_ip(request)
-    heartbeat = heartbeat_gateway(gateway, observed_ip, "poll")
+    # Poll requests are also heartbeats, but they must preserve the agent's
+    # real version reported by /heartbeat instead of replacing it with "poll".
+    heartbeat = heartbeat_gateway(
+        gateway,
+        observed_ip,
+        gateway["agent_version"] or "",
+    )
     expected_ip = str(heartbeat.get("expected_static_ip") or "").strip()
     ip_allowed = (
         bool(heartbeat.get("static_ip_matches"))
