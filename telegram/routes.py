@@ -565,3 +565,9 @@ def install_telegram_trade_alerts():
         )
     except Exception as exc:
         print(f"Telegram trade alerts patch skipped: {str(exc)[:180]}")
+    try:
+        from telegram.daily_trade_report import schedule_daily_trade_reports
+        started = schedule_daily_trade_reports()
+        print(f"Telegram daily trade report scheduler | started={started}")
+    except Exception as exc:
+        print(f"Telegram daily trade report skipped: {str(exc)[:180]}")
