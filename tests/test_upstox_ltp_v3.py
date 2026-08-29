@@ -2,9 +2,10 @@ from bot.brokers.upstox import UpstoxBroker
 
 
 class FakeResponse:
-    def __init__(self, payload, status_code=200):
+    def __init__(self, payload, status_code=200, headers=None):
         self._payload = payload
         self.status_code = status_code
+        self.headers = headers or {}
 
     def json(self):
         return self._payload
@@ -113,3 +114,55 @@ def test_sensex_symbol_fallback_uses_bse_fo_segment():
         UpstoxBroker._quote_instrument("SENSEX2682077700CE", "BSE_FO")
         == "BSE_FO|SENSEX2682077700CE"
     )
+
+
+def test_login_reports_rate_limit_without_calling_token_invalid(monkeypatch):
+    calls = []
+    limited_broker = UpstoxBroker("client", "secret", "rate-limit-login-token")
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        return FakeResponse(
+            {
+                "status": "error",
+                "errors": [
+                    {"errorCode": "UDAPI10005", "message": "Too Many Request Sent"}
+                ],
+            },
+            429,
+            {"Retry-After": "17"},
+        )
+
+    monkeypatch.setattr("bot.brokers.upstox.requests.get", fake_get)
+
+    first = limited_broker.login()
+    second = limited_broker.login()
+
+    assert first["success"] is False
+    assert first["status"] == "rate_limited"
+    assert first["rate_limited"] is True
+    assert first["retry_after_seconds"] == 17
+    assert "Invalid token" not in first["message"]
+    assert second["cached"] is True
+    assert calls == ["https://api.upstox.com/v2/user/profile"]
+
+
+def test_get_funds_propagates_rate_limit(monkeypatch):
+    def fake_get(url, **kwargs):
+        return FakeResponse(
+            {
+                "status": "error",
+                "errors": [
+                    {"errorCode": "UDAPI10005", "message": "Too Many Request Sent"}
+                ],
+            },
+            429,
+        )
+
+    monkeypatch.setattr("bot.brokers.upstox.requests.get", fake_get)
+
+    result = UpstoxBroker("client", "secret", "funds-limit-token").get_funds()
+
+    assert result["success"] is False
+    assert result["rate_limited"] is True
+    assert result["retry_after_seconds"] == 45

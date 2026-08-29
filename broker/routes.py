@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from datetime import datetime
+import threading
+import time
 
 from database import get_db
 from auth.routes import get_current_user
@@ -16,6 +18,10 @@ from broker.selection import get_selected_broker
 
 router = APIRouter(prefix="/broker", tags=["Broker"])
 
+_TEST_CACHE = {}
+_TEST_CACHE_LOCK = threading.Lock()
+_TEST_CACHE_SECONDS = 30
+
 
 class BrokerConnectRequest(BaseModel):
     broker_name: str
@@ -23,6 +29,33 @@ class BrokerConnectRequest(BaseModel):
     api_key: str
     api_secret: str
     totp_secret: str = None
+
+
+def _cached_test_result(user_id: int, broker_name: str):
+    key = (int(user_id), str(broker_name).lower())
+    now = time.monotonic()
+    with _TEST_CACHE_LOCK:
+        cached = _TEST_CACHE.get(key)
+        if not cached or cached["expires_at"] <= now:
+            _TEST_CACHE.pop(key, None)
+            return None
+        return {**cached["result"], "cached": True}
+
+
+def _cache_test_result(user_id: int, broker_name: str, result: dict, ttl=None):
+    key = (int(user_id), str(broker_name).lower())
+    seconds = max(1, int(ttl or _TEST_CACHE_SECONDS))
+    with _TEST_CACHE_LOCK:
+        _TEST_CACHE[key] = {
+            "expires_at": time.monotonic() + seconds,
+            "result": dict(result),
+        }
+
+
+def _invalidate_test_result(user_id: int, broker_name: str):
+    key = (int(user_id), str(broker_name).lower())
+    with _TEST_CACHE_LOCK:
+        _TEST_CACHE.pop(key, None)
 
 
 def _stop_stale_broker_runtime(user_id: int) -> None:
@@ -108,6 +141,15 @@ def connect_broker(req: BrokerConnectRequest, authorization: str = Header(None))
         )
         login_result = broker.login()
         if not login_result.get("success"):
+            if login_result.get("rate_limited"):
+                retry_after = max(
+                    1, int(login_result.get("retry_after_seconds") or 45)
+                )
+                raise HTTPException(
+                    status_code=429,
+                    detail=str(login_result.get("message"))[:240],
+                    headers={"Retry-After": str(retry_after)},
+                )
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -193,6 +235,7 @@ def connect_broker(req: BrokerConnectRequest, authorization: str = Header(None))
     # even when credentials for the same broker are refreshed, so new tokens are
     # guaranteed to be used on the next Start Bot.
     _stop_stale_broker_runtime(user["id"])
+    _invalidate_test_result(user["id"], broker_name)
 
     return {
         "success": True,
@@ -243,6 +286,10 @@ def list_brokers(authorization: str = Header(None)):
 def test_broker_connection(broker_name: str, authorization: str = Header(None)):
     user = get_current_user(authorization)
     requested = broker_name.lower().strip()
+    cached = _cached_test_result(user["id"], requested)
+    if cached is not None:
+        return cached
+
     conn = get_db()
     try:
         cred = conn.execute(
@@ -272,7 +319,7 @@ def test_broker_connection(broker_name: str, authorization: str = Header(None)):
         result = broker.login()
         if result.get("success"):
             funds = broker.get_funds()
-            return {
+            response = {
                 "success": True,
                 "broker": requested,
                 "selected": bool(
@@ -282,12 +329,31 @@ def test_broker_connection(broker_name: str, authorization: str = Header(None)):
                 "status": "connected",
                 "funds": funds,
             }
-        return {
+            if funds.get("rate_limited"):
+                response["warning"] = funds.get("message")
+                response["retry_after_seconds"] = funds.get(
+                    "retry_after_seconds", 45
+                )
+            _cache_test_result(user["id"], requested, response)
+            return response
+
+        response = {
             "success": False,
             "broker": requested,
-            "status": "auth_failed",
+            "status": result.get("status") or "auth_failed",
             "message": result.get("message"),
+            "error_code": result.get("error_code"),
+            "rate_limited": bool(result.get("rate_limited")),
+            "retry_after_seconds": result.get("retry_after_seconds"),
         }
+        if response["rate_limited"]:
+            _cache_test_result(
+                user["id"],
+                requested,
+                response,
+                response["retry_after_seconds"] or 45,
+            )
+        return response
     except Exception as exc:
         return {
             "success": False,
@@ -324,6 +390,7 @@ def disconnect_broker(broker_name: str, authorization: str = Header(None)):
 
     if was_selected:
         _stop_stale_broker_runtime(user["id"])
+    _invalidate_test_result(user["id"], requested)
 
     return {
         "success": True,

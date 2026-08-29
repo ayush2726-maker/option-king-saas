@@ -1,8 +1,18 @@
+import hashlib
+import threading
+import time
+
 import requests
 from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
 
 from .base import BaseBroker
+
+
+_LOGIN_CACHE = {}
+_LOGIN_CACHE_LOCK = threading.Lock()
+_LOGIN_SUCCESS_TTL_SECONDS = 30
+_DEFAULT_RATE_LIMIT_SECONDS = 45
 
 
 class UpstoxBroker(BaseBroker):
@@ -125,6 +135,44 @@ class UpstoxBroker(BaseBroker):
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+
+    def _login_cache_key(self):
+        token = str(self.api_secret or "").encode("utf-8")
+        return hashlib.sha256(token).hexdigest()
+
+    def _cached_login(self):
+        key = self._login_cache_key()
+        now = time.monotonic()
+        with _LOGIN_CACHE_LOCK:
+            cached = _LOGIN_CACHE.get(key)
+            if not cached or cached["expires_at"] <= now:
+                _LOGIN_CACHE.pop(key, None)
+                return None
+            return {**cached["result"], "cached": True}
+
+    def _cache_login(self, result, ttl_seconds):
+        ttl = max(1, int(ttl_seconds))
+        with _LOGIN_CACHE_LOCK:
+            _LOGIN_CACHE[self._login_cache_key()] = {
+                "expires_at": time.monotonic() + ttl,
+                "result": dict(result),
+            }
+
+    @staticmethod
+    def _retry_after_seconds(response, default=_DEFAULT_RATE_LIMIT_SECONDS):
+        value = getattr(response, "headers", {}).get("Retry-After")
+        try:
+            return max(1, int(float(value)))
+        except (TypeError, ValueError):
+            return int(default)
+
+    @staticmethod
+    def _response_payload(response):
+        try:
+            payload = response.json()
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
 
     @staticmethod
     def _day(value):
@@ -260,22 +308,63 @@ class UpstoxBroker(BaseBroker):
         return response, payload, url
 
     def login(self):
+        cached = self._cached_login()
+        if cached is not None:
+            self.is_logged_in = bool(cached.get("success"))
+            return cached
+
         try:
             response = requests.get(
                 f"{self.BASE_URL}/user/profile",
                 headers=self._h(),
                 timeout=10,
             )
+            payload = self._response_payload(response)
             if response.status_code == 200:
                 self.is_logged_in = True
-                return {
+                result = {
                     "success": True,
                     "message": "Upstox session valid",
                     "token": self.api_secret,
                 }
+                self._cache_login(result, _LOGIN_SUCCESS_TTL_SECONDS)
+                return result
+
+            error_code = self._error_code(payload)
+            if response.status_code == 429 or error_code == "UDAPI10005":
+                retry_after = self._retry_after_seconds(response)
+                result = {
+                    "success": False,
+                    "status": "rate_limited",
+                    "message": (
+                        "Upstox request limit reached. "
+                        f"Wait {retry_after} seconds, then test only once."
+                    ),
+                    "error_code": error_code or "UDAPI10005",
+                    "rate_limited": True,
+                    "retry_after_seconds": retry_after,
+                }
+                self._cache_login(result, retry_after)
+                return result
+
+            if response.status_code in (401, 403):
+                return {
+                    "success": False,
+                    "status": "auth_failed",
+                    "message": (
+                        "Upstox access token is invalid or expired. "
+                        "Generate and save a fresh daily token."
+                    ),
+                    "error_code": error_code,
+                }
             return {
                 "success": False,
-                "message": f"Invalid token: {response.text}",
+                "status": "broker_error",
+                "message": (
+                    "Upstox connection is temporarily unavailable. "
+                    "Please try again shortly."
+                ),
+                "error_code": error_code,
             }
         except Exception as exc:
             return {"success": False, "message": str(exc)}
@@ -665,7 +754,24 @@ class UpstoxBroker(BaseBroker):
                 headers=self._h(),
                 timeout=10,
             )
-            equity = response.json().get("data", {}).get("equity", {})
+            payload = self._response_payload(response)
+            error_code = self._error_code(payload)
+            if response.status_code == 429 or error_code == "UDAPI10005":
+                retry_after = self._retry_after_seconds(response)
+                return {
+                    "success": False,
+                    "message": "Upstox funds request is rate limited.",
+                    "error_code": error_code or "UDAPI10005",
+                    "rate_limited": True,
+                    "retry_after_seconds": retry_after,
+                }
+            if response.status_code != 200:
+                return {
+                    "success": False,
+                    "message": self._message(payload),
+                    "error_code": error_code,
+                }
+            equity = payload.get("data", {}).get("equity", {})
             return {
                 "success": True,
                 "available_cash": equity.get("available_margin", 0),
