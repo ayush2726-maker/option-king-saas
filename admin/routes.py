@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse
 from database import get_db
 from auth.routes import get_current_user
 from admin.pnl_report import build_all_user_pnl_report
+from admin.user_roles import promote_user_to_admin
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 ADMIN_PANEL_FILE = Path(__file__).with_name("panel.html")
@@ -82,7 +83,7 @@ def list_all_users(
     if status:
         users = conn.execute(
             """SELECT id, name, email, phone, subscription_status, trial_ends_at,
-                      is_active, created_at
+                      is_active, is_admin, created_at
                FROM users WHERE subscription_status=?
                ORDER BY created_at DESC LIMIT ? OFFSET ?""",
             (status, limit, offset)
@@ -93,7 +94,7 @@ def list_all_users(
     else:
         users = conn.execute(
             """SELECT id, name, email, phone, subscription_status, trial_ends_at,
-                      is_active, created_at
+                      is_active, is_admin, created_at
                FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?""",
             (limit, offset)
         ).fetchall()
@@ -168,11 +169,22 @@ def make_admin(user_id: int, authorization: str = Header(None)):
     require_admin(authorization)
 
     conn = get_db()
-    conn.execute("UPDATE users SET is_admin=1 WHERE id=?", (user_id,))
-    conn.commit()
-    conn.close()
+    try:
+        target = promote_user_to_admin(conn, user_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        conn.close()
 
-    return {"success": True, "message": f"User {user_id} is now admin"}
+    return {
+        "success": True,
+        "message": (
+            f"{target['email']} was already an admin"
+            if target["already_admin"]
+            else f"{target['email']} is now an admin"
+        ),
+        "user": target,
+    }
 
 # ── Stats Endpoint (mobile app ke liye) ──────────────────
 @router.get("/stats")

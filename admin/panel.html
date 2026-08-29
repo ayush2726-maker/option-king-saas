@@ -185,6 +185,7 @@
 const API = 'https://option-king-saas-production.up.railway.app';
 let TOKEN = localStorage.getItem('ok_token') || '';
 let extendUserId = null;
+let loadedUsers = [];
 
 async function api(method, path, body) {
   const res = await fetch(API + path, {
@@ -324,6 +325,7 @@ async function loadDashboard() {
 async function loadUsers() {
   const data = await api('GET', '/admin/users');
   if (data?.users) {
+    loadedUsers = data.users;
     document.getElementById('usersTable').innerHTML = data.users.map(u => `
       <tr>
         <td>#${u.id}</td>
@@ -335,9 +337,25 @@ async function loadUsers() {
           <button class="btn-sm btn-green" onclick="userAction(${u.id},'activate')">Activate</button>
           <button class="btn-sm btn-red" onclick="userAction(${u.id},'suspend')">Suspend</button>
           <button class="btn-sm btn-orange" onclick="openExtend(${u.id})">+Trial</button>
+          ${u.is_admin
+            ? '<span class="badge badge-active">ADMIN</span>'
+            : `<button class="btn-sm btn-blue" onclick="makeAdmin(${u.id})">Make Admin</button>`}
         </td>
       </tr>
     `).join('');
+  }
+}
+
+async function makeAdmin(id) {
+  const user = loadedUsers.find(item => Number(item.id) === Number(id));
+  const label = user ? `${user.name || 'User'} (${user.email || `#${id}`})` : `User #${id}`;
+  if (!confirm(`Grant full admin access to ${label}?\n\nExisting admin accounts will remain unchanged.`)) return;
+  const data = await api('POST', `/admin/make-admin/${id}`);
+  if (data?.success) {
+    alert(data.message || `${label} is now an admin`);
+    loadUsers();
+  } else {
+    alert(data?.detail || data?.message || 'Admin promotion failed');
   }
 }
 
