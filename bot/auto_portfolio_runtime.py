@@ -1611,6 +1611,135 @@ def _reconcile_mode_change_state(rows, current_mode, state):
     return blocked
 
 
+def _angel_gateway_live_cycle(user_id, obj, scans, settings, state):
+    """Route Angel LIVE entries through the owner's registered static-IP gateway.
+
+    PAPER and LIVE share the same AUTO scans, candidate priority and sizing
+    rules. This branch changes only execution transport: Railway never submits
+    an Angel order directly, and the local gateway remains the sole order
+    origin for the user's registered public IP.
+    """
+    from local_gateway.service import get_gateway_status
+
+    status = get_gateway_status(user_id)
+    gateway_positions = list(status.get("open_positions") or [])
+    rows = [
+        {
+            "id": row.get("id"),
+            "underlying": row.get("underlying"),
+            "side": row.get("option_type"),
+            "symbol": row.get("symbol"),
+            "qty": row.get("quantity"),
+            "capital_slot": None,
+            "allocation_pct": None,
+            "trading_mode": "live",
+        }
+        for row in gateway_positions
+    ]
+    blocked = {
+        str(row.get("underlying") or "").upper()
+        for row in gateway_positions
+        if row.get("underlying")
+    }
+    candidates = _eligible_candidates(scans, blocked)
+    selected = candidates[0] if candidates else None
+
+    ready = bool(
+        status.get("paired")
+        and status.get("enabled")
+        and status.get("online")
+        and status.get("server_armed")
+        and (
+            not status.get("expected_static_ip")
+            or status.get("expected_static_ip") == status.get("observed_ip")
+        )
+    )
+    if not ready:
+        if not status.get("paired"):
+            reason = "LOCAL_GATEWAY_NOT_PAIRED"
+        elif not status.get("enabled"):
+            reason = "LOCAL_GATEWAY_DISABLED"
+        elif not status.get("online"):
+            reason = "LOCAL_GATEWAY_OFFLINE"
+        elif not status.get("server_armed"):
+            reason = "LOCAL_GATEWAY_NOT_ARMED"
+        else:
+            reason = "STATIC_IP_MISMATCH"
+        state["entry_permission"] = {
+            "allowed": False,
+            "reason": reason,
+            "mode": "live",
+            "execution_route": "OWNER_STATIC_IP_LOCAL_GATEWAY",
+        }
+        state["entry_guard"] = dict(state["entry_permission"])
+        state["entry_candidate_attempts"] = []
+    elif len(gateway_positions) >= MAX_OPEN_POSITIONS:
+        state["entry_permission"] = {
+            "allowed": False,
+            "reason": "MAX_OPEN_POSITIONS_REACHED",
+            "mode": "live",
+            "open_positions": len(gateway_positions),
+            "max_open_positions": MAX_OPEN_POSITIONS,
+            "execution_route": "OWNER_STATIC_IP_LOCAL_GATEWAY",
+        }
+        state["entry_guard"] = dict(state["entry_permission"])
+        state["entry_candidate_attempts"] = []
+    else:
+        state["entry_permission"] = {
+            "allowed": True,
+            "reason": "ENTRY_PERMISSION_OK",
+            "mode": "live",
+            "execution_route": "OWNER_STATIC_IP_LOCAL_GATEWAY",
+        }
+
+        def queue_candidate(candidate):
+            signal = candidate.get("signal_data") or {}
+            market = candidate.get("market_data") or {}
+            result = _legacy()._manage_live_gateway_entry(
+                user_id=user_id,
+                underlying=candidate.get("underlying"),
+                price=market.get("price"),
+                side=signal.get("signal"),
+                score=signal.get("score"),
+                trade_allowed=signal.get("trade_allowed"),
+                settings=settings,
+                obj=obj,
+                spot_atr=market.get("atr"),
+                market_data=market,
+                candle_id=candidate.get("candle_id"),
+            )
+            attempt = {
+                "allowed": bool(result.get("queued")),
+                "reason": result.get("reason") or "LIVE_GATEWAY_ENTRY_NOT_QUEUED",
+                "stage": "LOCAL_GATEWAY_QUEUE",
+                "broker": "angelone",
+                "underlying": candidate.get("underlying"),
+                "side": signal.get("signal"),
+                "score": signal.get("score"),
+                "details": result,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            state["entry_guard"] = attempt
+            state["last_entry_attempt"] = attempt
+            return bool(result.get("queued"))
+
+        opened = _attempt_entry_candidates(candidates, queue_candidate, state)
+        selected = opened or selected
+
+    _state_update(state, scans, selected, settings, rows)
+    state["live_execution_route"] = "OWNER_STATIC_IP_LOCAL_GATEWAY"
+    state["gateway_status"] = {
+        "paired": bool(status.get("paired")),
+        "online": bool(status.get("online")),
+        "server_armed": bool(status.get("server_armed")),
+        "static_ip_matches": bool(
+            status.get("expected_static_ip")
+            and status.get("expected_static_ip") == status.get("observed_ip")
+        ),
+    }
+    return state
+
+
 def _can_enter(conn, user_id, settings, rows, state):
     current_mode = (
         "live"
@@ -1690,6 +1819,20 @@ def run_user_bot_auto(user_id, creds, state):
             profile = _legacy().get_active_profile_config(user_id)
             streak = _legacy()._get_consecutive_losses_today(user_id)
             scans = _scan_angel(user_id, obj, settings, profile, streak)
+
+            if str(settings.get("trading_mode", "paper")).lower() == "live":
+                _angel_gateway_live_cycle(
+                    user_id,
+                    obj,
+                    scans,
+                    settings,
+                    state,
+                )
+                for _ in range(12):
+                    time.sleep(5)
+                    if not state.get("running"):
+                        break
+                continue
 
             conn = get_db()
             _ensure_schema(conn)

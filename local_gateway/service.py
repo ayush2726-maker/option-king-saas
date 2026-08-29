@@ -689,7 +689,8 @@ def complete_command(gateway, command_id, lease_token, success, result=None, err
                         """
                         UPDATE trades
                         SET status='open', broker_order_id=?, entry_price=?,
-                            entry_time=?, sl_price=COALESCE(?, sl_price),
+                            entry_time=?, quantity=COALESCE(?, quantity),
+                            sl_price=COALESCE(?, sl_price),
                             target_price=COALESCE(?, target_price)
                         WHERE id=? AND user_id=?
                         """,
@@ -697,6 +698,7 @@ def complete_command(gateway, command_id, lease_token, success, result=None, err
                             broker_order_id,
                             float(result.get("entry_price") or 0) or None,
                             str(result.get("entry_time") or now),
+                            int(result.get("quantity") or 0) or None,
                             float(result.get("sl_price") or 0) or None,
                             float(result.get("target_price") or 0) or None,
                             command["trade_id"],
@@ -763,13 +765,15 @@ def record_position_event(gateway, event):
             conn.execute(
                 """
                 UPDATE trades SET status='open', broker_order_id=?, entry_price=?,
-                    entry_time=?, sl_price=?, target_price=?
+                    entry_time=?, quantity=COALESCE(?, quantity),
+                    sl_price=?, target_price=?
                 WHERE id=?
                 """,
                 (
                     str(event.get("broker_order_id") or trade["broker_order_id"] or "")[:120],
                     float(event.get("entry_price") or trade["entry_price"] or 0) or None,
                     str(event.get("entry_time") or now),
+                    int(event.get("quantity") or 0) or None,
                     float(event.get("sl_price") or trade["sl_price"] or 0) or None,
                     float(event.get("target_price") or trade["target_price"] or 0) or None,
                     trade_id,

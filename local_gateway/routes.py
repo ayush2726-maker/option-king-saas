@@ -92,8 +92,8 @@ def _setup_guide():
         ],
         "live_safety": [
             "Setup and doctor do not arm live orders",
-            "Arm only on the gateway device with the exact phrase ARM LIVE 1 LOT",
-            "Every Risk V2 entry is hard-clamped to one lot locally",
+            "Arm only on the gateway device with the exact phrase ARM LIVE RISK SIZING",
+            "Every entry uses the server-calculated PAPER capital/risk sizing quantity",
             "Disarming blocks new entries while existing positions remain monitored",
         ],
     }

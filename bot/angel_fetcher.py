@@ -16,7 +16,11 @@ from bot.strategy import (
 from bot.option_chain import resolve_option
 from database import get_db
 from strategy.profile_engine import get_active_profile_config
-from local_gateway.service import gateway_ready, queue_live_entry
+from local_gateway.service import (
+    gateway_ready,
+    get_gateway_status,
+    queue_live_entry,
+)
 
 # ── Per-user bot instances ────────────────────────────────
 _user_bots = {}  # user_id -> bot state
@@ -288,8 +292,71 @@ def _manage_live_gateway_entry(
         reward_multiple=reward_multiple,
     )
 
-    live_lots = max(1, min(int(settings.get("live_lots", 1) or 1), 10))
-    quantity = int(LOT_SIZES.get(underlying, 1)) * live_lots
+    try:
+        cash_payload = obj.rmsLimit()
+        cash_data = (
+            cash_payload.get("data", {})
+            if isinstance(cash_payload, dict)
+            else {}
+        )
+        live_cash = 0.0
+        for cash_key in ("availablecash", "availableCash", "net"):
+            try:
+                live_cash = float(cash_data.get(cash_key) or 0)
+            except (TypeError, ValueError):
+                live_cash = 0.0
+            if live_cash > 0:
+                break
+    except Exception as exc:
+        return {
+            "queued": False,
+            "reason": "BROKER_FUNDS_UNAVAILABLE",
+            "message": str(exc)[:120],
+        }
+
+    if live_cash <= 0:
+        return {"queued": False, "reason": "BROKER_FUNDS_UNAVAILABLE"}
+
+    gateway_positions = (get_gateway_status(user_id).get("open_positions") or [])
+    if len(gateway_positions) >= 2:
+        return {"queued": False, "reason": "MAX_CONCURRENT_LIVE_TRADES"}
+
+    sizing_rows = []
+    for open_position in gateway_positions:
+        entry_price = float(open_position.get("entry_price") or 0)
+        open_quantity = int(open_position.get("quantity") or 0)
+        sizing_rows.append({
+            "capital_used": max(0.0, entry_price * open_quantity),
+        })
+
+    # Use the exact same lot-aware 50%/40% allocation, 10% reserve and
+    # planned-risk sizing function as PAPER. LIVE changes only the capital
+    # source: Angel available funds replace paper_capital.
+    from bot.auto_portfolio_runtime import _size
+
+    capital_slot = 1 if not sizing_rows else 2
+    lot_size = int(LOT_SIZES.get(underlying, 1))
+    sizing = _size(
+        live_cash,
+        capital_slot,
+        expected_entry,
+        lot_size,
+        rows=sizing_rows,
+        risk_points=atr_levels.get("risk_points"),
+    )
+    sizing["planned_risk_points"] = round(
+        float(atr_levels.get("risk_points") or 0),
+        4,
+    )
+    if int(sizing.get("lots") or 0) < 1:
+        return {
+            "queued": False,
+            "reason": "POSITION_SIZE_BLOCK",
+            "sizing": sizing,
+        }
+
+    live_lots = int(sizing["lots"])
+    quantity = int(sizing["qty"])
     safe_candle_id = str(
         candle_id
         or now_ist.replace(second=0, microsecond=0).isoformat()
@@ -306,6 +373,12 @@ def _manage_live_gateway_entry(
         "quantity": quantity,
         "lots": live_lots,
         "lot_size": int(LOT_SIZES.get(underlying, 1)),
+        "capital_slot": capital_slot,
+        "capital_base": round(live_cash, 2),
+        "capital_used": sizing.get("capital_used"),
+        "allocation_pct": sizing.get("actual_allocation_pct"),
+        "sizing_mode": sizing.get("sizing_mode"),
+        "planned_risk_points": sizing.get("planned_risk_points"),
         "expected_entry_price": round(expected_entry, 2),
         "sl_percent": sl_percent,
         "target_percent": target_percent,
@@ -1989,4 +2062,3 @@ from bot.auto_portfolio_runtime import (
     run_user_bot_auto as run_user_bot,
     run_user_bot_multi_auto as run_user_bot_multi,
 )
-

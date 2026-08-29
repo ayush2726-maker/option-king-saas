@@ -867,15 +867,15 @@ def command_doctor():
 def command_arm():
     config = load_config()
     command_doctor()
-    phrase = input("Type exactly ARM LIVE 1 LOT: ").strip().upper()
-    if phrase != "ARM LIVE 1 LOT":
+    phrase = input("Type exactly ARM LIVE RISK SIZING: ").strip().upper()
+    if phrase != "ARM LIVE RISK SIZING":
         raise RuntimeError("Live arming cancelled")
     config["local_armed"] = True
     save_config(config)
     if STOP_FILE.exists():
         STOP_FILE.unlink()
     SaaSClient(config).set_server_arm(True)
-    print("✅ LIVE gateway armed for new entries. Default quantity is 1 lot.")
+    print("✅ LIVE gateway armed. Quantity follows PAPER capital/risk sizing.")
 
 
 def command_disarm():

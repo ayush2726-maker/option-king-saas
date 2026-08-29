@@ -78,7 +78,7 @@ python okai_local_gateway_v2.py arm
 Type exactly:
 
 ```text
-ARM LIVE 1 LOT
+ARM LIVE RISK SIZING
 ```
 
 Emergency disarm:

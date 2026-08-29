@@ -2,7 +2,7 @@
 """OKAI static-IP gateway risk engine V2.
 
 This wrapper keeps the battle-tested gateway command/Angel order flow and adds:
-- a genuine one-lot hard cap on each user's own phone/desktop;
+- exact server-calculated capital/risk quantity validation on the user's device;
 - use of the server-provided ATR stop instead of recalculating a fixed stop;
 - first profit lock at entry + estimated round-trip charges + 2% profit;
 - R-based dynamic profit trailing checked against option LTP every second;
@@ -15,7 +15,10 @@ import ipaddress
 import math
 from datetime import datetime
 
-import okai_local_gateway as base
+try:
+    from . import okai_local_gateway as base
+except ImportError:  # Direct script execution from local_gateway_agent/.
+    import okai_local_gateway as base
 
 
 RISK_ENGINE_VERSION = "1.2.0-RISK-V2-MULTIUSER"
@@ -197,15 +200,19 @@ class RiskV2GatewayRunner(base.GatewayRunner):
         payload = command.get("payload") or {}
         lot_size = int(payload.get("lot_size") or 0)
         if lot_size <= 0:
-            raise RuntimeError("ONE_LOT_HARD_CAP: valid lot_size missing in payload")
+            raise RuntimeError("LOT_VALIDATION: valid lot_size missing in payload")
         requested = int(payload.get("quantity") or 0)
-        payload["quantity"] = lot_size
-        payload["lots"] = 1
-        command["payload"] = payload
-        if requested != lot_size:
-            print(
-                f"🛡️ ONE LOT HARD CAP | requested={requested} | executing={lot_size}"
+        if requested <= 0 or requested % lot_size != 0:
+            raise RuntimeError(
+                f"LOT_VALIDATION: quantity {requested} is not a complete {lot_size}-unit lot"
             )
+        payload["quantity"] = requested
+        payload["lots"] = requested // lot_size
+        command["payload"] = payload
+        print(
+            f"🛡️ PAPER-RULE LIVE SIZING | lots={payload['lots']} | "
+            f"quantity={requested} | lot_size={lot_size}"
+        )
         return super().execute_entry(command)
 
     def monitor_positions(self):
@@ -336,7 +343,7 @@ def command_doctor_v2():
     print("=== LOCAL RISK ENGINE CHECK ===")
     print(f"Risk engine: {RISK_ENGINE_VERSION} ✅")
     print("Per-user token and command isolation: ENABLED ✅")
-    print("One-lot hard cap: ENABLED ✅")
+    print("Paper-rule capital/risk sizing: ENABLED ✅")
     print("Initial stop: SERVER ATR SL ✅")
     print("First lock: ENTRY + ROUND-TRIP CHARGES + 2% ✅")
     print("Dynamic trail: 0.8R / 1.2R / 1.8R stages ✅")
