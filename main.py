@@ -71,6 +71,7 @@ from bot.broker_session_reset_patch import (
     recover_persisted_running_user_engines,
 )
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
+from bot.mode_aware_dashboard_middleware import ModeAwareDashboardMiddleware
 from bot.eod_safety_testing_access_patch import (
     TestingFullAccessAndFreshDataMiddleware,
     apply_eod_entry_guard_patch,
@@ -197,6 +198,7 @@ app = FastAPI(
 
 app.add_middleware(BacktestActiveStrategyMiddleware)
 app.add_middleware(StrictSignalHistoryMiddleware)
+app.add_middleware(ModeAwareDashboardMiddleware)
 app.add_middleware(SafeRegistrationEmailVerificationMiddleware)
 app.add_middleware(TestingFullAccessAndFreshDataMiddleware)
 app.add_middleware(TradeLiveRuntimeRecoveryMiddleware)
