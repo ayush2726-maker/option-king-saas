@@ -4,6 +4,7 @@ from auth.routes import get_current_user
 import json
 from datetime import datetime
 from telegram.routes import notify_user
+from strategy.notifications import settings_saved_message
 
 router = APIRouter(prefix="/strategy", tags=["Strategy"])
 
@@ -211,7 +212,7 @@ def save_settings(body: dict, authorization: str = Header(None)):
     )
     conn.commit()
     conn.close()
-    notify_user(user["id"], f"⚙️ <b>Strategy Settings Saved</b>\nMode: {settings.get('mode')}\nEntry Score: {settings.get('entry_threshold')}\nSL: {settings.get('sl_percent')}%\nTarget: {settings.get('target_percent')}%")
+    notify_user(user["id"], settings_saved_message(settings))
     return {"success": True, "message": "Strategy settings saved", "settings": settings}
 
 @router.post("/reset")
