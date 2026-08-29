@@ -278,3 +278,12 @@ threading.Thread(
     name="rakesh-paper-runtime-hotfix",
     daemon=True,
 ).start()
+
+
+# Live-mode UI/data authority: local static-IP gateway publishes Angel funds;
+# dashboard/history responses stay isolated by PAPER vs LIVE mode.
+try:
+    from bot.live_mode_ui_sync_patch import apply_live_mode_ui_sync_patch
+    apply_live_mode_ui_sync_patch()
+except Exception as exc:
+    print(f"Live mode UI sync patch warning | {str(exc)[:180]}")
