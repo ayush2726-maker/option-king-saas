@@ -21,7 +21,8 @@ DEFAULT_SETTINGS = {
     "entry_threshold": 82,
     "adx_threshold": 25,
     "volume_threshold": 1.2,
-    "max_trades_per_day": 5,
+    "max_trades_per_day": 0,
+    "unlimited_trades": True,
     "sl_percent": 12,
     "target_percent": 24,
     "trailing_sl": True,
@@ -46,7 +47,7 @@ PRESETS = {
         **DEFAULT_SETTINGS,
         "mode": "safe",
         "entry_threshold": 88,
-        "max_trades_per_day": 3,
+        "max_trades_per_day": 0,
         "sl_percent": 10,
         "target_percent": 20,
     },
@@ -55,7 +56,7 @@ PRESETS = {
         **DEFAULT_SETTINGS,
         "mode": "aggressive",
         "entry_threshold": 76,
-        "max_trades_per_day": 7,
+        "max_trades_per_day": 0,
         "sl_percent": 15,
         "target_percent": 30,
     }
@@ -125,7 +126,8 @@ def normalize_settings(body: dict):
     base["entry_threshold"] = int(clamp_num(body.get("entry_threshold", base["entry_threshold"]), 50, 99, base["entry_threshold"]))
     base["adx_threshold"] = int(clamp_num(body.get("adx_threshold", base["adx_threshold"]), 5, 60, base["adx_threshold"]))
     base["volume_threshold"] = clamp_num(body.get("volume_threshold", base["volume_threshold"]), 0.5, 5, base["volume_threshold"])
-    base["max_trades_per_day"] = int(clamp_num(body.get("max_trades_per_day", base["max_trades_per_day"]), 1, 20, base["max_trades_per_day"]))
+    base["max_trades_per_day"] = 0
+    base["unlimited_trades"] = True
     base["sl_percent"] = clamp_num(body.get("sl_percent", base["sl_percent"]), 3, 50, base["sl_percent"])
     base["target_percent"] = clamp_num(body.get("target_percent", base["target_percent"]), 5, 100, base["target_percent"])
     base["trailing_sl"] = bool(body.get("trailing_sl", base["trailing_sl"]))
@@ -181,6 +183,8 @@ def ensure_settings(conn, user_id: int):
             saved = json.loads(row["settings_json"])
             final = dict(DEFAULT_SETTINGS)
             final.update(saved)
+            final["max_trades_per_day"] = 0
+            final["unlimited_trades"] = True
             return _sanitize_instrument_settings(final)
         except Exception:
             pass

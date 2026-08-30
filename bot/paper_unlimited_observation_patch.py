@@ -1,9 +1,9 @@
-"""Paper-only unlimited trade observation mode.
+"""Unlimited daily trade-count mode for PAPER and LIVE.
 
 Purpose: keep collecting qualified PAPER entries after trade 5 so we can compare
-whether trades 6+ add profit or loss. LIVE remains hard-capped at five entries
-per day. Existing two-open-position, different-index, score, ATR SL, charges and
-profit-lock rules are unchanged.
+whether trades 6+ add profit or loss. LIVE also has no daily count cap. Existing
+open-position, different-index, score, ATR SL, charges, cooldown and profit-lock
+rules are unchanged.
 """
 
 from datetime import timezone
@@ -11,7 +11,7 @@ from datetime import timezone
 from bot import auto_portfolio_runtime as runtime
 
 
-LIVE_MAX_TRADES_PER_DAY = 5
+LIVE_MAX_TRADES_PER_DAY = None
 FIRST_BUCKET_SIZE = 5
 
 
@@ -105,21 +105,11 @@ def _can_enter_observation(conn, user_id, settings, rows, state):
     state["daily_trade_mode"] = mode.upper()
     state["daily_trade_count"] = count
 
-    if mode == "paper":
-        state["daily_trade_limit"] = None
-        state["paper_unlimited_observation"] = True
-        state["trade_limit_status"] = "PAPER_UNLIMITED_OBSERVATION"
-        return True
-
-    configured = max(
-        1,
-        runtime._i((settings or {}).get("max_trades_per_day", 5), 5),
-    )
-    live_limit = min(configured, LIVE_MAX_TRADES_PER_DAY)
-    state["daily_trade_limit"] = live_limit
-    state["paper_unlimited_observation"] = False
-    state["trade_limit_status"] = "LIVE_HARD_CAP_5"
-    return count < live_limit
+    state["daily_trade_limit"] = None
+    state["unlimited_daily_trades"] = True
+    state["paper_unlimited_observation"] = mode == "paper"
+    state["trade_limit_status"] = "DAILY_TRADE_COUNT_UNLIMITED"
+    return True
 
 
 def apply_paper_unlimited_observation_patch():
@@ -211,6 +201,7 @@ def apply_paper_unlimited_observation_patch():
                 if str(row["status"] or "").upper() == "OPEN"
             ),
             "paper_unlimited": mode == "paper",
+            "live_unlimited": mode == "live",
             "live_max_trades": LIVE_MAX_TRADES_PER_DAY,
             **stats,
         }

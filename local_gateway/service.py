@@ -381,7 +381,7 @@ def gateway_ready(user_id):
     return True, "READY", status
 
 
-def queue_live_entry(user_id, payload, idempotency_key, max_concurrent=1, max_trades_per_day=5):
+def queue_live_entry(user_id, payload, idempotency_key, max_concurrent=1, max_trades_per_day=None):
     ensure_local_gateway_schema()
     ready, reason, gateway = gateway_ready(user_id)
     if not ready:
@@ -435,9 +435,10 @@ def queue_live_entry(user_id, payload, idempotency_key, max_concurrent=1, max_tr
             """,
             (int(user_id), day_start.isoformat()),
         ).fetchone()["total"]
-        if int(daily_count or 0) >= max(1, int(max_trades_per_day or 1)):
-            conn.rollback()
-            return {"queued": False, "reason": "MAX_DAILY_LIVE_TRADES"}
+        # Daily LIVE trade count is unlimited. Keep counting for diagnostics,
+        # but never reject a qualified order because of the day's entry count.
+        payload["daily_trade_count_before_entry"] = int(daily_count or 0)
+        payload["daily_trade_limit"] = None
 
         if bool(payload.get("different_index_required")):
             same_index = conn.execute(

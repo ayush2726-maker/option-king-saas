@@ -47,7 +47,8 @@ def _read_settings(user_id):
         "entry_threshold": 82,
         "live_lots": 1,
         "max_concurrent_trades": 1,
-        "max_trades_per_day": 5,
+        "max_trades_per_day": 0,
+        "unlimited_trades": True,
         "different_index_required": True,
     }
     try:
@@ -94,6 +95,8 @@ def _read_settings(user_id):
 
     defaults["primary_instrument"] = primary
     defaults["enabled_instruments"] = enabled
+    defaults["max_trades_per_day"] = 0
+    defaults["unlimited_trades"] = True
     return defaults
 
 
@@ -403,7 +406,7 @@ def _manage_live_gateway_entry(
         payload,
         idempotency_key,
         max_concurrent=int(settings.get("max_concurrent_trades", 1) or 1),
-        max_trades_per_day=int(settings.get("max_trades_per_day", 5) or 5),
+        max_trades_per_day=None,
     )
     _entry_guard_state[user_id] = {
         "allowed": bool(result.get("queued")),

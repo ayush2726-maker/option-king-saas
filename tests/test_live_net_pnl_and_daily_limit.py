@@ -52,7 +52,7 @@ def test_exact_breakeven_covers_trade_costs_plus_two_percent():
     assert solved["target_net_profit"] == 180.0
 
 
-def test_backtest_keeps_only_first_five_trades_per_day():
+def test_backtest_keeps_all_qualified_trades_per_day():
     trades = []
     for index in range(8):
         trades.append(
@@ -68,7 +68,7 @@ def test_backtest_keeps_only_first_five_trades_per_day():
             }
         )
 
-    limited = _limit_day_result(
+    unlimited = _limit_day_result(
         {
             "success": True,
             "capital": 100000.0,
@@ -77,10 +77,11 @@ def test_backtest_keeps_only_first_five_trades_per_day():
         }
     )
 
-    assert limited["total_trades"] == 5
-    assert limited["total_pnl"] == 50.0
-    assert limited["ending_capital"] == 100050.0
-    assert limited["trades_before_daily_limit"] == 8
-    assert limited["trades_dropped_by_daily_limit"] == 3
-    assert limited["daily_trade_limit"] == 5
-    assert [trade["trade_no"] for trade in limited["trades"]] == [1, 2, 3, 4, 5]
+    assert unlimited["total_trades"] == 8
+    assert unlimited["total_pnl"] == 80.0
+    assert unlimited["ending_capital"] == 100080.0
+    assert unlimited["trades_before_daily_limit"] == 8
+    assert unlimited["trades_dropped_by_daily_limit"] == 0
+    assert unlimited["daily_trade_limit"] is None
+    assert unlimited["daily_trade_limit_applied"] is False
+    assert [trade["trade_no"] for trade in unlimited["trades"]] == list(range(1, 9))

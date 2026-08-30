@@ -1,8 +1,8 @@
-"""Enforce the live default maximum of five entries per trading day.
+"""Keep final Daily/AUTO backtest totals consistent without a trade-count cap.
 
-The limit is applied to every final Daily/AUTO result before Monthly aggregation,
-so a monthly run may contain at most five trades for each tested date rather
-than five trades for the entire month.
+All qualified trades for each tested date are retained. Cost and summary
+recalculation remains here because this wrapper is also used before Monthly
+aggregation.
 """
 
 from copy import deepcopy
@@ -11,7 +11,7 @@ from datetime import datetime
 from backtest import routes
 
 
-MAX_TRADES_PER_DAY = 5
+MAX_TRADES_PER_DAY = None
 
 
 def _f(value, default=0.0):
@@ -49,13 +49,13 @@ def _limit_day_result(result):
             int(trade.get("trade_no") or 0),
         ),
     )
-    selected = ordered[:MAX_TRADES_PER_DAY]
-    dropped = max(0, len(ordered) - len(selected))
+    selected = ordered
+    dropped = 0
 
     for index, trade in enumerate(selected, start=1):
         trade["trade_no"] = index
         trade["daily_trade_number"] = index
-        trade["daily_trade_limit"] = MAX_TRADES_PER_DAY
+        trade["daily_trade_limit"] = None
 
     total_pnl = round(sum(_f(trade.get("pnl")) for trade in selected), 2)
     wins = sum(1 for trade in selected if _f(trade.get("pnl")) > 0)
@@ -134,10 +134,10 @@ def _limit_day_result(result):
         "total_statutory_charges": statutory,
         "total_charges": total_charges,
         "daily_trade_limit": MAX_TRADES_PER_DAY,
-        "daily_trade_limit_applied": True,
+        "daily_trade_limit_applied": False,
         "trades_before_daily_limit": len(original),
         "trades_dropped_by_daily_limit": dropped,
-        "trade_limit_scope": "PER_TRADING_DAY",
+        "trade_limit_scope": "UNLIMITED",
     })
 
     summary = dict(output.get("summary") or {})
@@ -156,10 +156,10 @@ def _limit_day_result(result):
         "normal_pnl": normal_pnl,
         "hero_zero_pnl": hero_pnl,
         "daily_trade_limit": MAX_TRADES_PER_DAY,
-        "daily_trade_limit_applied": True,
+        "daily_trade_limit_applied": False,
         "trades_before_daily_limit": len(original),
         "trades_dropped_by_daily_limit": dropped,
-        "trade_limit_scope": "PER_TRADING_DAY",
+        "trade_limit_scope": "UNLIMITED",
     })
     output["summary"] = summary
     return output
@@ -198,5 +198,5 @@ def apply_daily_trade_limit_patch():
             wrapped.append(name)
 
     routes._okai_backtest_daily_trade_limit_v1 = True
-    routes._okai_backtest_daily_trade_limit_value = MAX_TRADES_PER_DAY
+    routes._okai_backtest_daily_trade_limit_value = None
     routes._okai_backtest_daily_trade_limit_wrapped = tuple(wrapped)

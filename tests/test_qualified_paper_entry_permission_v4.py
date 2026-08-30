@@ -36,7 +36,7 @@ def test_paper_mode_is_unlimited_by_default_for_saas_testing(monkeypatch):
     assert "live_order_lock" not in state
 
 
-def test_live_mode_keeps_daily_limit(monkeypatch):
+def test_live_mode_is_also_unlimited(monkeypatch):
     conn = _conn_with_trades(5)
     monkeypatch.setattr(runtime, "_today_count", lambda conn, user_id: 5)
     state = {}
@@ -47,11 +47,11 @@ def test_live_mode_keeps_daily_limit(monkeypatch):
         [],
         state,
     )
-    assert allowed is False
-    assert state["entry_permission"]["reason"] == "DAILY_TRADE_LIMIT_REACHED"
+    assert allowed is True
+    assert state["entry_permission"]["unlimited"] is True
 
 
-def test_explicit_paper_limit_can_still_be_enabled(monkeypatch):
+def test_explicit_paper_limit_is_ignored_when_daily_count_is_unlimited(monkeypatch):
     conn = _conn_with_trades(2)
     monkeypatch.setattr(runtime, "_today_count", lambda conn, user_id: 2)
     state = {}
@@ -67,8 +67,8 @@ def test_explicit_paper_limit_can_still_be_enabled(monkeypatch):
         [],
         state,
     )
-    assert allowed is False
-    assert state["entry_permission"]["reason"] == "DAILY_TRADE_LIMIT_REACHED"
+    assert allowed is True
+    assert state["entry_permission"]["unlimited"] is True
 
 
 def test_preopen_failure_is_visible():

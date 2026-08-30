@@ -8,7 +8,7 @@ This startup hook also activates:
 - historical index-token safety;
 - true cost-safe break-even and the quantity-preserving 8% premium stop cap;
 - exact Paper/Live net P&L and exact trade-cost break-even; and
-- the maximum five Backtest trades per trading day.
+- unlimited qualified Backtest trades per trading day.
 """
 
 from copy import deepcopy
@@ -34,7 +34,7 @@ def _activate_final_parity_patches():
     )
 
     # Order matters: cost/risk wrappers must be final before the daily result is
-    # capped, and runtime structural-exit patches are already active in main.py.
+    # summarized, and runtime structural-exit patches are already active in main.py.
     apply_cost_safe_breakeven_risk_patch()
     apply_all_in_risk_cap_patch()
     apply_live_net_pnl_breakeven_patch()

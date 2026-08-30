@@ -1748,7 +1748,7 @@ def _can_enter(conn, user_id, settings, rows, state):
     )
     _reconcile_mode_change_state(rows, current_mode, state)
     today_count = _today_count(conn, user_id)
-    raw_daily = _i(settings.get("max_trades_per_day", 5), 5)
+    raw_daily = 0
 
     if len(rows) >= MAX_OPEN_POSITIONS:
         state["entry_permission"] = {
@@ -1774,17 +1774,9 @@ def _can_enter(conn, user_id, settings, rows, state):
     if current_mode == "paper":
         state.pop("live_order_lock", None)
 
-    # Paper is the SaaS testing mode. Unless explicitly disabled, do not stop
-    # qualified entries at the old five-trade default. Live keeps its limit.
-    explicit_unlimited = _setting_truthy(
-        settings.get("unlimited_trades"),
-        default=_setting_truthy(
-            settings.get("paper_unlimited_trades"),
-            default=(current_mode == "paper"),
-        ),
-    )
-    unlimited = raw_daily <= 0 or explicit_unlimited
-    max_daily = max(1, raw_daily) if raw_daily > 0 else None
+    # Both PAPER and LIVE keep taking qualified entries without a daily count cap.
+    unlimited = True
+    max_daily = None
 
     if not unlimited and today_count >= max_daily:
         state["entry_permission"] = {

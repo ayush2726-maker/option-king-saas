@@ -323,7 +323,7 @@ def _patch_live_gateway():
 
     original_queue = getattr(service, "queue_live_entry", None)
     if original_queue and not getattr(original_queue, "_telegram_alerts_wrapped", False):
-        def wrapped_queue_live_entry(user_id, payload, idempotency_key, max_concurrent=1, max_trades_per_day=5):
+        def wrapped_queue_live_entry(user_id, payload, idempotency_key, max_concurrent=1, max_trades_per_day=None):
             result = original_queue(user_id, payload, idempotency_key, max_concurrent, max_trades_per_day)
             try:
                 if isinstance(result, dict) and result.get("queued"):
