@@ -1,6 +1,8 @@
 """Regression tests for the global BANKNIFTY new-entry disable."""
 from strategy import routes as strategy_routes
 from bot import auto_portfolio_runtime as portfolio_runtime
+from backtest import routes as backtest_routes
+from backtest import daily_job_start_patch, monthly_job_start_patch, range_routes
 
 
 def test_strategy_defaults_exclude_banknifty():
@@ -37,3 +39,10 @@ def test_runtime_never_scans_banknifty_from_stale_saved_settings():
     )
     assert enabled == ["NIFTY", "SENSEX"]
     assert "BANKNIFTY" not in enabled
+
+
+def test_backtest_never_scans_or_accepts_banknifty():
+    assert backtest_routes._OKAI_AUTO_INSTRUMENTS == ("NIFTY", "SENSEX")
+    assert "BANKNIFTY" not in daily_job_start_patch._ALLOWED_INSTRUMENTS
+    assert "BANKNIFTY" not in monthly_job_start_patch._ALLOWED_INSTRUMENTS
+    assert "BANKNIFTY" not in range_routes._ALLOWED_INSTRUMENTS

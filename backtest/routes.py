@@ -1315,7 +1315,7 @@ def backtest_history(authorization: str = Header(None)):
 
 # ============================================================
 # OKAI AUTO INDEX BACKTEST V1
-# Scans NIFTY, BANKNIFTY and SENSEX.
+# Scans NIFTY and SENSEX. BANKNIFTY entries are globally disabled.
 # Keeps only one open trade at a time.
 # Uses 90% of current equity with whole lots.
 # ============================================================
@@ -1330,13 +1330,11 @@ _OKAI_ORIGINAL_SINGLE_INDEX_BACKTEST = (
 )
 _OKAI_AUTO_INSTRUMENTS = (
     "NIFTY",
-    "BANKNIFTY",
     "SENSEX",
 )
 _OKAI_INSTRUMENT_PRIORITY = {
     "NIFTY": 0,
-    "BANKNIFTY": 1,
-    "SENSEX": 2,
+    "SENSEX": 1,
 }
 
 
@@ -1909,7 +1907,6 @@ def _okai_run_monthly_backtest_sync(
         if instrument not in (
             "AUTO",
             "NIFTY",
-            "BANKNIFTY",
             "SENSEX",
         ):
             instrument = "AUTO"
@@ -2470,8 +2467,8 @@ def _okai_run_monthly_backtest_sync(
 # ============================================================
 # OKAI HERO ZERO BACKTEST V1
 # Instrument-aware expiry calendar:
-# NIFTY every Tuesday, BANKNIFTY last Tuesday,
-# SENSEX every Thursday. Entry 14:30-15:00 IST,
+# NIFTY every Tuesday and SENSEX every Thursday.
+# Entry 14:30-15:00 IST,
 # force exit 15:25, score 82, premium Rs 0.50-Rs 10,
 # capital cap Rs 2,000, max one trade per day.
 # ============================================================
@@ -2511,9 +2508,8 @@ def _okai_expiry_rule_label(instrument):
     instrument = str(instrument or "AUTO").upper()
     return {
         "NIFTY": "EVERY_TUESDAY",
-        "BANKNIFTY": "LAST_TUESDAY",
         "SENSEX": "EVERY_THURSDAY",
-        "AUTO": "NIFTY_TUESDAY__BANKNIFTY_LAST_TUESDAY__SENSEX_THURSDAY",
+        "AUTO": "NIFTY_TUESDAY__SENSEX_THURSDAY",
     }.get(instrument, "UNSUPPORTED")
 
 
@@ -2533,8 +2529,6 @@ def _okai_is_instrument_expiry(instrument, date_str):
     instrument = str(instrument or "").upper()
     if instrument == "NIFTY":
         return day.weekday() == 1
-    if instrument == "BANKNIFTY":
-        return _okai_is_last_weekday_of_month(day, 1)
     if instrument == "SENSEX":
         return day.weekday() == 3
     return False
@@ -2689,15 +2683,10 @@ def _okai_empty_hero_result(
             "force_exit": "15:25 IST",
             "expiry_day": _okai_expiry_rule_label(instrument),
             "capital_cap": _OKAI_HERO_CAPITAL_CAP,
-            "premium_range": [
-                _OKAI_HERO_PREMIUM_MIN,
-                _OKAI_HERO_PREMIUM_MAX,
-            ],
+            "premium_data": "EXACT_OPTION_CONTRACT_OHLC_1M",
             "entry_score": 82,
             "max_trades_per_day": 1,
-            "premium_model": (
-                "EXPIRY_GAMMA_ESTIMATE_V1"
-            ),
+            "premium_model": "REAL_SELECTED_BROKER_OPTION_OHLC_1M_V2",
         },
         "summary": {
             "period": "DAILY",
@@ -2795,6 +2784,7 @@ def _okai_run_hero_zero_single(
 
     open_trade = None
     closed_trade = None
+    real_premium_errors = []
     score_log = []
     candidate_log = []
 
@@ -2828,81 +2818,17 @@ def _okai_run_hero_zero_single(
         if open_trade:
             side = open_trade["side"]
             entry = open_trade["entry_price"]
-            entry_spot = open_trade[
-                "entry_spot"
-            ]
-            entry_minutes = open_trade[
-                "entry_minutes"
-            ]
-
-            spot_close = float(last["close"])
-            spot_high = float(last["high"])
-            spot_low = float(last["low"])
-
-            close_pct = (
-                spot_close - entry_spot
-            ) / entry_spot * 100
-
-            if side == "CE":
-                good_pct = (
-                    spot_high - entry_spot
-                ) / entry_spot * 100
-                bad_pct = (
-                    spot_low - entry_spot
-                ) / entry_spot * 100
-            else:
-                close_pct = -close_pct
-                good_pct = (
-                    entry_spot - spot_low
-                ) / entry_spot * 100
-                bad_pct = (
-                    entry_spot - spot_high
-                ) / entry_spot * 100
-
-            elapsed_minutes = max(
-                0,
-                candle_minutes - entry_minutes,
+            entry_spot = open_trade["entry_spot"]
+            option_bar = _okai_real_premium_bar(
+                open_trade,
+                last["time"],
             )
-            theta_factor = max(
-                0.25,
-                1.0
-                - elapsed_minutes
-                * _OKAI_HERO_THETA_DECAY_PER_MINUTE,
-            )
+            if option_bar is None:
+                continue
 
-            current_premium = max(
-                0.05,
-                entry
-                * (
-                    1.0
-                    + close_pct
-                    * _OKAI_HERO_GAMMA_RESPONSE
-                    / 100.0
-                )
-                * theta_factor,
-            )
-            premium_high = max(
-                0.05,
-                entry
-                * (
-                    1.0
-                    + good_pct
-                    * _OKAI_HERO_GAMMA_RESPONSE
-                    / 100.0
-                )
-                * theta_factor,
-            )
-            premium_low = max(
-                0.05,
-                entry
-                * (
-                    1.0
-                    + bad_pct
-                    * _OKAI_HERO_GAMMA_RESPONSE
-                    / 100.0
-                )
-                * theta_factor,
-            )
+            current_premium = max(0.05, float(option_bar["close"]))
+            premium_high = max(0.05, float(option_bar["high"]))
+            premium_low = max(0.05, float(option_bar["low"]))
 
             sl_price = open_trade[
                 "sl_price"
@@ -2964,7 +2890,7 @@ def _okai_run_hero_zero_single(
                     "trade_no": 1,
                     "strategy": "HERO_ZERO",
                     "instrument": instrument,
-                    "symbol": (
+                    "symbol": open_trade.get("option_symbol") or (
                         f"{instrument} HEROZERO {side}"
                     ),
                     "side": side,
@@ -2972,9 +2898,7 @@ def _okai_run_hero_zero_single(
                     "entry_time": open_trade[
                         "entry_time"
                     ],
-                    "exit_time": str(
-                        last["time"]
-                    ),
+                    "exit_time": str(option_bar.get("time") or last["time"]),
                     "entry_price": entry,
                     "exit_price": exit_price,
                     "sl_price": sl_price,
@@ -3021,20 +2945,16 @@ def _okai_run_hero_zero_single(
                     "spot_atr_at_entry": open_trade[
                         "spot_atr_at_entry"
                     ],
-                    "estimated_premium_high": round(
-                        premium_high,
-                        2,
-                    ),
-                    "estimated_premium_low": round(
-                        premium_low,
-                        2,
-                    ),
-                    "gamma_response_factor": (
-                        _OKAI_HERO_GAMMA_RESPONSE
-                    ),
-                    "theta_decay_per_minute": (
-                        _OKAI_HERO_THETA_DECAY_PER_MINUTE
-                    ),
+                    "premium_high": round(premium_high, 2),
+                    "premium_low": round(premium_low, 2),
+                    "premium_model": "REAL_SELECTED_BROKER_OPTION_OHLC_1M_V2",
+                    "premium_source": open_trade.get("premium_source"),
+                    "premium_request_mode": open_trade.get("premium_request_mode"),
+                    "premium_execution_model": open_trade.get("premium_execution_model"),
+                    "option_instrument_key": open_trade.get("option_instrument_key"),
+                    "option_expiry": open_trade.get("option_expiry"),
+                    "option_strike": open_trade.get("option_strike"),
+                    "selected_broker": open_trade.get("selected_broker"),
                     "expiry_day": True,
                     "expiry_rule": _okai_expiry_rule_label(instrument),
                     "fixed_target_enabled": True,
@@ -3146,16 +3066,30 @@ def _okai_run_hero_zero_single(
         ):
             continue
 
-        entry_premium = (
-            _okai_hero_estimated_entry_premium(
-                market_data["atr"],
-                candle_minutes,
-            )
+        real_option = _okai_real_premium_prepare_entry(
+            broker_name=broker_name,
+            obj=obj,
+            instrument=instrument,
+            date_str=date_str,
+            entry_time=last["time"],
+            spot_price=price,
+            side=signal_data["signal"],
         )
+        if not real_option.get("success"):
+            real_premium_errors.append(
+                _okai_real_premium_error_row(
+                    real_option,
+                    last["time"],
+                    signal_data["signal"],
+                )
+            )
+            continue
+
+        entry_premium = float(real_option["entry_price"])
         sizing = _okai_hero_sizing(
             capital,
             entry_premium,
-            LOT_SIZES.get(instrument, 1),
+            real_option["lot_size"],
         )
 
         if not sizing["affordable"]:
@@ -3164,7 +3098,7 @@ def _okai_run_hero_zero_single(
         open_trade = {
             "side": signal_data["signal"],
             "score": score,
-            "entry_time": str(last["time"]),
+            "entry_time": str(real_option.get("entry_time") or last["time"]),
             "entry_minutes": candle_minutes,
             "entry_spot": price,
             "entry_price": entry_premium,
@@ -3181,11 +3115,33 @@ def _okai_run_hero_zero_single(
             "spot_atr_at_entry": (
                 market_data["atr"]
             ),
+            "option_symbol": real_option.get("symbol"),
+            "option_instrument_key": real_option.get("instrument_key"),
+            "option_expiry": real_option.get("expiry"),
+            "option_strike": real_option.get("strike"),
+            "premium_source": real_option.get("premium_source"),
+            "premium_request_mode": real_option.get("request_mode"),
+            "premium_execution_model": real_option.get("execution_model"),
+            "selected_broker": real_option.get("selected_broker") or str(broker_name).lower(),
+            "_real_option_bars": real_option["bars"],
+            "_real_option_bar_keys": real_option["bar_keys"],
+            "_real_option_entry_minute": real_option["entry_minute"],
             **sizing,
             "qty": sizing["quantity"],
         }
 
     if closed_trade is None:
+        if real_premium_errors:
+            first_error = real_premium_errors[0]
+            return {
+                "success": False,
+                "message": first_error.get("message") or "REAL_PREMIUM_DATA_UNAVAILABLE",
+                "premium_mode": "REAL",
+                "premium_model": "REAL_SELECTED_BROKER_OPTION_OHLC_1M_V2",
+                "real_premium_errors": real_premium_errors[:20],
+                "instrument": instrument,
+                "date": date_str,
+            }
         reason = (
             "Hero Zero: 14:30-15:00 me "
             "valid score 82 setup nahi mila."
@@ -3254,17 +3210,12 @@ def _okai_run_hero_zero_single(
             "force_exit": "15:25 IST",
             "expiry_day": _okai_expiry_rule_label(instrument),
             "capital_cap": _OKAI_HERO_CAPITAL_CAP,
-            "premium_range": [
-                _OKAI_HERO_PREMIUM_MIN,
-                _OKAI_HERO_PREMIUM_MAX,
-            ],
+            "premium_data": "EXACT_OPTION_CONTRACT_OHLC_1M",
             "entry_score": 82,
             "max_trades_per_day": 1,
             "sl_percent": 50,
             "target_percent": 100,
-            "premium_model": (
-                "EXPIRY_GAMMA_ESTIMATE_V1"
-            ),
+            "premium_model": "REAL_SELECTED_BROKER_OPTION_OHLC_1M_V2",
         },
         "summary": {
             "period": "DAILY",
@@ -3290,8 +3241,8 @@ def _okai_run_hero_zero_single(
                 2,
             ),
             "note": (
-                "Hero Zero uses maximum Rs 2,000 "
-                "capital and estimated expiry gamma premium."
+                "Hero Zero uses maximum Rs 2,000 capital and the exact "
+                "selected option contract's real one-minute OHLC candles."
             ),
         },
     }
@@ -3328,7 +3279,7 @@ def _okai_run_hero_zero_day(
             capital,
             (
                 "Hero Zero skipped: is date par "
-                "NIFTY, BANKNIFTY ya SENSEX ki "
+                "NIFTY ya SENSEX ki "
                 "configured expiry nahi hai."
             ),
             False,
@@ -3498,17 +3449,12 @@ def _okai_run_hero_zero_day(
             "force_exit": "15:25 IST",
             "expiry_day": _okai_expiry_rule_label(instrument),
             "capital_cap": _OKAI_HERO_CAPITAL_CAP,
-            "premium_range": [
-                _OKAI_HERO_PREMIUM_MIN,
-                _OKAI_HERO_PREMIUM_MAX,
-            ],
+            "premium_data": "EXACT_OPTION_CONTRACT_OHLC_1M",
             "entry_score": 82,
             "max_trades_per_day": 1,
             "sl_percent": 50,
             "target_percent": 100,
-            "premium_model": (
-                "EXPIRY_GAMMA_ESTIMATE_V1"
-            ),
+            "premium_model": "REAL_SELECTED_BROKER_OPTION_OHLC_1M_V2",
         },
         "summary": {
             "period": "DAILY",
@@ -3535,7 +3481,7 @@ def _okai_run_hero_zero_day(
             ),
             "note": (
                 "AUTO Hero Zero selected the earliest "
-                "valid 82+ setup across all three indices."
+                "valid 82+ setup across NIFTY and SENSEX."
             ),
         },
     }

@@ -19,7 +19,7 @@ from backtest import routes
 
 router = APIRouter(prefix="/backtest", tags=["Backtest"])
 
-_ALLOWED_INSTRUMENTS = {"AUTO", "NIFTY", "BANKNIFTY", "SENSEX"}
+_ALLOWED_INSTRUMENTS = {"AUTO", "NIFTY", "SENSEX"}
 _ALLOWED_STRATEGY_MODES = {"NORMAL", "HERO_ZERO", "COMBINED"}
 _MAX_CALENDAR_DAYS = 366
 _STALE_JOB_SECONDS = 4 * 60 * 60

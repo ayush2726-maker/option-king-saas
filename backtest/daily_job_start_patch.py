@@ -18,7 +18,7 @@ from fastapi import BackgroundTasks, Header
 from backtest import routes
 
 
-_ALLOWED_INSTRUMENTS = {"AUTO", "NIFTY", "BANKNIFTY", "SENSEX"}
+_ALLOWED_INSTRUMENTS = {"AUTO", "NIFTY", "SENSEX"}
 _ALLOWED_STRATEGY_MODES = {"NORMAL", "HERO_ZERO", "COMBINED"}
 _DAILY_JOBS = {}
 _DAILY_JOBS_LOCK = threading.RLock()

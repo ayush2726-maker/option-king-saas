@@ -82,25 +82,6 @@ def _annotate(result, broker_name=None):
     return output
 
 
-def _unsupported_strategy_result(strategy_mode, broker_name=None):
-    selected = str(strategy_mode or "NORMAL").upper()
-    broker = str(broker_name or "").lower().strip()
-    return {
-        "success": False,
-        "message": (
-            "REAL_PREMIUM_HERO_ZERO_NOT_ENABLED: "
-            "Abhi REAL premium mode NORMAL/AUTO ke liye active hai. "
-            "Hero Zero/Combined ko estimated gamma ke saath mix nahi kiya gaya."
-        ),
-        "strategy_mode": selected,
-        "selected_broker": broker or None,
-        "premium_mode": "REAL",
-        "premium_model": GENERIC_REAL_MODEL,
-        "estimated_premium_fallback": False,
-        "alternate_broker_fallback": False,
-    }
-
-
 def finalize_real_option_premium_patch():
     if getattr(routes, "_okai_real_option_premium_final_v2", False):
         return
@@ -137,9 +118,6 @@ def finalize_real_option_premium_patch():
                 "estimated_premium_fallback": False,
                 "alternate_broker_fallback": False,
             }
-
-        if str(strategy_mode or "NORMAL").upper() != "NORMAL":
-            return _unsupported_strategy_result(strategy_mode, broker)
 
         return _annotate(
             original_run_mode(*args, **kwargs),

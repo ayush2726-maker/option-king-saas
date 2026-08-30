@@ -21,7 +21,7 @@ from backtest.unlimited_range_patch import apply_unlimited_range_patch
 
 
 STALE_JOB_SECONDS = 45 * 60
-_ALLOWED_INSTRUMENTS = {"AUTO", "NIFTY", "BANKNIFTY", "SENSEX"}
+_ALLOWED_INSTRUMENTS = {"AUTO", "NIFTY", "SENSEX"}
 _ALLOWED_STRATEGY_MODES = {"NORMAL", "HERO_ZERO", "COMBINED"}
 
 
