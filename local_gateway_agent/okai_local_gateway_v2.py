@@ -8,7 +8,9 @@ This wrapper keeps the battle-tested gateway command/Angel order flow and adds:
 - R-based dynamic profit trailing checked against option LTP every second;
 - fixed target disabled; remote structural exit depends on the active Railway release;
 - local SQLite migration, so open-position trail state survives restarts;
-- generic multi-user setup prompts without exposing broker credentials to SaaS.
+- generic multi-user setup prompts without exposing broker credentials to SaaS;
+- authenticated Angel available-funds snapshots published from the registered
+  static-IP device so Railway never has to guess LIVE buying power.
 """
 
 import ipaddress
@@ -21,7 +23,7 @@ except ImportError:  # Direct script execution from local_gateway_agent/.
     import okai_local_gateway as base
 
 
-RISK_ENGINE_VERSION = "1.2.0-RISK-V2-MULTIUSER"
+RISK_ENGINE_VERSION = "1.2.1-RISK-V2-FUNDS-SYNC"
 
 # Conservative Angel One equity-option charge model. Rates are decimals.
 # Brokerage is charged per executed order. Slight over-estimation is intentional:
@@ -100,6 +102,73 @@ def dynamic_profit_lock(entry_price, initial_sl, peak_ltp, cost_safe_be):
 
 _original_state_db = base.state_db
 _original_command_doctor = base.command_doctor
+_original_saas_client = base.SaaSClient
+
+
+def _fund_number(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+class RiskV2SaaSClient(_original_saas_client):
+    """Attach a fresh Angel RMS snapshot to the authenticated gateway heartbeat."""
+
+    def __init__(self, config):
+        super().__init__(config)
+        self._funds_angel = base.AngelSession(config)
+
+    def _broker_funds(self):
+        last_error = None
+        for attempt in range(2):
+            try:
+                obj = self._funds_angel.login(force=attempt > 0)
+                payload = obj.rmsLimit()
+                if not isinstance(payload, dict) or payload.get("status") is False:
+                    raise RuntimeError(str(payload)[:220])
+                data = payload.get("data") or {}
+                if not isinstance(data, dict):
+                    raise RuntimeError("Angel rmsLimit data missing")
+
+                # Preserve an explicit zero balance. Never substitute net funds
+                # when Angel explicitly says available cash is zero.
+                if "availablecash" in data:
+                    available = _fund_number(data.get("availablecash"), 0.0)
+                elif "availableCash" in data:
+                    available = _fund_number(data.get("availableCash"), 0.0)
+                else:
+                    available = _fund_number(data.get("net"), 0.0)
+
+                used = _fund_number(
+                    data.get("utiliseddebits", data.get("utilizedDebits", 0.0)),
+                    0.0,
+                )
+                total = max(
+                    0.0,
+                    _fund_number(data.get("net"), 0.0),
+                    max(0.0, available) + max(0.0, used),
+                )
+                return {
+                    "broker": "angelone",
+                    "available_cash": round(max(0.0, available), 2),
+                    "used_margin": round(max(0.0, used), 2),
+                    "total_limit": round(total, 2),
+                }
+            except Exception as exc:
+                last_error = exc
+                self._funds_angel.obj = None
+                if attempt == 0:
+                    base.time.sleep(0.5)
+        print(f"⚠️ Angel funds snapshot warning | {str(last_error)[:180]}")
+        return None
+
+    def heartbeat(self):
+        body = {"agent_version": base.AGENT_VERSION}
+        funds = self._broker_funds()
+        if funds is not None:
+            body["broker_funds"] = funds
+        return self.request("POST", "/local-gateway/heartbeat", json=body)
 
 
 def migrated_state_db():
@@ -344,6 +413,7 @@ def command_doctor_v2():
     print(f"Risk engine: {RISK_ENGINE_VERSION} ✅")
     print("Per-user token and command isolation: ENABLED ✅")
     print("Paper-rule capital/risk sizing: ENABLED ✅")
+    print("Angel funds snapshot sync: ENABLED ✅")
     print("Initial stop: SERVER ATR SL ✅")
     print("First lock: ENTRY + ROUND-TRIP CHARGES + 2% ✅")
     print("Dynamic trail: 0.8R / 1.2R / 1.8R stages ✅")
@@ -353,6 +423,7 @@ def command_doctor_v2():
 
 def install_patches():
     base.AGENT_VERSION = RISK_ENGINE_VERSION
+    base.SaaSClient = RiskV2SaaSClient
     base.state_db = migrated_state_db
     base.GatewayRunner = RiskV2GatewayRunner
     base.command_setup = command_setup_v2
