@@ -175,3 +175,11 @@ def install_live_gateway_display_sync_patch()->None:
         def view_with_shadow(row): return _decorate(original_view(_shadow(row)))
         view_with_shadow._okai_gateway_display_sync_v5=True; trade_routes._trade_view=view_with_shadow
     _INSTALLED=True
+    # Missed-trade rows are historical snapshots. Add current gateway context
+    # and label old OFFLINE reasons as "at capture" instead of implying the
+    # gateway is offline now. This changes display only, never trading logic.
+    try:
+        from bot.missed_trade_gateway_context_patch import apply_missed_trade_gateway_context_patch
+        apply_missed_trade_gateway_context_patch()
+    except Exception:
+        pass
