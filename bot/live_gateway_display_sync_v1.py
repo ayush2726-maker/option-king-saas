@@ -12,7 +12,7 @@ from typing import Any
 from database import get_db
 
 
-VERSION = "LIVE_GATEWAY_DISPLAY_SYNC_V3"
+VERSION = "LIVE_GATEWAY_DISPLAY_SYNC_V4"
 _INSTALLED = False
 
 
@@ -90,7 +90,6 @@ def _gateway_trade(conn, user_id: int, symbol: str):
 
 
 def _shadow(row):
-    """Overlay broker-confirmed gateway entry/qty/LTP before P&L is calculated."""
     data = dict(row)
     if str(data.get("trading_mode") or "paper").lower() != "live":
         return data
@@ -138,11 +137,21 @@ def _shadow(row):
             fields.append("entry_order_id=?")
             params.append(order_id)
         if ltp > 0:
-            fields += ["last_ltp=?", "quote_updated_at=?", "quote_source='ANGEL_LOCAL_GATEWAY_SHADOW'", "quote_failed_at=NULL", "quote_error=NULL", "quote_failure_count=0"]
+            fields += [
+                "last_ltp=?",
+                "quote_updated_at=?",
+                "quote_source='ANGEL_LOCAL_GATEWAY_SHADOW'",
+                "quote_failed_at=NULL",
+                "quote_error=NULL",
+                "quote_failure_count=0",
+            ]
             params += [ltp, quote_time or datetime.now(timezone.utc).isoformat()]
         if fields and _i(data.get("id"), 0) > 0:
             params.append(_i(data.get("id"), 0))
-            conn.execute(f"UPDATE paper_trades SET {', '.join(fields)} WHERE id=? AND UPPER(status)='OPEN'", tuple(params))
+            conn.execute(
+                f"UPDATE paper_trades SET {', '.join(fields)} WHERE id=? AND UPPER(status)='OPEN'",
+                tuple(params),
+            )
             conn.commit()
         return data
     finally:
@@ -181,19 +190,30 @@ def _find_paper(conn, user_id: int, gateway_trade):
 
 
 def _mirror_event(gateway, event):
-    """Accept both legacy trade-id events and V3+ self-describing position events."""
+    """Mirror V3+ heartbeat by symbol first; local trade ids are not authoritative."""
     event = dict(event or {})
     trade_id = _i(event.get("trade_id"), 0)
     direct_symbol = str(event.get("symbol") or "").strip()
     direct_order_id = str(event.get("entry_order_id") or event.get("broker_order_id") or "").strip()
     if trade_id <= 0 and not direct_symbol:
-        return
+        return False
 
     conn = get_db()
     try:
         _ensure_quote_columns(conn)
-        gt = None
-        if trade_id > 0:
+        pt = None
+
+        # V3+ heartbeat identity is symbol/order first. Never let an unrelated
+        # Railway `trades.id` with the same integer override the real contract.
+        if direct_symbol or direct_order_id:
+            pt = _find_paper_by_symbol(
+                conn,
+                int(gateway["user_id"]),
+                direct_symbol,
+                direct_order_id,
+            )
+
+        if not pt and trade_id > 0:
             try:
                 gt = conn.execute(
                     "SELECT * FROM trades WHERE id=? AND user_id=? LIMIT 1",
@@ -201,21 +221,11 @@ def _mirror_event(gateway, event):
                 ).fetchone()
             except Exception:
                 gt = None
+            if gt:
+                pt = _find_paper(conn, int(gateway["user_id"]), gt)
 
-        if gt:
-            pt = _find_paper(conn, int(gateway["user_id"]), gt)
-        else:
-            # Critical fallback: the local SQLite trade_id and Railway paper_trades
-            # id are independent namespaces. V3+ gateway heartbeats include symbol
-            # so live LTP can still map even when no matching `trades` shadow row exists.
-            pt = _find_paper_by_symbol(
-                conn,
-                int(gateway["user_id"]),
-                direct_symbol,
-                direct_order_id,
-            )
         if not pt:
-            return
+            return False
 
         paper_id = _i(_v(pt, "id"), 0)
         kind = str(event.get("event") or "").upper()
@@ -231,7 +241,7 @@ def _mirror_event(gateway, event):
                 fields += [
                     "last_ltp=?",
                     "quote_updated_at=?",
-                    "quote_source='ANGEL_LOCAL_GATEWAY_POSITION_DIRECT'",
+                    "quote_source='ANGEL_LOCAL_GATEWAY_POSITION_DIRECT_V4'",
                     "quote_failed_at=NULL",
                     "quote_error=NULL",
                     "quote_failure_count=0",
@@ -253,17 +263,21 @@ def _mirror_event(gateway, event):
                     tuple(params),
                 )
                 conn.commit()
+                return True
+            return False
 
-        elif kind == "ENTRY_FILLED":
+        if kind == "ENTRY_FILLED":
             entry = _f(event.get("entry_price"), 0.0)
             qty = _i(event.get("quantity"), 0)
-            order_id = str(event.get("broker_order_id") or "")
+            order_id = str(event.get("broker_order_id") or direct_order_id or "")
             if entry > 0:
                 conn.execute(
                     "UPDATE paper_trades SET entry_price=?, last_ltp=?, qty=COALESCE(NULLIF(?,0),qty), entry_order_id=COALESCE(NULLIF(?,''),entry_order_id), quote_updated_at=?, quote_source='ANGEL_LOCAL_GATEWAY_ENTRY_FILL' WHERE id=?",
                     (entry, entry, qty, order_id, now, paper_id),
                 )
                 conn.commit()
+                return True
+        return False
     finally:
         conn.close()
 
@@ -294,22 +308,38 @@ def install_live_gateway_display_sync_patch() -> None:
     import bot.trade_live_routes as trade_routes
 
     original_event = gateway_routes.record_position_event
-    if not getattr(original_event, "_okai_gateway_display_sync_v3", False):
+    if not getattr(original_event, "_okai_gateway_display_sync_v4", False):
         def event_with_sync(gateway, event):
-            result = original_event(gateway, event)
+            # Mirror first. Legacy service validates its own `trades.id`; local
+            # gateway ids can collide with unrelated Railway ids or be absent.
+            mirrored = False
             try:
-                _mirror_event(gateway, event)
+                mirrored = bool(_mirror_event(gateway, event))
             except Exception:
-                pass
+                mirrored = False
+
+            try:
+                result = original_event(gateway, event)
+            except Exception:
+                # A self-describing heartbeat that was already mirrored into the
+                # correct live paper row is accepted even if legacy id validation fails.
+                if mirrored and str((event or {}).get("event") or "").upper() == "POSITION_HEARTBEAT":
+                    return {
+                        "accepted": True,
+                        "event": "POSITION_HEARTBEAT",
+                        "mapped_by": "symbol",
+                    }
+                raise
             return result
-        event_with_sync._okai_gateway_display_sync_v3 = True
+
+        event_with_sync._okai_gateway_display_sync_v4 = True
         gateway_routes.record_position_event = event_with_sync
 
     original_view = trade_routes._trade_view
-    if not getattr(original_view, "_okai_gateway_display_sync_v3", False):
+    if not getattr(original_view, "_okai_gateway_display_sync_v4", False):
         def view_with_shadow(row):
             return _decorate(original_view(_shadow(row)))
-        view_with_shadow._okai_gateway_display_sync_v3 = True
+        view_with_shadow._okai_gateway_display_sync_v4 = True
         trade_routes._trade_view = view_with_shadow
 
     _INSTALLED = True
