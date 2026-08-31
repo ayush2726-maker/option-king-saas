@@ -4,10 +4,12 @@
 Keeps V2 risk/order behaviour unchanged while preventing the 1-second monitor and
 RMS heartbeat from hammering Angel SmartAPI at the same time. Position LTP is
 polled at a safe cadence, rate-limit errors back off without forcing repeated
-logins, and the last good LTP continues to be published to Railway.
+logins, and every Railway position heartbeat is self-describing (symbol/order/
+entry/quantity) so the app ledger can map it without relying on matching DB ids.
 """
 
 import time
+from datetime import datetime
 
 try:
     from . import okai_local_gateway as base
@@ -17,7 +19,7 @@ except ImportError:
     import okai_local_gateway_v2 as v2
 
 
-RATE_SAFE_VERSION = "1.3.0-RATE-SAFE-LTP-SYNC"
+RATE_SAFE_VERSION = "1.3.1-RATE-SAFE-DIRECT-POSITION-SYNC"
 LTP_MIN_INTERVAL_SECONDS = 2.2
 RATE_LIMIT_BACKOFF_SECONDS = 8.0
 FUNDS_REFRESH_SECONDS = 60.0
@@ -77,7 +79,6 @@ class RateSafeAngelSession(base.AngelSession):
                     f"ANGEL_RATE_LIMIT_BACKOFF {RATE_LIMIT_BACKOFF_SECONDS:.0f}s | {str(exc)[:160]}"
                 )
 
-            # For auth/session failures only, allow one fresh login retry.
             self.obj = None
             try:
                 obj = self.login(force=True)
@@ -120,12 +121,91 @@ class RateSafeSaaSClient(v2.RiskV2SaaSClient):
 class RateSafeGatewayRunner(v2.RiskV2GatewayRunner):
     def __init__(self, config):
         super().__init__(config)
-        # One shared rate-safe Angel session for entries, exits and monitoring.
         self.angel = RateSafeAngelSession(config)
+
+    def monitor_positions(self):
+        """V2 trail/exit logic plus direct symbol-bearing Railway heartbeat."""
+        now_ist = datetime.now(base.IST)
+        current_hhmm = now_ist.strftime("%H:%M")
+        for position in self.open_positions():
+            try:
+                ltp = self.angel.ltp(
+                    position["exchange"],
+                    position["symbol"],
+                    position["symboltoken"],
+                )
+                entry = float(position["entry_price"])
+                initial_sl = float(position["initial_sl_price"] or position["sl_price"])
+                peak = max(float(position["peak_ltp"] or entry), float(ltp))
+                cost_be = float(position["breakeven_price"] or entry)
+                trail = v2.dynamic_profit_lock(entry, initial_sl, peak, cost_be)
+                old_sl = float(position["sl_price"] or initial_sl)
+                active_sl = max(old_sl, float(trail["sl_price"]))
+                stage = trail["stage"]
+
+                self.db.execute(
+                    """
+                    UPDATE local_positions
+                    SET last_ltp=?, peak_ltp=?, sl_price=?, trail_stage=?
+                    WHERE trade_id=?
+                    """,
+                    (ltp, peak, active_sl, stage, position["trade_id"]),
+                )
+                self.db.commit()
+
+                reason = None
+                if ltp <= active_sl:
+                    reason = (
+                        "PROFIT_LOCK_TRAIL"
+                        if stage != "INITIAL_ATR_SL"
+                        else "LOCAL 1-SECOND ATR SL HIT"
+                    )
+                elif current_hhmm >= str(position["force_exit_at"]):
+                    reason = "LOCAL EOD EXIT 15:25 IST"
+
+                if reason:
+                    self.execute_exit(position["trade_id"], reason)
+                    print(
+                        f"✅ Exit complete | trade={position['trade_id']} | "
+                        f"{reason} | ltp={ltp:.2f} sl={active_sl:.2f} stage={stage}"
+                    )
+                    continue
+
+                last_sent = self.last_position_heartbeat.get(position["trade_id"], 0)
+                if base.time.time() - last_sent >= 10:
+                    event = {
+                        "event": "POSITION_HEARTBEAT",
+                        "trade_id": int(position["trade_id"]),
+                        "symbol": str(position["symbol"]),
+                        "symboltoken": str(position["symboltoken"]),
+                        "exchange": str(position["exchange"]),
+                        "option_type": str(position["option_type"] or ""),
+                        "entry_order_id": str(position["entry_order_id"] or ""),
+                        "entry_price": entry,
+                        "quantity": int(position["quantity"]),
+                        "ltp": float(ltp),
+                        "peak_ltp": peak,
+                        "active_sl": active_sl,
+                        "cost_safe_breakeven": cost_be,
+                        "trail_stage": stage,
+                        "peak_r": trail["peak_r"],
+                        "risk_engine": RATE_SAFE_VERSION,
+                        "local_status": "open",
+                    }
+                    self.saas.position_event(event)
+                    self.last_position_heartbeat[position["trade_id"]] = base.time.time()
+                    print(
+                        f"📡 POSITION_SYNC | {position['symbol']} | "
+                        f"ltp={ltp:.2f} | qty={int(position['quantity'])}"
+                    )
+            except Exception as exc:
+                print(
+                    f"⚠️ Position monitor warning | trade={position['trade_id']} | "
+                    f"{str(exc)[:180]}"
+                )
 
 
 def install_patches():
-    # Install all V2 risk logic first, then replace only the API-rate-sensitive pieces.
     v2.install_patches()
     base.AGENT_VERSION = RATE_SAFE_VERSION
     base.SaaSClient = RateSafeSaaSClient
@@ -139,12 +219,12 @@ def command_doctor_v3():
     print(f"LTP minimum interval: {LTP_MIN_INTERVAL_SECONDS:.1f}s ✅")
     print(f"Angel rate-limit backoff: {RATE_LIMIT_BACKOFF_SECONDS:.0f}s ✅")
     print(f"Funds refresh cache: {FUNDS_REFRESH_SECONDS:.0f}s ✅")
+    print("Direct symbol position sync: ENABLED ✅")
     print(f"Gateway version: {RATE_SAFE_VERSION} ✅")
 
 
 def main():
     install_patches()
-    # Preserve v2 setup/doctor semantics while exposing the V3 doctor details.
     base.command_doctor = command_doctor_v3
     base.main()
 
