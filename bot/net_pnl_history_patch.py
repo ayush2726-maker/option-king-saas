@@ -57,14 +57,10 @@ def _underlying(row) -> str:
 
 def _ensure_columns(conn) -> None:
     for name, kind in (
-        ("gross_pnl", "REAL"),
-        ("slippage_cost", "REAL"),
-        ("total_charges", "REAL"),
-        ("brokerage", "REAL"),
-        ("statutory_charges", "REAL"),
-        ("net_pnl", "REAL"),
-        ("pnl_basis", "TEXT"),
-        ("charges_json", "TEXT"),
+        ("gross_pnl", "REAL"), ("slippage_cost", "REAL"),
+        ("total_charges", "REAL"), ("brokerage", "REAL"),
+        ("statutory_charges", "REAL"), ("net_pnl", "REAL"),
+        ("pnl_basis", "TEXT"), ("charges_json", "TEXT"),
     ):
         try:
             conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {name} {kind}")
@@ -74,18 +70,15 @@ def _ensure_columns(conn) -> None:
 
 
 def _gateway_qty(conn, row) -> int:
-    """Recover quantity from the server gateway ledger when possible."""
     user_id = _int(_value(row, "user_id", 0), 0)
     symbol = str(_value(row, "symbol", "") or "")
     entry_order_id = str(_value(row, "entry_order_id", "") or "")
     if user_id <= 0 or not symbol:
         return 0
-
     if entry_order_id:
         try:
             match = conn.execute(
-                "SELECT quantity FROM trades WHERE user_id=? AND broker_order_id=? "
-                "ORDER BY id DESC LIMIT 1",
+                "SELECT quantity FROM trades WHERE user_id=? AND broker_order_id=? ORDER BY id DESC LIMIT 1",
                 (user_id, entry_order_id),
             ).fetchone()
             qty = _int(match["quantity"] if match else 0, 0)
@@ -93,14 +86,10 @@ def _gateway_qty(conn, row) -> int:
                 return qty
         except Exception:
             pass
-
     try:
-        # Prefer the closest matching entry price when the same option was traded
-        # more than once during the day.
         rows = conn.execute(
-            "SELECT quantity, entry_price FROM trades "
-            "WHERE user_id=? AND UPPER(symbol)=UPPER(?) AND COALESCE(quantity,0)>0 "
-            "ORDER BY id DESC LIMIT 20",
+            "SELECT quantity, entry_price FROM trades WHERE user_id=? AND UPPER(symbol)=UPPER(?) "
+            "AND COALESCE(quantity,0)>0 ORDER BY id DESC LIMIT 20",
             (user_id, symbol),
         ).fetchall()
         if not rows:
@@ -113,33 +102,21 @@ def _gateway_qty(conn, row) -> int:
 
 
 def _infer_qty_from_gross(row) -> int:
-    """Infer legacy quantity only when saved P&L exactly matches price move × qty.
-
-    Older LIVE rows were sometimes closed with gross P&L but without ``qty``.
-    This conservative recovery is deterministic and only accepts a near-integer
-    quantity whose reconstructed gross P&L matches the saved value within a few
-    paise. It does not guess when the numbers are ambiguous.
-    """
     entry = _float(_value(row, "entry_price", 0), 0)
     exit_price = _float(_value(row, "exit_price", 0), 0)
     move = exit_price - entry
     if entry <= 0 or exit_price <= 0 or abs(move) < 1e-9:
         return 0
-
     saved = _value(row, "gross_pnl")
     if saved is None or abs(_float(saved, 0)) < 1e-9:
         saved = _value(row, "pnl")
     pnl = _float(saved, 0)
     if abs(pnl) < 1e-9 or pnl * move <= 0:
         return 0
-
-    raw_qty = pnl / move
-    candidate = int(round(raw_qty))
+    candidate = int(round(pnl / move))
     if candidate <= 0 or candidate > 100000:
         return 0
-    reconstructed = move * candidate
-    tolerance = max(0.05, abs(pnl) * 0.00005)
-    if abs(reconstructed - pnl) > tolerance:
+    if abs(move * candidate - pnl) > max(0.05, abs(pnl) * 0.00005):
         return 0
     return candidate
 
@@ -148,18 +125,13 @@ def _repair_missing_qty(conn, row) -> int:
     qty = _int(_value(row, "qty", 0), 0)
     if qty > 0:
         return qty
-
     qty = _gateway_qty(conn, row)
     if qty <= 0:
         qty = _infer_qty_from_gross(row)
     if qty <= 0:
         return 0
-
     try:
-        conn.execute(
-            "UPDATE paper_trades SET qty=? WHERE id=? AND COALESCE(qty,0)<=0",
-            (qty, row["id"]),
-        )
+        conn.execute("UPDATE paper_trades SET qty=? WHERE id=? AND COALESCE(qty,0)<=0", (qty, row["id"]))
     except Exception:
         return 0
     return qty
@@ -167,120 +139,44 @@ def _repair_missing_qty(conn, row) -> int:
 
 def calculate_row_net_costs(row, exit_price=None) -> dict:
     entry = max(0.05, _float(_value(row, "entry_price", 0.05), 0.05))
-    exit_value = max(
-        0.05,
-        _float(
-            exit_price
-            if exit_price is not None
-            else _value(row, "exit_price", entry),
-            entry,
-        ),
-    )
+    exit_value = max(0.05, _float(exit_price if exit_price is not None else _value(row, "exit_price", entry), entry))
     qty = max(1, _int(_value(row, "qty", 1), 1))
     mode = str(_value(row, "trading_mode", "paper") or "paper").lower()
     broker = str(_value(row, "broker_name", "angelone") or "angelone").lower()
-    return dict(
-        calculate_execution_costs(
-            broker,
-            _underlying(row),
-            entry,
-            exit_value,
-            qty,
-            include_slippage=(mode != "live"),
-        )
-    )
+    return dict(calculate_execution_costs(broker, _underlying(row), entry, exit_value, qty, include_slippage=(mode != "live")))
 
 
 def backfill_closed_trade_costs(user_id=None) -> int:
-    conn = get_db()
-    repaired = 0
+    conn = get_db(); repaired = 0
     try:
         _ensure_columns(conn)
-        sql = """
-            SELECT * FROM paper_trades
-            WHERE status='CLOSED'
-              AND entry_price IS NOT NULL
-              AND exit_price IS NOT NULL
-              AND (
-                    COALESCE(qty, 0) <= 0
-                 OR net_pnl IS NULL
-                 OR COALESCE(pnl_basis, '') = ''
-                 OR COALESCE(total_charges, 0) <= 0
-              )
-        """
+        sql = """SELECT * FROM paper_trades WHERE status='CLOSED' AND entry_price IS NOT NULL AND exit_price IS NOT NULL
+                 AND (COALESCE(qty,0)<=0 OR net_pnl IS NULL OR COALESCE(pnl_basis,'')='' OR COALESCE(total_charges,0)<=0)"""
         params = []
         if user_id is not None:
-            sql += " AND user_id=?"
-            params.append(int(user_id))
+            sql += " AND user_id=?"; params.append(int(user_id))
         sql += " ORDER BY id ASC LIMIT 5000"
-        rows = conn.execute(sql, tuple(params)).fetchall()
-
-        for row in rows:
+        for row in conn.execute(sql, tuple(params)).fetchall():
             qty = _repair_missing_qty(conn, row)
-            if qty <= 0:
-                qty = _int(_value(row, "qty", 0), 0)
-            if qty <= 0:
-                # Cost math without the executed quantity would be misleading.
-                continue
-
-            # Re-read so calculate_row_net_costs sees the repaired quantity.
-            current = conn.execute(
-                "SELECT * FROM paper_trades WHERE id=?",
-                (row["id"],),
-            ).fetchone() or row
+            if qty <= 0: qty = _int(_value(row, "qty", 0), 0)
+            if qty <= 0: continue
+            current = conn.execute("SELECT * FROM paper_trades WHERE id=?", (row["id"],)).fetchone() or row
             costs = calculate_row_net_costs(current)
-            gross = _float(costs.get("market_gross_pnl"), 0)
-            net = _float(costs.get("net_pnl"), 0)
-            charges = _float(costs.get("total_charges"), 0)
-            brokerage = _float(costs.get("brokerage"), 0)
+            gross = _float(costs.get("market_gross_pnl"), 0); net = _float(costs.get("net_pnl"), 0)
+            charges = _float(costs.get("total_charges"), 0); brokerage = _float(costs.get("brokerage"), 0)
             statutory = max(0.0, charges - brokerage)
-            conn.execute(
-                """
-                UPDATE paper_trades
-                SET pnl=?, gross_pnl=?, slippage_cost=?, total_charges=?,
-                    brokerage=?, statutory_charges=?, net_pnl=?, pnl_basis=?,
-                    charges_json=?
-                WHERE id=?
-                """,
-                (
-                    round(net, 2),
-                    round(gross, 2),
-                    round(_float(costs.get("slippage_cost"), 0), 2),
-                    round(charges, 2),
-                    round(brokerage, 2),
-                    round(statutory, 2),
-                    round(net, 2),
-                    str(costs.get("execution_basis") or "NET_AFTER_COSTS"),
-                    json.dumps(costs, separators=(",", ":"), sort_keys=True),
-                    row["id"],
-                ),
-            )
+            conn.execute("""UPDATE paper_trades SET pnl=?, gross_pnl=?, slippage_cost=?, total_charges=?, brokerage=?,
+                         statutory_charges=?, net_pnl=?, pnl_basis=?, charges_json=? WHERE id=?""",
+                (round(net,2), round(gross,2), round(_float(costs.get("slippage_cost"),0),2), round(charges,2),
+                 round(brokerage,2), round(statutory,2), round(net,2), str(costs.get("execution_basis") or "NET_AFTER_COSTS"),
+                 json.dumps(costs,separators=(",",":"),sort_keys=True), row["id"]))
             repaired += 1
-
         if user_id is not None:
             try:
-                summary = conn.execute(
-                    """
-                    SELECT COALESCE(SUM(pnl), 0) AS pnl, COUNT(*) AS trades
-                    FROM paper_trades
-                    WHERE user_id=? AND status='CLOSED'
-                    """,
-                    (int(user_id),),
-                ).fetchone()
-                conn.execute(
-                    """
-                    UPDATE bot_status
-                    SET total_pnl=?, total_trades=?
-                    WHERE user_id=?
-                    """,
-                    (
-                        round(_float(summary["pnl"] if summary else 0), 2),
-                        _int(summary["trades"] if summary else 0),
-                        int(user_id),
-                    ),
-                )
-            except Exception:
-                pass
+                summary = conn.execute("SELECT COALESCE(SUM(pnl),0) AS pnl, COUNT(*) AS trades FROM paper_trades WHERE user_id=? AND status='CLOSED'", (int(user_id),)).fetchone()
+                conn.execute("UPDATE bot_status SET total_pnl=?, total_trades=? WHERE user_id=?",
+                    (round(_float(summary["pnl"] if summary else 0),2), _int(summary["trades"] if summary else 0), int(user_id)))
+            except Exception: pass
         conn.commit()
     finally:
         conn.close()
@@ -289,26 +185,38 @@ def backfill_closed_trade_costs(user_id=None) -> int:
 
 def _wrap_route(router, path, wrapper_factory) -> None:
     for route in getattr(router, "routes", []):
-        if getattr(route, "path", "") != path:
-            continue
+        if getattr(route, "path", "") != path: continue
         original = route.endpoint
-        if getattr(original, "_okai_net_pnl_wrapped", False):
-            return
-        wrapped = wrapper_factory(original)
-        wrapped._okai_net_pnl_wrapped = True
-        route.endpoint = wrapped
-        try:
-            route.dependant.call = wrapped
-        except Exception:
-            pass
+        if getattr(original, "_okai_net_pnl_wrapped", False): return
+        wrapped = wrapper_factory(original); wrapped._okai_net_pnl_wrapped = True; route.endpoint = wrapped
+        try: route.dependant.call = wrapped
+        except Exception: pass
         return
+
+
+def _decorate_history_trade(trade):
+    """Response-only aliases expected by the app. No gateway/live execution hooks."""
+    if not isinstance(trade, dict): return trade
+    qty = _int(trade.get("qty", trade.get("quantity", 0)), 0)
+    charges = max(0.0, _float(trade.get("total_charges", 0), 0))
+    trade["qty"] = qty
+    trade["quantity"] = qty
+    trade["execution_cost"] = round(charges, 2)
+    trade["execution_costs"] = round(charges, 2)
+    trade["cost"] = round(charges, 2)
+    trade["charges"] = round(charges, 2)
+    if str(trade.get("status") or "").upper() == "CLOSED":
+        net = trade.get("net_pnl")
+        if net is not None:
+            trade["pnl"] = round(_float(net), 2)
+    elif trade.get("pnl") is not None:
+        trade["pnl"] = round(_float(trade.get("pnl")), 2)
+    return trade
 
 
 def install_net_pnl_history_patch() -> None:
     global _INSTALLED
-    if _INSTALLED:
-        return
-
+    if _INSTALLED: return
     from user_panel import routes as user_routes
     from paper import routes as paper_routes
 
@@ -317,13 +225,9 @@ def install_net_pnl_history_patch() -> None:
             user = get_current_user(authorization)
             backfill_closed_trade_costs(user["id"])
             result = original(authorization)
-            for trade in result.get("paper_trades", []) if isinstance(result, dict) else []:
-                if str(trade.get("status") or "").upper() == "CLOSED":
-                    value = trade.get("net_pnl")
-                    if value is not None:
-                        trade["pnl"] = round(_float(value), 2)
-                elif trade.get("pnl") is not None:
-                    trade["pnl"] = round(_float(trade.get("pnl")), 2)
+            if isinstance(result, dict):
+                for trade in result.get("paper_trades", []):
+                    _decorate_history_trade(trade)
             return result
         endpoint.__name__ = getattr(original, "__name__", "paper_history")
         endpoint.__annotations__ = getattr(original, "__annotations__", {})
@@ -336,8 +240,7 @@ def install_net_pnl_history_patch() -> None:
             result = original(authorization)
             account = result.get("account", {}) if isinstance(result, dict) else {}
             for key in ("total_pnl", "equity"):
-                if key in account:
-                    account[key] = round(_float(account.get(key)), 2)
+                if key in account: account[key] = round(_float(account.get(key)), 2)
             return result
         endpoint.__name__ = getattr(original, "__name__", "paper_account")
         endpoint.__annotations__ = getattr(original, "__annotations__", {})
