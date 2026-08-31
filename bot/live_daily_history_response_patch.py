@@ -220,7 +220,9 @@ def install_live_daily_history_response_patch():
 
     import user_panel.routes as user_routes
     import bot.trade_live_routes as trade_routes
+    from bot.live_accounting_repair_v3 import install_live_accounting_repair_v3
 
     _wrap_view(user_routes, "_paper_trade_view", "_okai_live_daily_history_v2")
     _wrap_view(trade_routes, "_trade_view", "_okai_live_daily_history_v2")
+    install_live_accounting_repair_v3()
     _INSTALLED = True
