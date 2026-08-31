@@ -1,6 +1,6 @@
 """Make every displayed Paper/Live P&L net of execution costs.
 
-New closes are handled by ``live_net_pnl_breakeven_patch``.  This module also
+New closes are handled by ``live_net_pnl_breakeven_patch``. This module also
 repairs older closed rows that were saved with gross P&L and wraps the history
 endpoint so the UI never receives a gross value labelled simply as P&L.
 """
@@ -38,7 +38,7 @@ def _float(value, default=0.0):
 
 def _int(value, default=0):
     try:
-        return int(value)
+        return int(float(value))
     except Exception:
         return int(default)
 
@@ -71,6 +71,98 @@ def _ensure_columns(conn) -> None:
         except Exception:
             pass
     conn.commit()
+
+
+def _gateway_qty(conn, row) -> int:
+    """Recover quantity from the server gateway ledger when possible."""
+    user_id = _int(_value(row, "user_id", 0), 0)
+    symbol = str(_value(row, "symbol", "") or "")
+    entry_order_id = str(_value(row, "entry_order_id", "") or "")
+    if user_id <= 0 or not symbol:
+        return 0
+
+    if entry_order_id:
+        try:
+            match = conn.execute(
+                "SELECT quantity FROM trades WHERE user_id=? AND broker_order_id=? "
+                "ORDER BY id DESC LIMIT 1",
+                (user_id, entry_order_id),
+            ).fetchone()
+            qty = _int(match["quantity"] if match else 0, 0)
+            if qty > 0:
+                return qty
+        except Exception:
+            pass
+
+    try:
+        # Prefer the closest matching entry price when the same option was traded
+        # more than once during the day.
+        rows = conn.execute(
+            "SELECT quantity, entry_price FROM trades "
+            "WHERE user_id=? AND UPPER(symbol)=UPPER(?) AND COALESCE(quantity,0)>0 "
+            "ORDER BY id DESC LIMIT 20",
+            (user_id, symbol),
+        ).fetchall()
+        if not rows:
+            return 0
+        entry = _float(_value(row, "entry_price", 0), 0)
+        best = min(rows, key=lambda item: abs(_float(item["entry_price"], entry) - entry))
+        return _int(best["quantity"], 0)
+    except Exception:
+        return 0
+
+
+def _infer_qty_from_gross(row) -> int:
+    """Infer legacy quantity only when saved P&L exactly matches price move × qty.
+
+    Older LIVE rows were sometimes closed with gross P&L but without ``qty``.
+    This conservative recovery is deterministic and only accepts a near-integer
+    quantity whose reconstructed gross P&L matches the saved value within a few
+    paise. It does not guess when the numbers are ambiguous.
+    """
+    entry = _float(_value(row, "entry_price", 0), 0)
+    exit_price = _float(_value(row, "exit_price", 0), 0)
+    move = exit_price - entry
+    if entry <= 0 or exit_price <= 0 or abs(move) < 1e-9:
+        return 0
+
+    saved = _value(row, "gross_pnl")
+    if saved is None or abs(_float(saved, 0)) < 1e-9:
+        saved = _value(row, "pnl")
+    pnl = _float(saved, 0)
+    if abs(pnl) < 1e-9 or pnl * move <= 0:
+        return 0
+
+    raw_qty = pnl / move
+    candidate = int(round(raw_qty))
+    if candidate <= 0 or candidate > 100000:
+        return 0
+    reconstructed = move * candidate
+    tolerance = max(0.05, abs(pnl) * 0.00005)
+    if abs(reconstructed - pnl) > tolerance:
+        return 0
+    return candidate
+
+
+def _repair_missing_qty(conn, row) -> int:
+    qty = _int(_value(row, "qty", 0), 0)
+    if qty > 0:
+        return qty
+
+    qty = _gateway_qty(conn, row)
+    if qty <= 0:
+        qty = _infer_qty_from_gross(row)
+    if qty <= 0:
+        return 0
+
+    try:
+        conn.execute(
+            "UPDATE paper_trades SET qty=? WHERE id=? AND COALESCE(qty,0)<=0",
+            (qty, row["id"]),
+        )
+    except Exception:
+        return 0
+    return qty
 
 
 def calculate_row_net_costs(row, exit_price=None) -> dict:
@@ -109,9 +201,9 @@ def backfill_closed_trade_costs(user_id=None) -> int:
             WHERE status='CLOSED'
               AND entry_price IS NOT NULL
               AND exit_price IS NOT NULL
-              AND COALESCE(qty, 0) > 0
               AND (
-                    net_pnl IS NULL
+                    COALESCE(qty, 0) <= 0
+                 OR net_pnl IS NULL
                  OR COALESCE(pnl_basis, '') = ''
                  OR COALESCE(total_charges, 0) <= 0
               )
@@ -124,7 +216,19 @@ def backfill_closed_trade_costs(user_id=None) -> int:
         rows = conn.execute(sql, tuple(params)).fetchall()
 
         for row in rows:
-            costs = calculate_row_net_costs(row)
+            qty = _repair_missing_qty(conn, row)
+            if qty <= 0:
+                qty = _int(_value(row, "qty", 0), 0)
+            if qty <= 0:
+                # Cost math without the executed quantity would be misleading.
+                continue
+
+            # Re-read so calculate_row_net_costs sees the repaired quantity.
+            current = conn.execute(
+                "SELECT * FROM paper_trades WHERE id=?",
+                (row["id"],),
+            ).fetchone() or row
+            costs = calculate_row_net_costs(current)
             gross = _float(costs.get("market_gross_pnl"), 0)
             net = _float(costs.get("net_pnl"), 0)
             charges = _float(costs.get("total_charges"), 0)
