@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from bot.live_net_pnl_breakeven_patch import calculate_execution_costs
 
 IST = timezone(timedelta(hours=5, minutes=30))
-VERSION = "LIVE_ACCOUNTING_REPAIR_V3"
+VERSION = "LIVE_ACCOUNTING_REPAIR_V4_STARTUP"
 _INSTALLED = False
 LOT_SIZES = {"NIFTY": 65, "BANKNIFTY": 30, "SENSEX": 20}
 
@@ -67,8 +67,6 @@ def _expected_lot_qty(row):
     if entry <= 0 or exit_price <= 0 or abs(move) < 1e-9:
         return 0
 
-    # Try all legacy P&L fields. A valid repair must reconstruct exactly one
-    # exchange lot for the saved broker move (within paise rounding tolerance).
     for key in ("pnl", "gross_pnl", "net_pnl"):
         saved = _v(row, key, None)
         if saved is None:
@@ -157,7 +155,7 @@ def repair_live_user_today(conn, user_id: int) -> int:
             (
                 qty, broker, round(net, 2), round(gross, 2), round(slippage, 2),
                 round(charges, 2), round(brokerage, 2), round(statutory, 2),
-                round(net, 2), "LIVE_NET_AFTER_EXECUTION_COSTS_V3",
+                round(net, 2), "LIVE_NET_AFTER_EXECUTION_COSTS_V4",
                 json.dumps(costs, separators=(",", ":"), sort_keys=True), row["id"],
             ),
         )
@@ -180,9 +178,47 @@ def repair_live_user_today(conn, user_id: int) -> int:
     return repaired
 
 
+def _current_live_user_ids(conn):
+    ids = set()
+    try:
+        rows = conn.execute("SELECT user_id, settings_json FROM strategy_settings").fetchall()
+        for row in rows:
+            try:
+                settings = json.loads(_v(row, "settings_json", "{}") or "{}")
+            except Exception:
+                settings = {}
+            if str(settings.get("trading_mode", "paper") or "paper").lower() == "live":
+                uid = _i(_v(row, "user_id", 0), 0)
+                if uid > 0:
+                    ids.add(uid)
+    except Exception:
+        pass
+    return sorted(ids)
+
+
+def repair_current_live_users_once() -> dict:
+    """Run the accounting migration immediately when the backend process starts."""
+    from database import get_db
+    conn = get_db()
+    users = []
+    repaired = 0
+    try:
+        for user_id in _current_live_user_ids(conn):
+            users.append(user_id)
+            try:
+                repaired += repair_live_user_today(conn, user_id)
+            except Exception:
+                continue
+        conn.commit()
+    finally:
+        conn.close()
+    return {"users": len(users), "repaired": repaired, "version": VERSION}
+
+
 def _wrap_ledger(original):
-    if getattr(original, "_okai_live_accounting_v3", False):
+    if getattr(original, "_okai_live_accounting_v4", False):
         return original
+
     def wrapped(conn, user_id, settings=None, now=None):
         mode = str((settings or {}).get("trading_mode", "paper") or "paper").lower()
         if mode == "live":
@@ -191,7 +227,8 @@ def _wrap_ledger(original):
             except Exception:
                 pass
         return original(conn, user_id, settings, now)
-    wrapped._okai_live_accounting_v3 = True
+
+    wrapped._okai_live_accounting_v4 = True
     return wrapped
 
 
@@ -204,4 +241,12 @@ def install_live_accounting_repair_v3():
 
     bot_routes.build_authoritative_ledger = _wrap_ledger(bot_routes.build_authoritative_ledger)
     trade_routes.build_authoritative_ledger = _wrap_ledger(trade_routes.build_authoritative_ledger)
+    try:
+        result = repair_current_live_users_once()
+        print(
+            "LIVE ACCOUNTING STARTUP REPAIR | "
+            f"users={result['users']} | repaired={result['repaired']} | version={result['version']}"
+        )
+    except Exception as exc:
+        print(f"LIVE ACCOUNTING STARTUP REPAIR WARNING | {str(exc)[:180]}")
     _INSTALLED = True
