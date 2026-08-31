@@ -12,7 +12,7 @@ from typing import Any
 from database import get_db
 
 
-VERSION = "LIVE_GATEWAY_DISPLAY_SYNC_V2"
+VERSION = "LIVE_GATEWAY_DISPLAY_SYNC_V3"
 _INSTALLED = False
 
 
@@ -90,7 +90,7 @@ def _gateway_trade(conn, user_id: int, symbol: str):
 
 
 def _shadow(row):
-    """Overlay the broker-confirmed gateway entry/qty/LTP before P&L is calculated."""
+    """Overlay broker-confirmed gateway entry/qty/LTP before P&L is calculated."""
     data = dict(row)
     if str(data.get("trading_mode") or "paper").lower() != "live":
         return data
@@ -125,8 +125,6 @@ def _shadow(row):
             data["quote_error"] = None
             data["quote_failure_count"] = 0
 
-        # Heal the persisted app ledger too, so every screen/history calculation
-        # sees the same broker-confirmed values after the first refresh.
         _ensure_quote_columns(conn)
         fields = []
         params = []
@@ -151,9 +149,7 @@ def _shadow(row):
         conn.close()
 
 
-def _find_paper(conn, user_id: int, gateway_trade):
-    symbol = str(_v(gateway_trade, "symbol", "") or "")
-    order_id = str(_v(gateway_trade, "broker_order_id", "") or "")
+def _find_paper_by_symbol(conn, user_id: int, symbol: str, order_id: str = ""):
     if order_id:
         try:
             row = conn.execute(
@@ -164,6 +160,8 @@ def _find_paper(conn, user_id: int, gateway_trade):
                 return row
         except Exception:
             pass
+    if not symbol:
+        return None
     try:
         return conn.execute(
             "SELECT * FROM paper_trades WHERE user_id=? AND UPPER(status)='OPEN' AND UPPER(symbol)=UPPER(?) ORDER BY id DESC LIMIT 1",
@@ -173,34 +171,98 @@ def _find_paper(conn, user_id: int, gateway_trade):
         return None
 
 
+def _find_paper(conn, user_id: int, gateway_trade):
+    return _find_paper_by_symbol(
+        conn,
+        user_id,
+        str(_v(gateway_trade, "symbol", "") or ""),
+        str(_v(gateway_trade, "broker_order_id", "") or ""),
+    )
+
+
 def _mirror_event(gateway, event):
+    """Accept both legacy trade-id events and V3+ self-describing position events."""
     event = dict(event or {})
     trade_id = _i(event.get("trade_id"), 0)
-    if trade_id <= 0:
+    direct_symbol = str(event.get("symbol") or "").strip()
+    direct_order_id = str(event.get("entry_order_id") or event.get("broker_order_id") or "").strip()
+    if trade_id <= 0 and not direct_symbol:
         return
+
     conn = get_db()
     try:
         _ensure_quote_columns(conn)
-        gt = conn.execute("SELECT * FROM trades WHERE id=? AND user_id=? LIMIT 1", (trade_id, int(gateway["user_id"]))).fetchone()
-        if not gt:
-            return
-        pt = _find_paper(conn, int(gateway["user_id"]), gt)
+        gt = None
+        if trade_id > 0:
+            try:
+                gt = conn.execute(
+                    "SELECT * FROM trades WHERE id=? AND user_id=? LIMIT 1",
+                    (trade_id, int(gateway["user_id"])),
+                ).fetchone()
+            except Exception:
+                gt = None
+
+        if gt:
+            pt = _find_paper(conn, int(gateway["user_id"]), gt)
+        else:
+            # Critical fallback: the local SQLite trade_id and Railway paper_trades
+            # id are independent namespaces. V3+ gateway heartbeats include symbol
+            # so live LTP can still map even when no matching `trades` shadow row exists.
+            pt = _find_paper_by_symbol(
+                conn,
+                int(gateway["user_id"]),
+                direct_symbol,
+                direct_order_id,
+            )
         if not pt:
             return
+
         paper_id = _i(_v(pt, "id"), 0)
         kind = str(event.get("event") or "").upper()
         now = datetime.now(timezone.utc).isoformat()
+
         if kind == "POSITION_HEARTBEAT":
             ltp = _f(event.get("ltp"), 0.0)
+            entry = _f(event.get("entry_price"), 0.0)
+            qty = _i(event.get("quantity"), 0)
+            fields = []
+            params = []
             if ltp > 0:
-                conn.execute("UPDATE paper_trades SET last_ltp=?, quote_updated_at=?, quote_source='ANGEL_LOCAL_GATEWAY_POSITION', quote_failed_at=NULL, quote_error=NULL, quote_failure_count=0 WHERE id=? AND UPPER(status)='OPEN'", (ltp, now, paper_id))
+                fields += [
+                    "last_ltp=?",
+                    "quote_updated_at=?",
+                    "quote_source='ANGEL_LOCAL_GATEWAY_POSITION_DIRECT'",
+                    "quote_failed_at=NULL",
+                    "quote_error=NULL",
+                    "quote_failure_count=0",
+                ]
+                params += [ltp, now]
+            if entry > 0:
+                fields.append("entry_price=?")
+                params.append(entry)
+            if qty > 0:
+                fields.append("qty=?")
+                params.append(qty)
+            if direct_order_id:
+                fields.append("entry_order_id=COALESCE(NULLIF(?,''),entry_order_id)")
+                params.append(direct_order_id)
+            if fields:
+                params.append(paper_id)
+                conn.execute(
+                    f"UPDATE paper_trades SET {', '.join(fields)} WHERE id=? AND UPPER(status)='OPEN'",
+                    tuple(params),
+                )
                 conn.commit()
+
         elif kind == "ENTRY_FILLED":
             entry = _f(event.get("entry_price"), 0.0)
             qty = _i(event.get("quantity"), 0)
             order_id = str(event.get("broker_order_id") or "")
             if entry > 0:
-                conn.execute("UPDATE paper_trades SET entry_price=?, last_ltp=?, qty=COALESCE(NULLIF(?,0),qty), entry_order_id=COALESCE(NULLIF(?,''),entry_order_id), quote_updated_at=?, quote_source='ANGEL_LOCAL_GATEWAY_ENTRY_FILL' WHERE id=?", (entry, entry, qty, order_id, now, paper_id))
+                conn.execute(
+                    "UPDATE paper_trades SET entry_price=?, last_ltp=?, qty=COALESCE(NULLIF(?,0),qty), entry_order_id=COALESCE(NULLIF(?,''),entry_order_id), quote_updated_at=?, quote_source='ANGEL_LOCAL_GATEWAY_ENTRY_FILL' WHERE id=?",
+                    (entry, entry, qty, order_id, now, paper_id),
+                )
                 conn.commit()
     finally:
         conn.close()
@@ -232,7 +294,7 @@ def install_live_gateway_display_sync_patch() -> None:
     import bot.trade_live_routes as trade_routes
 
     original_event = gateway_routes.record_position_event
-    if not getattr(original_event, "_okai_gateway_display_sync_v2", False):
+    if not getattr(original_event, "_okai_gateway_display_sync_v3", False):
         def event_with_sync(gateway, event):
             result = original_event(gateway, event)
             try:
@@ -240,16 +302,14 @@ def install_live_gateway_display_sync_patch() -> None:
             except Exception:
                 pass
             return result
-        event_with_sync._okai_gateway_display_sync_v2 = True
+        event_with_sync._okai_gateway_display_sync_v3 = True
         gateway_routes.record_position_event = event_with_sync
 
     original_view = trade_routes._trade_view
-    if not getattr(original_view, "_okai_gateway_display_sync_v2", False):
+    if not getattr(original_view, "_okai_gateway_display_sync_v3", False):
         def view_with_shadow(row):
-            # Important: shadow BEFORE original view so gross/net P&L and charges
-            # are computed from real broker entry, real qty and latest gateway LTP.
             return _decorate(original_view(_shadow(row)))
-        view_with_shadow._okai_gateway_display_sync_v2 = True
+        view_with_shadow._okai_gateway_display_sync_v3 = True
         trade_routes._trade_view = view_with_shadow
 
     _INSTALLED = True
