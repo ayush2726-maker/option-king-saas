@@ -1,7 +1,10 @@
-"""Repair LIVE daily-history display directly at the user-panel response boundary.
+"""Repair LIVE Daily Trade History at both response sources used by the app.
 
-This is intentionally response/accounting only. It does not change signals,
-entries, sizing, SL/target or exit execution.
+The mobile app merges /history/paper first and /bot/trade-history second, so the
+bot history row wins on duplicate fields. This patch therefore decorates both
+response paths after all live gateway wrappers are installed.
+
+Response/accounting only: no signals, sizing, entries, SL/target or exit logic.
 """
 
 from __future__ import annotations
@@ -58,12 +61,22 @@ def _broker_trade(conn, trade):
             pass
 
     try:
-        return conn.execute(
-            "SELECT * FROM trades WHERE user_id=? AND UPPER(symbol)=UPPER(?) ORDER BY id DESC LIMIT 1",
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE user_id=? AND UPPER(symbol)=UPPER(?) ORDER BY id DESC LIMIT 30",
             (user_id, symbol),
-        ).fetchone()
+        ).fetchall()
     except Exception:
         return None
+    if not rows:
+        return None
+
+    entry = _f(trade.get("entry_price"), 0)
+    if entry > 0:
+        try:
+            return min(rows, key=lambda row: abs(_f(_v(row, "entry_price", entry), entry) - entry))
+        except Exception:
+            pass
+    return rows[0]
 
 
 def _infer_qty(trade):
@@ -73,31 +86,64 @@ def _infer_qty(trade):
     if entry <= 0 or exit_price <= 0 or abs(move) < 1e-9:
         return 0
 
-    # Old LIVE rows in this app saved gross broker move in pnl/net_pnl while qty
-    # was lost. This deterministic recovery is valid only when it lands exactly
-    # on an integer quantity.
-    saved = trade.get("gross_pnl")
-    if saved is None or abs(_f(saved, 0)) < 1e-9:
-        saved = trade.get("pnl")
-    pnl = _f(saved, 0)
-    if abs(pnl) < 1e-9 or pnl * move <= 0:
-        return 0
+    for saved in (trade.get("gross_pnl"), trade.get("pnl"), trade.get("net_pnl")):
+        pnl = _f(saved, 0)
+        if abs(pnl) < 1e-9 or pnl * move <= 0:
+            continue
+        qty = int(round(pnl / move))
+        if qty <= 0 or qty > 100000:
+            continue
+        if abs(move * qty - pnl) <= max(0.10, abs(pnl) * 0.0001):
+            return qty
+    return 0
 
-    qty = int(round(pnl / move))
-    if qty <= 0 or qty > 100000:
-        return 0
-    if abs(move * qty - pnl) > max(0.05, abs(pnl) * 0.00005):
-        return 0
-    return qty
+
+def _persist_repair(conn, data, qty, costs):
+    paper_id = _i(data.get("id"), 0)
+    if paper_id <= 0 or qty <= 0:
+        return
+    gross = _f(costs.get("market_gross_pnl"), _f(data.get("pnl"), 0))
+    charges = max(0.0, _f(costs.get("total_charges"), 0))
+    brokerage = max(0.0, _f(costs.get("brokerage"), 0))
+    statutory = max(0.0, _f(costs.get("statutory_charges"), charges - brokerage))
+    slippage = max(0.0, _f(costs.get("slippage_cost"), 0))
+    net = _f(costs.get("net_pnl"), gross - charges)
+    try:
+        conn.execute(
+            """
+            UPDATE paper_trades
+            SET qty=?, gross_pnl=?, total_charges=?, brokerage=?,
+                statutory_charges=?, slippage_cost=?, net_pnl=?, pnl=?, pnl_basis=?
+            WHERE id=?
+            """,
+            (
+                qty, round(gross, 2), round(charges, 2), round(brokerage, 2),
+                round(statutory, 2), round(slippage, 2), round(net, 2), round(net, 2),
+                str(costs.get("execution_basis") or "LIVE_NET_AFTER_EXECUTION_COSTS"),
+                paper_id,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        pass
 
 
 def _repair_live_trade(trade):
     if not isinstance(trade, dict):
         return trade
-    if str(trade.get("status") or "").upper() != "CLOSED":
-        return trade
 
     data = dict(trade)
+    status = str(data.get("status") or "").upper()
+
+    if status == "OPEN":
+        qty = _i(data.get("qty", data.get("quantity", 0)), 0)
+        data["qty"] = qty
+        data["quantity"] = qty
+        charges = max(0.0, _f(data.get("total_charges", data.get("estimated_exit_costs", 0)), 0))
+        for key in ("execution_cost", "execution_costs", "cost", "charges"):
+            data[key] = round(charges, 2)
+        return data
+
     conn = get_db()
     try:
         broker_row = _broker_trade(conn, data)
@@ -110,62 +156,61 @@ def _repair_live_trade(trade):
         if qty > 0:
             data["qty"] = qty
             data["quantity"] = qty
-            paper_id = _i(data.get("id"), 0)
-            if paper_id > 0:
-                try:
-                    conn.execute(
-                        "UPDATE paper_trades SET qty=? WHERE id=? AND COALESCE(qty,0)<=0",
-                        (qty, paper_id),
-                    )
-                    conn.commit()
-                except Exception:
-                    pass
 
-        # A matching broker-side trade is authoritative proof this row is LIVE.
+        data["trading_mode"] = "live"
         if broker_row is not None:
-            data["trading_mode"] = "live"
-            broker_name = str(_v(broker_row, "broker", "angelone") or "angelone")
-            data["broker_name"] = broker_name
+            data["broker_name"] = str(_v(broker_row, "broker", "angelone") or "angelone")
+        else:
+            data["broker_name"] = str(data.get("broker_name") or "angelone")
 
-        if qty > 0:
+        costs = {}
+        if qty > 0 and _f(data.get("entry_price"), 0) > 0 and _f(data.get("exit_price"), 0) > 0:
             try:
                 from bot.net_pnl_history_patch import calculate_row_net_costs
-
                 costs = calculate_row_net_costs(data)
-                gross = _f(costs.get("market_gross_pnl"), _f(data.get("pnl"), 0))
-                charges = max(0.0, _f(costs.get("total_charges"), 0))
-                net = _f(costs.get("net_pnl"), gross - charges)
-                brokerage = max(0.0, _f(costs.get("brokerage"), 0))
-                slippage = max(0.0, _f(costs.get("slippage_cost"), 0))
-
-                data["gross_pnl"] = round(gross, 2)
-                data["total_charges"] = round(charges, 2)
-                data["execution_cost"] = round(charges, 2)
-                data["execution_costs"] = round(charges, 2)
-                data["cost"] = round(charges, 2)
-                data["charges"] = round(charges, 2)
-                data["brokerage"] = round(brokerage, 2)
-                data["slippage_cost"] = round(slippage, 2)
-                data["net_pnl"] = round(net, 2)
-                data["pnl"] = round(net, 2)
-                data["pnl_basis"] = str(
-                    costs.get("execution_basis") or "LIVE_NET_AFTER_EXECUTION_COSTS"
-                )
             except Exception:
-                pass
+                costs = {}
 
-        # Always provide the exact aliases consumed by the mobile history card.
+        if costs:
+            gross = _f(costs.get("market_gross_pnl"), _f(data.get("pnl"), 0))
+            charges = max(0.0, _f(costs.get("total_charges"), 0))
+            net = _f(costs.get("net_pnl"), gross - charges)
+            brokerage = max(0.0, _f(costs.get("brokerage"), 0))
+            slippage = max(0.0, _f(costs.get("slippage_cost"), 0))
+            statutory = max(0.0, _f(costs.get("statutory_charges"), charges - brokerage))
+            data.update({
+                "gross_pnl": round(gross, 2),
+                "total_charges": round(charges, 2),
+                "brokerage": round(brokerage, 2),
+                "statutory_charges": round(statutory, 2),
+                "slippage_cost": round(slippage, 2),
+                "net_pnl": round(net, 2),
+                "pnl": round(net, 2),
+                "pnl_basis": str(costs.get("execution_basis") or "LIVE_NET_AFTER_EXECUTION_COSTS"),
+            })
+            _persist_repair(conn, data, qty, costs)
+
         qty = _i(data.get("qty", data.get("quantity", 0)), 0)
         charges = max(0.0, _f(data.get("total_charges", data.get("execution_cost", 0)), 0))
         data["qty"] = qty
         data["quantity"] = qty
-        data["execution_cost"] = round(charges, 2)
-        data["execution_costs"] = round(charges, 2)
-        data["cost"] = round(charges, 2)
-        data["charges"] = round(charges, 2)
+        for key in ("execution_cost", "execution_costs", "cost", "charges"):
+            data[key] = round(charges, 2)
         return data
     finally:
         conn.close()
+
+
+def _wrap_view(module, attr, marker):
+    original = getattr(module, attr)
+    if getattr(original, marker, False):
+        return
+
+    def patched(row):
+        return _repair_live_trade(original(row))
+
+    setattr(patched, marker, True)
+    setattr(module, attr, patched)
 
 
 def install_live_daily_history_response_patch():
@@ -174,16 +219,8 @@ def install_live_daily_history_response_patch():
         return
 
     import user_panel.routes as user_routes
+    import bot.trade_live_routes as trade_routes
 
-    original = user_routes._paper_trade_view
-    if getattr(original, "_okai_live_daily_history_v1", False):
-        _INSTALLED = True
-        return
-
-    def patched(row):
-        base = original(row)
-        return _repair_live_trade(base)
-
-    patched._okai_live_daily_history_v1 = True
-    user_routes._paper_trade_view = patched
+    _wrap_view(user_routes, "_paper_trade_view", "_okai_live_daily_history_v2")
+    _wrap_view(trade_routes, "_trade_view", "_okai_live_daily_history_v2")
     _INSTALLED = True
