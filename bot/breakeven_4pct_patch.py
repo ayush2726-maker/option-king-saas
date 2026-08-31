@@ -15,13 +15,6 @@ from __future__ import annotations
 
 from backtest import cost_safe_breakeven_risk_patch as backtest_cost
 from backtest import routes as backtest_routes
-from bot.risk_control_v2_patch import (
-    _install_backtest_risk_sizing,
-    apply_risk_control_v2_patch,
-)
-from bot.balanced_exit_cooldown_runtime_patch import (
-    apply_balanced_exit_cooldown_runtime_patch,
-)
 from bot import angel_fetcher
 from bot import authoritative_profit_lock_runtime_patch as authoritative_runtime
 from bot import dynamic_exit
