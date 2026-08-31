@@ -11,7 +11,7 @@ from typing import Any
 
 from database import get_db
 
-VERSION = "LIVE_GATEWAY_DISPLAY_SYNC_V6"
+VERSION = "LIVE_GATEWAY_DISPLAY_SYNC_V7"
 _INSTALLED = False
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -64,6 +64,31 @@ def _gateway_trade(conn, user_id: int, symbol: str):
     except Exception:
         return None
 
+def _gateway_trade_for_history(conn, user_id: int, symbol: str, entry_order_id: str = ""):
+    """Find the broker-side gateway trade that can repair a history row.
+
+    Prefer the entry broker order id because the same option symbol can be traded
+    multiple times in one day. Fall back to exact symbol only when an order id
+    is not available; that fallback is used only to repair missing quantity.
+    """
+    if user_id <= 0 or not symbol:
+        return None
+    if entry_order_id:
+        try:
+            row=conn.execute(
+                "SELECT * FROM trades WHERE user_id=? AND broker_order_id=? ORDER BY id DESC LIMIT 1",
+                (int(user_id),str(entry_order_id)),
+            ).fetchone()
+            if row: return row
+        except Exception: pass
+    try:
+        return conn.execute(
+            "SELECT * FROM trades WHERE user_id=? AND UPPER(symbol)=UPPER(?) ORDER BY id DESC LIMIT 1",
+            (int(user_id),str(symbol)),
+        ).fetchone()
+    except Exception:
+        return None
+
 def _shadow(row):
     """Overlay exact open gateway position on the app row.
 
@@ -85,15 +110,35 @@ def _shadow(row):
         if qty>0: data["qty"]=qty
         if order_id: data["entry_order_id"]=order_id
         if ltp>0:
-            data["last_ltp"]=ltp; data["quote_updated_at"]=quote_time or datetime.now(timezone.utc).isoformat(); data["quote_source"]="ANGEL_LOCAL_GATEWAY_DIRECT_V6"; data["quote_failed_at"]=None; data["quote_error"]=None; data["quote_failure_count"]=0
+            data["last_ltp"]=ltp; data["quote_updated_at"]=quote_time or datetime.now(timezone.utc).isoformat(); data["quote_source"]="ANGEL_LOCAL_GATEWAY_DIRECT_V7"; data["quote_failed_at"]=None; data["quote_error"]=None; data["quote_failure_count"]=0
         _ensure_quote_columns(conn); fields=[]; params=[]
         if entry>0: fields.append("entry_price=?"); params.append(entry)
         if qty>0: fields.append("qty=?"); params.append(qty)
         if order_id: fields.append("entry_order_id=?"); params.append(order_id)
         if ltp>0:
-            fields += ["last_ltp=?","quote_updated_at=?","quote_source='ANGEL_LOCAL_GATEWAY_DIRECT_V6'","quote_failed_at=NULL","quote_error=NULL","quote_failure_count=0"]; params += [ltp,quote_time or datetime.now(timezone.utc).isoformat()]
+            fields += ["last_ltp=?","quote_updated_at=?","quote_source='ANGEL_LOCAL_GATEWAY_DIRECT_V7'","quote_failed_at=NULL","quote_error=NULL","quote_failure_count=0"]; params += [ltp,quote_time or datetime.now(timezone.utc).isoformat()]
         if fields and _i(data.get("id"),0)>0:
             params.append(_i(data.get("id"),0)); conn.execute(f"UPDATE paper_trades SET {', '.join(fields)} WHERE id=? AND UPPER(status)='OPEN'",tuple(params)); conn.commit()
+        return data
+    finally:
+        conn.close()
+
+def _repair_history_quantity(row):
+    """Backfill missing LIVE quantity from the gateway ledger before cost math."""
+    data=dict(row)
+    if str(data.get("status") or "").upper() != "CLOSED" or _i(data.get("qty"),0)>0:
+        return data
+    user_id=_i(data.get("user_id"),0); symbol=str(data.get("symbol") or "")
+    if user_id<=0 or not symbol: return data
+    conn=get_db()
+    try:
+        gateway=_gateway_trade_for_history(conn,user_id,symbol,str(data.get("entry_order_id") or ""))
+        qty=_i(_v(gateway,"quantity",0),0) if gateway else 0
+        if qty<=0: return data
+        data["qty"]=qty
+        paper_id=_i(data.get("id"),0)
+        if paper_id>0:
+            conn.execute("UPDATE paper_trades SET qty=? WHERE id=? AND COALESCE(qty,0)<=0",(qty,paper_id)); conn.commit()
         return data
     finally:
         conn.close()
@@ -126,7 +171,7 @@ def _mirror_event(gateway,event):
         paper_id=_i(_v(pt,"id"),0); kind=str(event.get("event") or "").upper(); now=datetime.now(timezone.utc).isoformat()
         if kind=="POSITION_HEARTBEAT":
             ltp=_f(event.get("ltp"),0.0); entry=_f(event.get("entry_price"),0.0); qty=_i(event.get("quantity"),0); fields=[]; params=[]
-            if ltp>0: fields += ["last_ltp=?","quote_updated_at=?","quote_source='ANGEL_LOCAL_GATEWAY_POSITION_DIRECT_V6'","quote_failed_at=NULL","quote_error=NULL","quote_failure_count=0"]; params += [ltp,now]
+            if ltp>0: fields += ["last_ltp=?","quote_updated_at=?","quote_source='ANGEL_LOCAL_GATEWAY_POSITION_DIRECT_V7'","quote_failed_at=NULL","quote_error=NULL","quote_failure_count=0"]; params += [ltp,now]
             if entry>0: fields.append("entry_price=?"); params.append(entry)
             if qty>0: fields.append("qty=?"); params.append(qty)
             if direct_order_id: fields.append("entry_order_id=COALESCE(NULLIF(?,''),entry_order_id)"); params.append(direct_order_id)
@@ -138,8 +183,11 @@ def _mirror_event(gateway,event):
             if entry>0:
                 conn.execute("UPDATE paper_trades SET entry_price=?, last_ltp=?, qty=COALESCE(NULLIF(?,0),qty), entry_order_id=COALESCE(NULLIF(?,''),entry_order_id), quote_updated_at=?, quote_source='ANGEL_LOCAL_GATEWAY_ENTRY_FILL' WHERE id=?",(entry,entry,qty,order_id,now,paper_id)); conn.commit(); return True
         if kind=="EXIT_FILLED":
-            exit_price=_f(event.get("exit_price"),0.0); entry=_f(_v(pt,"entry_price",0.0),0.0); qty=max(1,_i(_v(pt,"qty",1),1)); gross=round((exit_price-entry)*qty,2) if exit_price>0 and entry>0 else _f(event.get("pnl"),0.0)
-            fields=["status='CLOSED'","exit_time=?","reason=?","quote_updated_at=?","quote_source='ANGEL_LOCAL_GATEWAY_EXIT_FILL'"]; params=[str(event.get("exit_time") or now),str(event.get("reason") or "BROKER CONFIRMED EXIT")[:300],now]
+            exit_price=_f(event.get("exit_price"),0.0); entry=_f(_v(pt,"entry_price",0.0),0.0)
+            event_qty=_i(event.get("quantity"),0); saved_qty=_i(_v(pt,"qty",0),0); qty=event_qty if event_qty>0 else saved_qty
+            if qty<=0: qty=1
+            gross=round((exit_price-entry)*qty,2) if exit_price>0 and entry>0 else _f(event.get("pnl"),0.0)
+            fields=["status='CLOSED'","exit_time=?","reason=?","quote_updated_at=?","quote_source='ANGEL_LOCAL_GATEWAY_EXIT_FILL'","qty=COALESCE(NULLIF(?,0),qty)"]; params=[str(event.get("exit_time") or now),str(event.get("reason") or "BROKER CONFIRMED EXIT")[:300],now,event_qty]
             if exit_price>0: fields += ["exit_price=?","last_ltp=?"]; params += [exit_price,exit_price]
             fields.append("pnl=?"); params.append(gross); params.append(paper_id)
             conn.execute(f"UPDATE paper_trades SET {', '.join(fields)} WHERE id=? AND UPPER(status)='OPEN'",tuple(params)); conn.commit()
@@ -165,7 +213,7 @@ def install_live_gateway_display_sync_patch()->None:
     import local_gateway.routes as gateway_routes
     import bot.trade_live_routes as trade_routes
     original_event=gateway_routes.record_position_event
-    if not getattr(original_event,"_okai_gateway_display_sync_v6",False):
+    if not getattr(original_event,"_okai_gateway_display_sync_v7",False):
         def event_with_sync(gateway,event):
             mirrored=False
             try: mirrored=bool(_mirror_event(gateway,event))
@@ -175,11 +223,25 @@ def install_live_gateway_display_sync_patch()->None:
                 if mirrored and str((event or {}).get("event") or "").upper() in {"POSITION_HEARTBEAT","EXIT_FILLED"}:
                     return {"accepted":True,"event":str((event or {}).get("event") or "").upper(),"mapped_by":"symbol"}
                 raise
-        event_with_sync._okai_gateway_display_sync_v6=True; gateway_routes.record_position_event=event_with_sync
+        event_with_sync._okai_gateway_display_sync_v7=True; gateway_routes.record_position_event=event_with_sync
     original_view=trade_routes._trade_view
-    if not getattr(original_view,"_okai_gateway_display_sync_v6",False):
-        def view_with_shadow(row): return _decorate(original_view(_shadow(row)))
-        view_with_shadow._okai_gateway_display_sync_v6=True; trade_routes._trade_view=view_with_shadow
+    if not getattr(original_view,"_okai_gateway_display_sync_v7",False):
+        def view_with_shadow(row):
+            repaired=_repair_history_quantity(row)
+            if str(repaired.get("status") or "").upper()=="OPEN":
+                repaired=_shadow(repaired)
+            # Cost backfill runs before this endpoint reads history, but older
+            # rows may only acquire qty here. Recalculate immediately when a
+            # closed row still has zero/missing charges after qty repair.
+            if str(repaired.get("status") or "").upper()=="CLOSED" and _i(repaired.get("qty"),0)>0 and _f(repaired.get("total_charges"),0.0)<=0:
+                try:
+                    from bot.net_pnl_history_patch import calculate_row_net_costs
+                    costs=calculate_row_net_costs(repaired)
+                    gross=_f(costs.get("market_gross_pnl"),_f(repaired.get("pnl"),0.0)); charges=_f(costs.get("total_charges"),0.0); net=_f(costs.get("net_pnl"),gross-charges)
+                    repaired.update({"gross_pnl":round(gross,2),"total_charges":round(charges,2),"net_pnl":round(net,2),"pnl":round(net,2),"brokerage":round(_f(costs.get("brokerage"),0.0),2),"slippage_cost":round(_f(costs.get("slippage_cost"),0.0),2),"pnl_basis":str(costs.get("execution_basis") or "NET_AFTER_COSTS")})
+                except Exception: pass
+            return _decorate(original_view(repaired))
+        view_with_shadow._okai_gateway_display_sync_v7=True; trade_routes._trade_view=view_with_shadow
     _INSTALLED=True
     try:
         from bot.missed_trade_gateway_context_patch import apply_missed_trade_gateway_context_patch
