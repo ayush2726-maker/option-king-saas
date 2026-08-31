@@ -186,7 +186,7 @@ apply_expiry_day_risk_mode_patch()
 # installed flag behind. Re-assert the ratchet as the final exit authority.
 apply_authoritative_profit_lock_runtime_patch()
 
-RELEASE_VERSION = "banknifty-off-real-combined-v7"
+RELEASE_VERSION = "banknifty-off-real-combined-live-start-sync-v8"
 
 app = FastAPI(
     title="Option King AI — SaaS API",
