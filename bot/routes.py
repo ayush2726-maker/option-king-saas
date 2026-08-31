@@ -1315,6 +1315,38 @@ def bot_start(authorization: str = Header(None)):
     else:
         from bot.angel_fetcher import start_user_bot_multi
         res = start_user_bot_multi(user["id"], broker["broker_name"], creds)
+
+    # The LIVE engine starts in memory, while /bot/signal reads its RUNNING
+    # flag from the persisted bot_status/user_bot_state tables.  Persist the
+    # state after the engine has actually started so the dashboard cannot show
+    # STOPPED while a real-order runtime is active.  Also repair the persisted
+    # flag when Start is pressed for an engine that is already running.
+    runtime_state = get_user_bot_state(user["id"])
+    runtime_running = bool(runtime_state.get("running"))
+    start_succeeded = bool(
+        isinstance(res, dict) and res.get("success")
+    )
+
+    if start_succeeded or runtime_running:
+        status_conn = get_db()
+        try:
+            ensure_tables(status_conn)
+            save_bot_status(
+                status_conn,
+                user["id"],
+                1,
+                "LIVE_MODE",
+            )
+        finally:
+            status_conn.close()
+
+        if not start_succeeded:
+            res = {
+                "success": True,
+                "message": "LIVE bot already running. Status synchronized.",
+                "already_running": True,
+            }
+
     if isinstance(res, dict) and res.get("success"):
         try:
             notify_user(user["id"], "▶️ <b>LIVE Bot Started</b>\nReal orders enabled.")
