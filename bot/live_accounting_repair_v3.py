@@ -5,12 +5,10 @@ Accounting/display only. Never changes entries, sizing, SL, target or exits.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
 
 from bot.live_net_pnl_breakeven_patch import calculate_execution_costs
 
-IST = timezone(timedelta(hours=5, minutes=30))
-VERSION = "LIVE_ACCOUNTING_REPAIR_V4_STARTUP"
+VERSION = "LIVE_ACCOUNTING_REPAIR_V5_EXACT_FILL"
 _INSTALLED = False
 LOT_SIZES = {"NIFTY": 65, "BANKNIFTY": 30, "SENSEX": 20}
 
@@ -61,13 +59,17 @@ def _expected_lot_qty(row):
     lot = LOT_SIZES.get(underlying, 0)
     if lot <= 0:
         return 0
+
     entry = _f(_v(row, "entry_price", 0), 0)
     exit_price = _f(_v(row, "exit_price", 0), 0)
     move = exit_price - entry
     if entry <= 0 or exit_price <= 0 or abs(move) < 1e-9:
         return 0
 
-    for key in ("pnl", "gross_pnl", "net_pnl"):
+    # Only accept a repair when the saved closed P&L reconstructs exactly one
+    # exchange lot. This keeps the migration deterministic and avoids touching
+    # unrelated historical rows.
+    for key in ("gross_pnl", "pnl", "net_pnl"):
         saved = _v(row, key, None)
         if saved is None:
             continue
@@ -95,33 +97,48 @@ def _ensure_cost_columns(conn):
 
 
 def repair_live_user_today(conn, user_id: int) -> int:
-    """Repair today's closed rows for a user who is currently in LIVE mode."""
+    """Repair exact one-lot legacy LIVE rows for the current LIVE user.
+
+    Do not depend on created_at timezone formatting. The three visible 31-Aug
+    rows already carry exact entry/exit/P&L evidence, so scan recent closed rows
+    and repair only rows whose P&L reconstructs one exchange lot exactly.
+    """
     _ensure_cost_columns(conn)
-    today_ist = datetime.now(timezone.utc).astimezone(IST).date()
-    day_start = datetime.combine(today_ist, datetime.min.time(), tzinfo=IST).astimezone(timezone.utc)
-    day_end = day_start + timedelta(days=1)
-    start_sql = day_start.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
-    end_sql = day_end.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
 
     rows = conn.execute(
         """
         SELECT * FROM paper_trades
-        WHERE user_id=? AND UPPER(COALESCE(status,''))='CLOSED'
-          AND datetime(created_at)>=datetime(?) AND datetime(created_at)<datetime(?)
-        ORDER BY id ASC
+        WHERE user_id=?
+          AND UPPER(COALESCE(status,''))='CLOSED'
+          AND entry_price IS NOT NULL
+          AND exit_price IS NOT NULL
+        ORDER BY id DESC
+        LIMIT 300
         """,
-        (int(user_id), start_sql, end_sql),
+        (int(user_id),),
     ).fetchall()
 
     repaired = 0
     for row in rows:
         qty = _i(_v(row, "qty", 0), 0)
+        exact_qty = _expected_lot_qty(row)
+
+        # Existing valid qty can be cost-repaired; missing qty is repaired only
+        # when exact one-lot reconstruction succeeds.
         if qty <= 0:
-            qty = _expected_lot_qty(row)
+            qty = exact_qty
         if qty <= 0:
             continue
 
-        underlying = _underlying(row) or "NIFTY"
+        # Do not relabel an unrelated old paper row merely because it has qty.
+        # For rows that are not already LIVE, require exact closed-fill proof.
+        mode = str(_v(row, "trading_mode", "") or "").lower()
+        if mode != "live" and exact_qty <= 0:
+            continue
+
+        underlying = _underlying(row)
+        if underlying not in LOT_SIZES:
+            continue
         entry = _f(_v(row, "entry_price", 0), 0)
         exit_price = _f(_v(row, "exit_price", 0), 0)
         if entry <= 0 or exit_price <= 0:
@@ -130,6 +147,7 @@ def repair_live_user_today(conn, user_id: int) -> int:
         broker = str(_v(row, "broker_name", "angelone") or "angelone").lower()
         if broker not in ("angelone", "upstox"):
             broker = "angelone"
+
         try:
             costs = dict(calculate_execution_costs(
                 broker, underlying, entry, exit_price, qty, include_slippage=False
@@ -147,7 +165,8 @@ def repair_live_user_today(conn, user_id: int) -> int:
         conn.execute(
             """
             UPDATE paper_trades
-            SET qty=?, trading_mode='live', broker_name=COALESCE(NULLIF(broker_name,''),?),
+            SET qty=?, trading_mode='live',
+                broker_name=COALESCE(NULLIF(broker_name,''),?),
                 pnl=?, gross_pnl=?, slippage_cost=?, total_charges=?, brokerage=?,
                 statutory_charges=?, net_pnl=?, pnl_basis=?, charges_json=?
             WHERE id=?
@@ -155,26 +174,30 @@ def repair_live_user_today(conn, user_id: int) -> int:
             (
                 qty, broker, round(net, 2), round(gross, 2), round(slippage, 2),
                 round(charges, 2), round(brokerage, 2), round(statutory, 2),
-                round(net, 2), "LIVE_NET_AFTER_EXECUTION_COSTS_V4",
+                round(net, 2), "LIVE_NET_AFTER_EXECUTION_COSTS_V5_EXACT_FILL",
                 json.dumps(costs, separators=(",", ":"), sort_keys=True), row["id"],
             ),
         )
         repaired += 1
 
-    if repaired:
-        total = conn.execute(
-            "SELECT COALESCE(SUM(COALESCE(net_pnl,pnl,0)),0) AS pnl, COUNT(*) AS c "
-            "FROM paper_trades WHERE user_id=? AND LOWER(COALESCE(trading_mode,''))='live'",
-            (int(user_id),),
-        ).fetchone()
-        try:
-            conn.execute(
-                "UPDATE bot_status SET total_pnl=?, total_trades=? WHERE user_id=?",
-                (round(_f(total["pnl"]), 2), _i(total["c"]), int(user_id)),
-            )
-        except Exception:
-            pass
-        conn.commit()
+    # Always resync totals after the scan, even when the rows were already
+    # repaired by a previous request. This prevents a stale zero bot_status.
+    total = conn.execute(
+        """
+        SELECT COALESCE(SUM(COALESCE(net_pnl,pnl,0)),0) AS pnl, COUNT(*) AS c
+        FROM paper_trades
+        WHERE user_id=? AND LOWER(COALESCE(trading_mode,''))='live'
+        """,
+        (int(user_id),),
+    ).fetchone()
+    try:
+        conn.execute(
+            "UPDATE bot_status SET total_pnl=?, total_trades=? WHERE user_id=?",
+            (round(_f(total["pnl"]), 2), _i(total["c"]), int(user_id)),
+        )
+    except Exception:
+        pass
+    conn.commit()
     return repaired
 
 
@@ -197,7 +220,6 @@ def _current_live_user_ids(conn):
 
 
 def repair_current_live_users_once() -> dict:
-    """Run the accounting migration immediately when the backend process starts."""
     from database import get_db
     conn = get_db()
     users = []
@@ -207,8 +229,8 @@ def repair_current_live_users_once() -> dict:
             users.append(user_id)
             try:
                 repaired += repair_live_user_today(conn, user_id)
-            except Exception:
-                continue
+            except Exception as exc:
+                print(f"LIVE ACCOUNTING USER REPAIR WARNING | user={user_id} | {str(exc)[:160]}")
         conn.commit()
     finally:
         conn.close()
@@ -216,7 +238,7 @@ def repair_current_live_users_once() -> dict:
 
 
 def _wrap_ledger(original):
-    if getattr(original, "_okai_live_accounting_v4", False):
+    if getattr(original, "_okai_live_accounting_v5", False):
         return original
 
     def wrapped(conn, user_id, settings=None, now=None):
@@ -224,11 +246,11 @@ def _wrap_ledger(original):
         if mode == "live":
             try:
                 repair_live_user_today(conn, int(user_id))
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"LIVE ACCOUNTING LEDGER REPAIR WARNING | user={user_id} | {str(exc)[:160]}")
         return original(conn, user_id, settings, now)
 
-    wrapped._okai_live_accounting_v4 = True
+    wrapped._okai_live_accounting_v5 = True
     return wrapped
 
 
