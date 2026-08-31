@@ -23,14 +23,14 @@ from bot import strategy
 from bot.live_gateway_display_sync_v1 import (
     install_live_gateway_display_sync_patch,
 )
+from bot.live_gateway_direct_symbol_hotfix import (
+    apply_live_gateway_direct_symbol_hotfix,
+)
 
 
 NET_PROFIT_LOCK_PERCENT = 4.0
 FIRST_LOCK_TRIGGER_R = 0.0
 
-# The authoritative helper reads this module global every time it evaluates an
-# open trade. Set it at import time as well as during apply() so repeated wrapper
-# installation or hot module reuse cannot restore the old hidden 1R gate.
 authoritative_runtime.FIRST_LOCK_TRIGGER_R = FIRST_LOCK_TRIGGER_R
 
 
@@ -76,12 +76,11 @@ def _wrap(base):
 
 
 def apply_breakeven_4pct_patch() -> None:
-    # Install the display/accounting bridge after trade_live_routes and the
-    # local-gateway router have both completed module initialization.
+    # Make self-describing V3 gateway symbol/order identity authoritative before
+    # installing the route wrapper. Local and Railway trade IDs are independent.
+    apply_live_gateway_direct_symbol_hotfix()
     install_live_gateway_display_sync_patch()
 
-    # Keep the exact 4% trigger authoritative even when apply() is called again
-    # after another runtime wrapper has already been installed.
     authoritative_runtime.FIRST_LOCK_TRIGGER_R = FIRST_LOCK_TRIGGER_R
 
     if getattr(angel_fetcher, "_okai_breakeven_4pct_v1", False):
@@ -110,10 +109,6 @@ def apply_breakeven_4pct_patch() -> None:
     if callable(backtest_lock):
         backtest_routes.update_option_profit_lock = backtest_lock
 
-    # Final runtime authority: recalculate the stop from the actual broker, index,
-    # quantity and PAPER/LIVE mode. The first stop now latches immediately at the
-    # exact charges-plus-4% threshold; later 0.50R/1.00R/smooth runner stages are
-    # unchanged.
     authoritative_runtime.apply_authoritative_profit_lock_runtime_patch()
 
     angel_fetcher._okai_breakeven_4pct_v1 = True
