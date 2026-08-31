@@ -1,0 +1,2 @@
+Force fresh Railway deployment from rollback state 39e2822a4d682cc30d6bbf109e4bd0ed12daff34.
+No application logic change.
