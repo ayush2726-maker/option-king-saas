@@ -1,8 +1,10 @@
 import ipaddress
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from auth.routes import get_current_user
+from database import get_db
 from local_gateway.multi_user_patch import (
     PATCH_VERSION,
     apply_multi_user_gateway_patch,
@@ -62,6 +64,77 @@ def _observed_client_ip(request: Request):
             return candidate
 
     return _valid_ipv4(request.client.host if request.client else "")
+
+
+def _number(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _persist_funds_snapshot(user_id: int, funds):
+    """Persist only authenticated local-gateway broker funds for LIVE sizing."""
+    if not isinstance(funds, dict):
+        return None
+
+    available_cash = max(0.0, _number(funds.get("available_cash"), 0.0))
+    used_margin = max(0.0, _number(funds.get("used_margin"), 0.0))
+    total_limit = max(
+        available_cash,
+        _number(funds.get("total_limit"), available_cash + used_margin),
+    )
+    broker = str(funds.get("broker") or "angelone").lower().strip()[:30]
+    if broker != "angelone":
+        return None
+
+    updated_at = datetime.now(timezone.utc).isoformat()
+    conn = get_db()
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS live_broker_funds (
+                user_id INTEGER PRIMARY KEY,
+                available_cash REAL NOT NULL DEFAULT 0,
+                used_margin REAL NOT NULL DEFAULT 0,
+                total_limit REAL NOT NULL DEFAULT 0,
+                broker TEXT NOT NULL DEFAULT 'angelone',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO live_broker_funds(
+                user_id, available_cash, used_margin, total_limit, broker, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                available_cash=excluded.available_cash,
+                used_margin=excluded.used_margin,
+                total_limit=excluded.total_limit,
+                broker=excluded.broker,
+                updated_at=excluded.updated_at
+            """,
+            (
+                int(user_id),
+                available_cash,
+                used_margin,
+                total_limit,
+                broker,
+                updated_at,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "available_cash": round(available_cash, 2),
+        "used_margin": round(used_margin, 2),
+        "total_limit": round(total_limit, 2),
+        "broker": broker,
+        "updated_at": updated_at,
+    }
 
 
 def _setup_guide():
@@ -211,7 +284,18 @@ def gateway_heartbeat(
         observed_ip,
         body.get("agent_version") or "",
     )
-    return {"success": True, **status}
+    funds_snapshot = _persist_funds_snapshot(
+        gateway["user_id"],
+        body.get("broker_funds"),
+    )
+    return {
+        "success": True,
+        **status,
+        "funds_snapshot_received": bool(funds_snapshot),
+        "funds_snapshot_updated_at": (
+            funds_snapshot.get("updated_at") if funds_snapshot else None
+        ),
+    }
 
 
 @router.get("/poll")
