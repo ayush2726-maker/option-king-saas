@@ -191,3 +191,11 @@ try:
     from bot.upstox_option_chain_quote_fallback_v1 import schedule_upstox_option_chain_quote_fallback
     schedule_upstox_option_chain_quote_fallback()
 except Exception: pass
+
+# Make the final structural runtime use the same safer exit ordering in PAPER
+# and LIVE. The wrapper tightens confirmed structural loss exit to -0.25R and
+# re-applies fast opposite-trend exit after structural_exit_v2 installs.
+try:
+    from bot.structural_exit_runtime_order_fix_v1 import install_structural_exit_runtime_order_fix_v1
+    install_structural_exit_runtime_order_fix_v1()
+except Exception: pass
