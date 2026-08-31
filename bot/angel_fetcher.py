@@ -21,6 +21,7 @@ from local_gateway.service import (
     get_gateway_status,
     queue_live_entry,
 )
+from bot.live_funds_recovery import read_live_funds_with_recovery
 
 # ── Per-user bot instances ────────────────────────────────
 _user_bots = {}  # user_id -> bot state
@@ -295,30 +296,16 @@ def _manage_live_gateway_entry(
         reward_multiple=reward_multiple,
     )
 
-    try:
-        cash_payload = obj.rmsLimit()
-        cash_data = (
-            cash_payload.get("data", {})
-            if isinstance(cash_payload, dict)
-            else {}
-        )
-        live_cash = 0.0
-        for cash_key in ("availablecash", "availableCash", "net"):
-            try:
-                live_cash = float(cash_data.get(cash_key) or 0)
-            except (TypeError, ValueError):
-                live_cash = 0.0
-            if live_cash > 0:
-                break
-    except Exception as exc:
+    funds = read_live_funds_with_recovery(user_id, obj)
+    live_cash = float(funds.get("available_cash") or 0)
+    if not funds.get("success") or live_cash <= 0:
         return {
             "queued": False,
             "reason": "BROKER_FUNDS_UNAVAILABLE",
-            "message": str(exc)[:120],
+            "message": str(funds.get("message") or "Broker funds unavailable")[:180],
+            "funds_source": funds.get("source"),
+            "funds_direct_attempts": funds.get("direct_attempts", []),
         }
-
-    if live_cash <= 0:
-        return {"queued": False, "reason": "BROKER_FUNDS_UNAVAILABLE"}
 
     gateway_positions = (get_gateway_status(user_id).get("open_positions") or [])
     if len(gateway_positions) >= 2:
@@ -378,6 +365,10 @@ def _manage_live_gateway_entry(
         "lot_size": int(LOT_SIZES.get(underlying, 1)),
         "capital_slot": capital_slot,
         "capital_base": round(live_cash, 2),
+        "funds_source": funds.get("source"),
+        "funds_snapshot_age_seconds": funds.get("snapshot_age_seconds"),
+        "funds_snapshot_updated_at": funds.get("snapshot_updated_at"),
+        "funds_direct_attempt_count": len(funds.get("direct_attempts") or []),
         "capital_used": sizing.get("capital_used"),
         "allocation_pct": sizing.get("actual_allocation_pct"),
         "sizing_mode": sizing.get("sizing_mode"),
@@ -401,13 +392,15 @@ def _manage_live_gateway_entry(
         "strategy_mode": settings.get("mode", "default"),
         "execution_route": "OWNER_STATIC_IP_LOCAL_GATEWAY",
     }
-    result = queue_live_entry(
+    result = dict(queue_live_entry(
         user_id,
         payload,
         idempotency_key,
         max_concurrent=int(settings.get("max_concurrent_trades", 1) or 1),
         max_trades_per_day=None,
-    )
+    ))
+    result["funds_source"] = funds.get("source")
+    result["funds_snapshot_age_seconds"] = funds.get("snapshot_age_seconds")
     _entry_guard_state[user_id] = {
         "allowed": bool(result.get("queued")),
         "reason": result.get("reason"),
@@ -415,6 +408,8 @@ def _manage_live_gateway_entry(
         "command_id": result.get("command_id"),
         "symbol": resolved["symbol"],
         "quantity": quantity,
+        "funds_source": funds.get("source"),
+        "funds_snapshot_age_seconds": funds.get("snapshot_age_seconds"),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     return result
