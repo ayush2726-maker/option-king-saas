@@ -4,15 +4,22 @@ Local gateway trade IDs and Railway trade IDs are independent namespaces. If an
 unrelated Railway trade happens to have the same integer ID, the older sync path
 can bind to the wrong row and ignore the correct event symbol. This patch makes
 the V3 gateway symbol/order ID authoritative for app ledger updates.
+
+V2 also makes the gateway position metadata authoritative at the /bot/trade-live
+response boundary. This prevents a cloud/runtime quote writer from replacing a
+fresh local-gateway option LTP with the entry price between 10-second gateway
+heartbeats.
 """
 
+import json
 from datetime import datetime, timezone
 
 from database import get_db
 from bot import live_gateway_display_sync_v1 as sync
 
 
-PATCH_VERSION = "LIVE_GATEWAY_DIRECT_SYMBOL_FIRST_V1"
+PATCH_VERSION = "LIVE_GATEWAY_DIRECT_SYMBOL_FIRST_V2_RESPONSE_AUTHORITY"
+_VIEW_PATCHED = False
 
 
 def _mirror_event_direct_first(gateway, event):
@@ -58,18 +65,22 @@ def _mirror_event_direct_first(gateway, event):
         if kind == "POSITION_HEARTBEAT":
             ltp = sync._f(event.get("ltp"), 0.0)
             qty = sync._i(event.get("quantity"), 0)
+            entry = sync._f(event.get("entry_price"), 0.0)
             fields = []
             params = []
             if ltp > 0:
                 fields += [
                     "last_ltp=?",
                     "quote_updated_at=?",
-                    "quote_source='ANGEL_LOCAL_GATEWAY_DIRECT_SYMBOL'",
+                    "quote_source='ANGEL_LOCAL_GATEWAY_DIRECT_SYMBOL_V2'",
                     "quote_failed_at=NULL",
                     "quote_error=NULL",
                     "quote_failure_count=0",
                 ]
                 params += [ltp, now]
+            if entry > 0:
+                fields.append("entry_price=?")
+                params.append(entry)
             if qty > 0:
                 fields.append("qty=?")
                 params.append(qty)
@@ -122,5 +133,119 @@ def _mirror_event_direct_first(gateway, event):
         conn.close()
 
 
+def _load_metadata(value):
+    try:
+        data = json.loads(value or "{}")
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _gateway_truth_for_paper(row):
+    """Read the exact held-contract heartbeat directly from the gateway ledger."""
+    data = dict(row or {})
+    if str(data.get("status") or "").upper() != "OPEN":
+        return data
+
+    user_id = sync._i(data.get("user_id"), 0)
+    symbol = str(data.get("symbol") or "").strip()
+    order_id = str(data.get("entry_order_id") or "").strip()
+    if user_id <= 0 or (not symbol and not order_id):
+        return data
+
+    conn = get_db()
+    try:
+        gateway = None
+        if order_id:
+            try:
+                gateway = conn.execute(
+                    "SELECT * FROM trades WHERE user_id=? AND broker_order_id=? "
+                    "AND status IN ('open','exit_pending') ORDER BY id DESC LIMIT 1",
+                    (user_id, order_id),
+                ).fetchone()
+            except Exception:
+                gateway = None
+        if not gateway and symbol:
+            gateway = conn.execute(
+                "SELECT * FROM trades WHERE user_id=? AND UPPER(symbol)=UPPER(?) "
+                "AND status IN ('open','exit_pending') ORDER BY id DESC LIMIT 1",
+                (user_id, symbol),
+            ).fetchone()
+        if not gateway:
+            return data
+
+        metadata = _load_metadata(sync._v(gateway, "metadata_json", "{}"))
+        position = metadata.get("gateway_position")
+        if not isinstance(position, dict):
+            return data
+
+        ltp = sync._f(position.get("ltp"), 0.0)
+        if ltp <= 0:
+            return data
+
+        gateway_symbol = str(sync._v(gateway, "symbol", "") or "").strip()
+        if symbol and gateway_symbol and gateway_symbol.upper() != symbol.upper():
+            return data
+
+        quote_time = str(position.get("updated_at") or datetime.now(timezone.utc).isoformat())
+        entry = sync._f(sync._v(gateway, "entry_price", 0.0), 0.0)
+        qty = sync._i(sync._v(gateway, "quantity", 0), 0)
+        gateway_order_id = str(sync._v(gateway, "broker_order_id", "") or "")
+
+        data["last_ltp"] = ltp
+        data["quote_updated_at"] = quote_time
+        data["quote_source"] = "ANGEL_LOCAL_GATEWAY_METADATA_AUTHORITY_V2"
+        data["quote_failed_at"] = None
+        data["quote_error"] = None
+        data["quote_failure_count"] = 0
+        if entry > 0:
+            data["entry_price"] = entry
+        if qty > 0:
+            data["qty"] = qty
+        if gateway_order_id:
+            data["entry_order_id"] = gateway_order_id
+
+        # Heal the display ledger as well. Even if another runtime wrote a stale
+        # value moments earlier, this GET now returns and persists broker truth.
+        paper_id = sync._i(data.get("id"), 0)
+        if paper_id > 0:
+            try:
+                sync._ensure_quote_columns(conn)
+                conn.execute(
+                    "UPDATE paper_trades SET last_ltp=?, quote_updated_at=?, "
+                    "quote_source='ANGEL_LOCAL_GATEWAY_METADATA_AUTHORITY_V2', "
+                    "quote_failed_at=NULL, quote_error=NULL, quote_failure_count=0 "
+                    "WHERE id=? AND UPPER(status)='OPEN'",
+                    (ltp, quote_time, paper_id),
+                )
+                conn.commit()
+            except Exception:
+                pass
+        return data
+    finally:
+        conn.close()
+
+
+def _install_trade_live_response_authority():
+    global _VIEW_PATCHED
+    if _VIEW_PATCHED:
+        return
+
+    import bot.trade_live_routes as trade_routes
+
+    previous_view = trade_routes._trade_view
+    if getattr(previous_view, "_okai_gateway_response_authority_v2", False):
+        _VIEW_PATCHED = True
+        return
+
+    def gateway_authoritative_view(row):
+        return previous_view(_gateway_truth_for_paper(row))
+
+    gateway_authoritative_view._okai_gateway_response_authority_v2 = True
+    trade_routes._trade_view = gateway_authoritative_view
+    _VIEW_PATCHED = True
+
+
 def apply_live_gateway_direct_symbol_hotfix():
     sync._mirror_event = _mirror_event_direct_first
+    _install_trade_live_response_authority()
