@@ -7,7 +7,7 @@ from typing import Any
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
-VERSION = "OKAI-AUTHORITATIVE-LEDGER-V2-LIVE-PROOF"
+VERSION = "OKAI-AUTHORITATIVE-LEDGER-V3-STRICT-MODE-PROOF"
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -68,17 +68,16 @@ def _open_net(row: Any) -> float:
 
 
 def _mode_clause(conn, mode: str, paper_columns: set[str]):
-    """Classify legacy LIVE rows by broker proof, not only trading_mode.
+    """Keep PAPER rows separate from broker-backed LIVE rows.
 
     Older Angel rows were mirrored into paper_trades before trading_mode was
-    reliably persisted, so many genuine LIVE rows still say/default to 'paper'.
-    A matching row in the broker-side trades table or an entry order id is
-    authoritative evidence that the display-ledger row is LIVE.
+    reliably persisted.  A non-empty broker entry order remains valid LIVE
+    proof, but a symbol match alone is not: the same NIFTY/SENSEX contract can
+    legitimately exist in both PAPER and LIVE history.  Treating every matching
+    symbol as LIVE made PAPER Today P&L and trade count disappear whenever the
+    user also had an Angel trade for that symbol.
     """
     has_mode = "trading_mode" in paper_columns
-    trade_columns = _columns(conn, "trades")
-    has_trades = bool(trade_columns)
-    has_broker_order = "broker_order_id" in trade_columns
     has_entry_order = "entry_order_id" in paper_columns
 
     proof_parts = []
@@ -86,17 +85,6 @@ def _mode_clause(conn, mode: str, paper_columns: set[str]):
         proof_parts.append("LOWER(COALESCE(paper_trades.trading_mode,''))='live'")
     if has_entry_order:
         proof_parts.append("COALESCE(NULLIF(paper_trades.entry_order_id,''),'')<>''")
-    if has_trades:
-        match = [
-            "t.user_id=paper_trades.user_id",
-            "UPPER(COALESCE(t.symbol,''))=UPPER(COALESCE(paper_trades.symbol,''))",
-        ]
-        if has_broker_order and has_entry_order:
-            match.append(
-                "(COALESCE(NULLIF(paper_trades.entry_order_id,''),'')='' "
-                "OR t.broker_order_id=paper_trades.entry_order_id)"
-            )
-        proof_parts.append("EXISTS (SELECT 1 FROM trades t WHERE " + " AND ".join(match) + ")")
 
     if not proof_parts:
         if has_mode:
@@ -207,7 +195,7 @@ def build_authoritative_ledger(
 
     return {
         "version": VERSION,
-        "source": "PAPER_TRADES_DB_NET_PNL_WITH_LIVE_BROKER_PROOF",
+        "source": "PAPER_TRADES_DB_NET_PNL_WITH_STRICT_MODE_PROOF",
         "mode": mode,
         "pnl_basis": "NET_AFTER_EXECUTION_COSTS",
         "reset_at": _sql_time(reset_at) if reset_at else None,
@@ -227,7 +215,7 @@ def build_authoritative_ledger(
             "closed_pnl": today_realized,
             "open_pnl": open_pnl,
             "total_pnl": round(today_realized + open_pnl, 2),
-            "source": "AUTHORITATIVE_LEDGER_LIVE_BROKER_PROOF",
+            "source": "AUTHORITATIVE_LEDGER_STRICT_MODE_PROOF",
         },
         "capital_source": capital_source,
     }
