@@ -4,6 +4,11 @@ Paper mode is untouched. In LIVE mode the home dashboard must not aggregate
 paper_trades/Upstox rows. Today P&L, total P&L, trade counts and open positions
 come from the Angel local-gateway-backed trades table, using the same cost model
 as LIVE history.
+
+V2 also exposes the legacy field names consumed by the AUTO Portfolio card
+(`active_positions`, `ltp`, `sl`, `pnl`) directly in this authoritative response.
+This removes middleware-order dependence and keeps the AUTO card on the exact
+same Angel quote/P&L object as Active Live Trades.
 """
 from __future__ import annotations
 
@@ -20,7 +25,15 @@ from bot.live_mode_broker_truth_middleware import (
     _live_payload,
 )
 
-VERSION = "LIVE_SIGNAL_BROKER_TRUTH_V1_20260901"
+VERSION = "LIVE_SIGNAL_BROKER_TRUTH_V2_AUTO_CARD_20260901"
+
+
+def _num(value, default=0.0):
+    try:
+        number = float(value)
+        return number if number == number else float(default)
+    except Exception:
+        return float(default)
 
 
 def _settings(user_id):
@@ -84,13 +97,56 @@ def _capital_from_live_rows(user_id, open_pnl):
         conn.close()
 
 
+def _auto_compat_position(position):
+    """Expose one canonical LIVE position under every legacy AUTO-card alias."""
+    item = dict(position or {})
+    ltp = _num(
+        item.get("live_price")
+        if item.get("live_price") is not None
+        else item.get("current_price")
+        if item.get("current_price") is not None
+        else item.get("last_ltp"),
+        0.0,
+    )
+    entry = _num(item.get("entry_price"), 0.0)
+    qty = int(_num(item.get("qty") if item.get("qty") is not None else item.get("quantity"), 0))
+    sl = _num(item.get("sl_price") if item.get("sl_price") is not None else item.get("sl"), 0.0)
+    net = item.get("net_pnl")
+    if net is None:
+        net = item.get("unrealized_pnl")
+    if net is None:
+        net = item.get("pnl")
+    if net is None and ltp > 0 and entry > 0 and qty > 0:
+        net = (ltp - entry) * qty
+    net = _num(net, 0.0)
+
+    item["qty"] = qty
+    item["quantity"] = qty
+    if entry > 0:
+        item["entry"] = round(entry, 2)
+        item["entry_price"] = round(entry, 2)
+    if ltp > 0:
+        for key in ("ltp", "live_price", "current_price", "last_ltp", "last_price"):
+            item[key] = round(ltp, 2)
+    if sl > 0:
+        for key in ("sl", "sl_price", "live_sl"):
+            item[key] = round(sl, 2)
+    for key in ("pnl", "net_pnl", "unrealized_pnl", "profit_loss", "live_pnl"):
+        item[key] = round(net, 2)
+    item["display_source"] = "ANGEL_LIVE_SIGNAL_NATIVE_AUTO_V2"
+    return item
+
+
 def _payload(user_id):
     settings = _settings(user_id)
     history = _history_payload(user_id)
     live = _live_payload(user_id)
     today = dict(history.get("today") or {})
     ledger = dict(history.get("ledger") or {})
-    active = list(live.get("trades") or live.get("open_positions") or [])
+    active = [
+        _auto_compat_position(x)
+        for x in list(live.get("trades") or live.get("open_positions") or [])
+    ]
     running = _running(user_id)
 
     try:
@@ -139,17 +195,23 @@ def _payload(user_id):
         "position_size_block": engine.get("position_size_block"),
         "active_trade": first,
         "active_trades": active,
+        "active_positions": active,
         "open_positions": active,
+        "portfolio_positions": active,
         "open_trade_count": len(active),
         "trade_symbol": first.get("symbol") if first else None,
         "trade_side": first.get("side") if first else None,
         "trade_qty": first.get("qty") if first else None,
         "entry_price": first.get("entry_price") if first else None,
+        "ltp": first.get("ltp") if first else None,
         "current_price": first.get("current_price") if first else None,
         "live_price": first.get("live_price") if first else None,
+        "sl": first.get("sl") if first else None,
         "sl_price": first.get("sl_price") if first else None,
         "target_price": first.get("target_price") if first else None,
         "trade_pnl": first.get("net_pnl") if first else None,
+        "pnl": first.get("net_pnl") if first else None,
+        "unrealized_pnl": first.get("net_pnl") if first else None,
         "today": today,
         "today_pnl": round(float(today.get("total_pnl") or 0), 2),
         "today_net_pnl": round(float(today.get("total_pnl") or 0), 2),
@@ -165,7 +227,7 @@ def _payload(user_id):
         "current_capital": current_capital,
         "current_equity": current_capital,
         "capital_source": capital_source,
-        "source": "ANGEL_LIVE_SIGNAL_BROKER_TRUTH",
+        "source": "ANGEL_LIVE_SIGNAL_BROKER_TRUTH_NATIVE_AUTO_V2",
         "broker_truth_version": BROKER_TRUTH_VERSION,
         "version": VERSION,
         "updated_at": datetime.now(timezone.utc).isoformat(),
