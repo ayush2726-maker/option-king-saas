@@ -12,9 +12,13 @@ import bot.live_trail_display_bridge_v1  # noqa: F401
 import bot.auto_portfolio_live_card_sync_v1  # noqa: F401
 from bot.live_mode_broker_truth_middleware import install as install_live_broker_truth
 from bot.live_signal_broker_truth_middleware import install as install_live_signal_broker_truth
+from bot.live_signal_auto_card_alias_v2 import install as install_live_signal_auto_card_alias
 
 install_live_broker_truth(app)
 install_live_signal_broker_truth(app)
+# Must be installed after the LIVE signal authority so this layer is outermost
+# and exposes the exact legacy field names consumed by the AUTO Portfolio card.
+install_live_signal_auto_card_alias(app)
 
 from alexa_option_king.multiuser_routes import router as alexa_router
 from alexa_option_king.oauth_routes import router as alexa_oauth_router
