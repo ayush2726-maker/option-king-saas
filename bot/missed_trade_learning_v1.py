@@ -1335,6 +1335,109 @@ def _outcome_view(row: Mapping[str, Any], candidate_side: str) -> Dict[str, Any]
     return item
 
 
+EXHAUSTION_REASON = "LATE_TWO_CANDLE_EXHAUSTION"
+
+
+def _reason_outcome_analysis(
+    events: Iterable[Mapping[str, Any]],
+    outcome_rows: Iterable[Mapping[str, Any]],
+    marker: str,
+) -> Dict[str, Any]:
+    """Aggregate net-after-cost counterfactual outcomes for one block reason."""
+    marker_upper = str(marker or "").upper()
+    outcomes = {}
+    for raw in outcome_rows or []:
+        row = dict(raw)
+        decision_id = str(row.get("decision_id") or "")
+        if decision_id:
+            outcomes[decision_id] = _outcome_view(
+                row,
+                str(row.get("candidate_side") or "WAIT").upper(),
+            )
+
+    def empty_stats():
+        return {
+            "captured": 0,
+            "evaluated_15m": 0,
+            "missed_profit": 0,
+            "block_avoided_loss": 0,
+            "no_edge": 0,
+            "net_pnl_rupees_per_lot": 0.0,
+        }
+
+    all_stats = empty_stats()
+    sole_stats = empty_stats()
+    for raw in events or []:
+        event = dict(raw)
+        reasons = _unique(
+            list(_loads(event.get("block_reasons_json"), []))
+            + list(_loads(event.get("warnings_json"), []))
+        )
+        if not any(marker_upper in str(reason).upper() for reason in reasons):
+            continue
+        other_reasons = [
+            reason for reason in reasons
+            if marker_upper not in str(reason).upper()
+        ]
+        buckets = [all_stats] + ([sole_stats] if not other_reasons else [])
+        for bucket in buckets:
+            bucket["captured"] += 1
+
+        outcome = outcomes.get(str(event.get("advanced_decision_id") or ""))
+        if not outcome:
+            continue
+        verdict = str(outcome.get("verdict") or "NO_EDGE_AFTER_COSTS")
+        pnl = _f(outcome.get("candidate_net_pnl"), 0)
+        for bucket in buckets:
+            bucket["evaluated_15m"] += 1
+            bucket["net_pnl_rupees_per_lot"] += pnl
+            if verdict == "MISSED_PROFIT":
+                bucket["missed_profit"] += 1
+            elif verdict == "BLOCK_AVOIDED_LOSS":
+                bucket["block_avoided_loss"] += 1
+            else:
+                bucket["no_edge"] += 1
+
+    def finish(stats):
+        stats["net_pnl_rupees_per_lot"] = round(
+            stats["net_pnl_rupees_per_lot"], 2
+        )
+        evaluated = stats["evaluated_15m"]
+        stats["average_net_pnl_rupees_per_lot"] = round(
+            stats["net_pnl_rupees_per_lot"] / evaluated, 2
+        ) if evaluated else 0.0
+        stats["missed_profit_rate_percent"] = round(
+            stats["missed_profit"] * 100 / evaluated, 1
+        ) if evaluated else 0.0
+        return stats
+
+    all_stats = finish(all_stats)
+    sole_stats = finish(sole_stats)
+    decision_stats = sole_stats if sole_stats["evaluated_15m"] >= 8 else all_stats
+    if decision_stats["evaluated_15m"] < 8:
+        assessment = "KEEP_PENDING_MORE_DATA"
+    elif (
+        decision_stats["net_pnl_rupees_per_lot"] > 0
+        and decision_stats["missed_profit"] > decision_stats["block_avoided_loss"]
+    ):
+        assessment = "REMOVE_HARD_BLOCK"
+    else:
+        assessment = "KEEP_HARD_BLOCK"
+    return {
+        "reason": marker_upper,
+        "basis": "15M_COUNTERFACTUAL_NET_AFTER_ALL_COSTS_PER_LOT",
+        "all_tagged": all_stats,
+        "sole_reason_only": sole_stats,
+        "assessment": assessment,
+        "assessment_sample": (
+            "SOLE_REASON_ONLY"
+            if sole_stats["evaluated_15m"] >= 8
+            else "ALL_TAGGED_EVENTS"
+        ),
+        "counterfactual_only": True,
+    }
+
+
 def _contract_view(raw: Mapping[str, Any]) -> Dict[str, Any]:
     contract = dict(raw or {})
     symbol = str(
@@ -1377,7 +1480,9 @@ def get_missed_trade_summary(user_id: int, recent_limit: int = 20) -> Dict[str, 
             (int(user_id), limit),
         ).fetchall()
         all_rows = conn.execute(
-            "SELECT status FROM ai_missed_trade_signals_v1 WHERE user_id=?",
+            """SELECT status,advanced_decision_id,candidate_side,
+                      block_reasons_json,warnings_json
+               FROM ai_missed_trade_signals_v1 WHERE user_id=?""",
             (int(user_id),),
         ).fetchall()
         primary_rows = conn.execute(
@@ -1479,6 +1584,11 @@ def get_missed_trade_summary(user_id: int, recent_limit: int = 20) -> Dict[str, 
             ),
         },
         "recent_missed_setups": recent,
+        "exhaustion_rule_analysis": _reason_outcome_analysis(
+            all_rows,
+            primary_rows,
+            EXHAUSTION_REASON,
+        ),
         "recent_pagination": {
             "shown": len(recent),
             "total": len(all_rows),
@@ -1518,9 +1628,28 @@ def missed_trade_health() -> Dict[str, Any]:
             WHERE COALESCE(sample_source,?)=?""",
             (SAMPLE_SOURCE, SAMPLE_SOURCE),
         ).fetchone()
+        health_events = conn.execute(
+            """SELECT status,advanced_decision_id,candidate_side,
+                      block_reasons_json,warnings_json
+               FROM ai_missed_trade_signals_v1"""
+        ).fetchall()
+        health_primary_rows = conn.execute(
+            """SELECT o.*,m.candidate_side
+               FROM ai_advanced_v2_contract_outcomes o
+               JOIN ai_missed_trade_signals_v1 m
+                 ON m.advanced_decision_id=o.decision_id
+               WHERE o.horizon_minutes=?
+                 AND COALESCE(o.sample_source,?)=?""",
+            (PRIMARY_HORIZON, SAMPLE_SOURCE, SAMPLE_SOURCE),
+        ).fetchall()
     finally:
         conn.close()
     due_outcome_backlog = len(_due_tracking_events(_now(), limit=200))
+    exhaustion_analysis = _reason_outcome_analysis(
+        health_events,
+        health_primary_rows,
+        EXHAUSTION_REASON,
+    )
     recent_error_categories: Dict[str, int] = {}
     for row in recent_error_rows:
         error = str(row["last_error"] or "").upper()
@@ -1561,6 +1690,7 @@ def missed_trade_health() -> Dict[str, Any]:
         "outcome_count": _i(outcomes["total"] if outcomes else 0),
         "trainable_outcome_count": _i(outcomes["trainable"] if outcomes else 0),
         "due_outcome_backlog": due_outcome_backlog,
+        "exhaustion_rule_analysis": exhaustion_analysis,
         "storage": get_db_storage_info(),
         "location": "RAILWAY",
         "mode": "SHADOW_ONLY",

@@ -5,6 +5,7 @@ from strategy.routes import DEFAULT_SETTINGS
 from telegram.routes import notify_user
 from datetime import datetime
 import json
+import math
 
 router = APIRouter(prefix="/paper", tags=["Paper"])
 
@@ -13,11 +14,9 @@ def clamp_cap(v):
         x = float(v)
     except Exception:
         x = 100000
-    if x < 1000:
-        x = 1000
-    if x > 10000000:
-        x = 10000000
-    return x
+    if not math.isfinite(x) or x <= 0:
+        x = 1
+    return round(x, 2)
 
 def load_settings(conn, user_id: int):
     settings = dict(DEFAULT_SETTINGS)

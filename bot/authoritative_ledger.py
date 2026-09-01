@@ -170,7 +170,7 @@ def build_authoritative_ledger(
     ).fetchone()["count"])
 
     if mode == "paper":
-        starting_capital = max(1000.0, _f(settings.get("paper_capital", 100000), 100000))
+        starting_capital = max(1.0, _f(settings.get("paper_capital", 100000), 100000))
         capital_source = "PAPER_SEED_PLUS_AUTHORITATIVE_NET_LEDGER"
     else:
         bases = [_f(_value(row, "capital_base"), 0) for row in open_rows]

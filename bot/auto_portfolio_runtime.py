@@ -225,7 +225,7 @@ def _today_count(conn, user_id):
 
 
 def _paper_base(conn, user_id, settings):
-    start = max(1000.0, _f(settings.get("paper_capital", 100000), 100000))
+    start = max(1.0, _f(settings.get("paper_capital", 100000), 100000))
     row = conn.execute(
         """
         SELECT COALESCE(SUM(pnl), 0) AS p
@@ -236,7 +236,7 @@ def _paper_base(conn, user_id, settings):
         """,
         (user_id,),
     ).fetchone()
-    return max(1000.0, start + _f(row["p"] if row else 0))
+    return max(1.0, start + _f(row["p"] if row else 0))
 
 
 def _live_base_from_rows(rows):

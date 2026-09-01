@@ -133,7 +133,7 @@ def normalize_settings(body: dict):
     base["trailing_sl"] = bool(body.get("trailing_sl", base["trailing_sl"]))
     base["expiry_gamma_mode"] = bool(body.get("expiry_gamma_mode", base["expiry_gamma_mode"]))
     base["trading_mode"] = "live" if str(body.get("trading_mode", base.get("trading_mode", "paper"))).lower() == "live" else "paper"
-    base["paper_capital"] = clamp_num(body.get("paper_capital", base.get("paper_capital", 100000)), 1000, 10000000, base.get("paper_capital", 100000))
+    base["paper_capital"] = clamp_num(body.get("paper_capital", base.get("paper_capital", 100000)), 1, 1000000000000, base.get("paper_capital", 100000))
     base["live_lots"] = int(clamp_num(body.get("live_lots", base.get("live_lots", 1)), 1, 10, 1))
     base["local_gateway_required"] = True
 

@@ -42,7 +42,7 @@ def _has_column(conn, table: str, column: str) -> bool:
 
 def _paper_summary(conn, user_id: int, settings: dict) -> dict:
     seed = max(
-        1000.0,
+        1.0,
         _f(settings.get("paper_capital", 100000), 100000),
     )
     reset_at = str(settings.get(RESET_KEY) or "").strip()
@@ -75,7 +75,7 @@ def _paper_summary(conn, user_id: int, settings: dict) -> dict:
     ).fetchone()
 
     cumulative_net_pnl = round(_f(row["net_pnl"] if row else 0), 2)
-    equity = max(1000.0, round(seed + cumulative_net_pnl, 2))
+    equity = max(1.0, round(seed + cumulative_net_pnl, 2))
     return {
         "seed_capital": round(seed, 2),
         "cumulative_net_pnl": cumulative_net_pnl,

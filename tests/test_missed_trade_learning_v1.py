@@ -330,6 +330,43 @@ def test_summary_allows_every_captured_setup_to_be_loaded(monkeypatch, tmp_path)
     assert all_rows["recent_pagination"]["has_more"] is False
 
 
+def test_exhaustion_analysis_uses_reason_specific_net_outcomes(monkeypatch, tmp_path):
+    missed, _, _ = _load_stack(monkeypatch, tmp_path)
+    events = []
+    outcomes = []
+    for index in range(8):
+        decision_id = f"exhaustion-{index}"
+        events.append(
+            {
+                "advanced_decision_id": decision_id,
+                "candidate_side": "PE",
+                "block_reasons_json": '["LATE_TWO_CANDLE_EXHAUSTION"]',
+                "warnings_json": "[]",
+            }
+        )
+        outcomes.append(
+            {
+                "decision_id": decision_id,
+                "candidate_side": "PE",
+                "pe_net_pnl": 100,
+                "details_json": '{"candidate_net_pnl":100,"missed_trade_verdict":"MISSED_PROFIT"}',
+                "training_eligible": 1,
+            }
+        )
+
+    analysis = missed._reason_outcome_analysis(
+        events,
+        outcomes,
+        missed.EXHAUSTION_REASON,
+    )
+
+    assert analysis["sole_reason_only"]["evaluated_15m"] == 8
+    assert analysis["sole_reason_only"]["missed_profit"] == 8
+    assert analysis["sole_reason_only"]["net_pnl_rupees_per_lot"] == 800
+    assert analysis["assessment"] == "REMOVE_HARD_BLOCK"
+    assert analysis["assessment_sample"] == "SOLE_REASON_ONLY"
+
+
 def test_hydration_reuses_nearby_live_option_snapshot(monkeypatch, tmp_path):
     missed, advanced, get_db = _load_stack(monkeypatch, tmp_path)
     assert missed.capture_scan_misses(
