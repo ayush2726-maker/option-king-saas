@@ -1,13 +1,12 @@
 from main import app
 
-# Install the broker-truth database bridge first. Every local-gateway fill/LTP
-# heartbeat is written directly into the matching paper_trades row, removing
-# dependence on later response-wrapper reconstruction.
+# Keep the gateway bridge for compatibility/backfill, but LIVE display/history
+# now reads Angel broker truth directly and no longer depends on paper/Upstox rows.
 import bot.live_gateway_db_bridge_v1  # noqa: F401
-
-# Final LIVE response/accounting/profit-retention normalization remains after
-# the direct database bridge so mobile aliases stay consistent.
 import bot.live_quality_fix_v1  # noqa: F401
+from bot.live_mode_broker_truth_middleware import install as install_live_broker_truth
+
+install_live_broker_truth(app)
 
 from alexa_option_king.multiuser_routes import router as alexa_router
 from alexa_option_king.oauth_routes import router as alexa_oauth_router
