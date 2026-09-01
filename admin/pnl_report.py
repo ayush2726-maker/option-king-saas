@@ -88,6 +88,7 @@ def _empty_user(user):
         "email": user["email"],
         "subscription_status": user["subscription_status"],
         "is_active": bool(user["is_active"]),
+        "active_mode": "paper",
         "paper": _empty_mode(),
         "live": _empty_mode(),
         "combined": _empty_mode(),
@@ -260,6 +261,29 @@ def build_all_user_pnl_report(conn, now=None, cost_calculator=None):
     ).fetchall()
     by_id = {int(row["id"]): _empty_user(row) for row in users}
 
+    # The user card headline is mode-aware. Paper and LIVE remain available as
+    # separate comparison values, but the headline/Today/Open fields must never
+    # add them together (for example, a LIVE user's old paper history).
+    if _table_exists(conn, "strategy_settings"):
+        try:
+            settings_rows = conn.execute(
+                "SELECT user_id, settings_json FROM strategy_settings"
+            ).fetchall()
+        except Exception:
+            settings_rows = []
+        for row in settings_rows:
+            user = by_id.get(int(_number(_value(row, "user_id"), 0)))
+            if not user:
+                continue
+            try:
+                settings = json.loads(str(_value(row, "settings_json", "{}") or "{}"))
+            except Exception:
+                settings = {}
+            if not isinstance(settings, dict):
+                settings = {}
+            mode = str(settings.get("trading_mode", "paper") or "paper").lower()
+            user["active_mode"] = "live" if mode == "live" else "paper"
+
     # PAPER truth only. Legacy/live mirror rows are deliberately ignored here;
     # Angel LIVE is counted exactly once from `trades` below.
     paper_proof = broker_proof_sql(conn, "paper_trades")
@@ -313,11 +337,15 @@ def build_all_user_pnl_report(conn, now=None, cost_calculator=None):
             _round_period(user["live"][period_name])
             _round_period(user["combined"][period_name])
 
-        # Flat fields consumed by the current mobile admin cards.
-        user["today_net_pnl"] = user["combined"]["today"]["net_pnl"]
-        user["all_time_net_pnl"] = user["combined"]["all_time"]["net_pnl"]
-        user["today_pnl"] = user["combined"]["today"]["net_pnl"]
-        user["open_pnl"] = user["combined"]["all_time"]["open_pnl"]
+        # Flat fields consumed by the mobile admin cards follow this user's
+        # active mode. `combined` stays nested for portfolio-wide reporting.
+        active = user[user["active_mode"]]
+        user["today_net_pnl"] = active["today"]["net_pnl"]
+        user["all_time_net_pnl"] = active["all_time"]["net_pnl"]
+        user["today_pnl"] = active["today"]["net_pnl"]
+        user["open_pnl"] = active["all_time"]["open_pnl"]
+        user["unpriced_open_trades"] = active["all_time"]["unpriced_open_trades"]
+        user["combined_pnl"] = user["combined"]["all_time"]["net_pnl"]
         user["paper_pnl"] = user["paper"]["all_time"]["net_pnl"]
         user["live_pnl"] = user["live"]["all_time"]["net_pnl"]
 

@@ -31,6 +31,9 @@ def _db():
             id INTEGER PRIMARY KEY, user_id INTEGER, quantity INTEGER,
             pnl REAL, status TEXT, created_at TEXT
         );
+        CREATE TABLE strategy_settings (
+            user_id INTEGER PRIMARY KEY, settings_json TEXT NOT NULL
+        );
         """
     )
     conn.executemany(
@@ -45,6 +48,10 @@ def _db():
 
 def test_report_separates_today_all_time_paper_live_and_users():
     conn = _db()
+    conn.execute(
+        "INSERT INTO strategy_settings VALUES (?, ?)",
+        (1, '{"trading_mode":"live"}'),
+    )
     conn.executemany(
         """
         INSERT INTO paper_trades
@@ -72,12 +79,46 @@ def test_report_separates_today_all_time_paper_live_and_users():
     ayush, demo = report["users"]
     assert ayush["paper"]["today"]["net_pnl"] == 90
     assert ayush["live"]["today"]["net_pnl"] == 50
-    assert ayush["all_time_net_pnl"] == 25
+    assert ayush["active_mode"] == "live"
+    assert ayush["all_time_net_pnl"] == 50
+    assert ayush["today_net_pnl"] == 50
+    assert ayush["combined_pnl"] == 25
     assert demo["paper"]["all_time"]["open_trades"] == 1
     assert demo["paper"]["all_time"]["open_pnl"] < 100
     assert report["totals"]["combined"]["today"]["net_pnl"] == round(
-        140 + demo["today_net_pnl"], 2
+        140 + demo["paper"]["today"]["net_pnl"], 2
     )
+
+
+def test_live_user_headline_does_not_add_historical_paper_pnl():
+    conn = _db()
+    conn.execute(
+        "INSERT INTO strategy_settings VALUES (?, ?)",
+        (1, '{"trading_mode":"live"}'),
+    )
+    conn.execute(
+        """
+        INSERT INTO paper_trades
+        VALUES (1,1,100,110,1,48749.03,48749.03,'CLOSED','paper',110,
+                'upstox','NIFTY','2026-09-01T05:00:00+00:00')
+        """
+    )
+    conn.execute(
+        "INSERT INTO trades VALUES (1,1,1,5991.88,'closed','2026-09-01T06:00:00+00:00')"
+    )
+
+    report = build_all_user_pnl_report(
+        conn,
+        now=datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc),
+        cost_calculator=_costs,
+    )
+
+    user = report["users"][0]
+    assert user["paper_pnl"] == 48749.03
+    assert user["live_pnl"] == 5991.88
+    assert user["combined_pnl"] == 54740.91
+    assert user["all_time_net_pnl"] == 5991.88
+    assert user["today_net_pnl"] == 5991.88
 
 
 def test_unpriced_open_gateway_trade_is_not_reported_as_zero_profit():
