@@ -1,0 +1,2 @@
+Force Railway redeploy after live gateway LTP authority patch f42b1f627408b6594cafa01446a306fe5e8ccc25.
+Reason: Active Live Trade still showed Entry == Live Price and Net P&L 0.00 after patch commit.
