@@ -367,9 +367,9 @@ def get_ai_gainzalgo_monitor(
 @router.get("/bot/ai-missed-trades")
 def get_ai_missed_trades(authorization: str = Header(None), recent_limit: int = 20):
     user = get_current_user(authorization)
-    # The mobile UI previously requested recent_limit=5, which hid older missed
-    # setups even though they were already captured in the database. Always
-    # return at least 20 so the report can show more than five entries.
+    # The mobile UI loads this list progressively. Always return at least 20;
+    # larger limits are honored by the summary so every captured setup remains
+    # reachable through Load more.
     return get_missed_trade_summary(user["id"], recent_limit=max(20, recent_limit))
 
 

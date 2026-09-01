@@ -293,6 +293,43 @@ def test_late_counterfactual_is_visible_but_excluded_from_training(monkeypatch, 
     assert missed.SAMPLE_SOURCE == "MISSED_TRADE_SHADOW_V1"
 
 
+def test_summary_allows_every_captured_setup_to_be_loaded(monkeypatch, tmp_path):
+    missed, _, get_db = _load_stack(monkeypatch, tmp_path)
+    missed.ensure_missed_trade_schema()
+    conn = get_db()
+    rows = []
+    for index in range(65):
+        created = (START + timedelta(seconds=index)).isoformat()
+        rows.append(
+            (
+                f"missed-{index}", 7, created, created, f"candle-{index}",
+                "NIFTY", "PE", 90, 90, 82, "WAIT", "STRATEGY_BLOCKED",
+                24300, missed.VERSION,
+            )
+        )
+    conn.executemany(
+        """
+        INSERT INTO ai_missed_trade_signals_v1
+          (id,user_id,created_at,updated_at,candle_id,underlying,candidate_side,
+           strategy_score,display_score,min_score,strategy_signal,decision_kind,
+           entry_spot,version)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+    first_page = missed.get_missed_trade_summary(7, recent_limit=20)
+    all_rows = missed.get_missed_trade_summary(7, recent_limit=65)
+
+    assert len(first_page["recent_missed_setups"]) == 20
+    assert first_page["recent_pagination"]["has_more"] is True
+    assert first_page["recent_pagination"]["total"] == 65
+    assert len(all_rows["recent_missed_setups"]) == 65
+    assert all_rows["recent_pagination"]["has_more"] is False
+
+
 def test_hydration_reuses_nearby_live_option_snapshot(monkeypatch, tmp_path):
     missed, advanced, get_db = _load_stack(monkeypatch, tmp_path)
     assert missed.capture_scan_misses(

@@ -1361,7 +1361,10 @@ def _contract_view(raw: Mapping[str, Any]) -> Dict[str, Any]:
 
 def get_missed_trade_summary(user_id: int, recent_limit: int = 20) -> Dict[str, Any]:
     ensure_missed_trade_schema()
-    limit = max(1, min(_i(recent_limit, 20), 50))
+    # The mobile list loads progressively in batches. Keep a generous safety
+    # ceiling so every captured setup remains reachable instead of silently
+    # stopping at the historical 50-row cap.
+    limit = max(1, min(_i(recent_limit, 20), 5000))
     conn = get_db()
     try:
         rows = conn.execute(
@@ -1476,6 +1479,13 @@ def get_missed_trade_summary(user_id: int, recent_limit: int = 20) -> Dict[str, 
             ),
         },
         "recent_missed_setups": recent,
+        "recent_pagination": {
+            "shown": len(recent),
+            "total": len(all_rows),
+            "requested_limit": limit,
+            "has_more": len(recent) < len(all_rows),
+            "next_limit": min(5000, max(limit + 20, len(recent) + 20)),
+        },
         "storage": get_db_storage_info(),
     }
 
