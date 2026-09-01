@@ -76,6 +76,7 @@ from bot.expiry_day_risk_mode_patch import apply_expiry_day_risk_mode_patch
 from bot.authoritative_profit_lock_runtime_patch import apply_authoritative_profit_lock_runtime_patch
 from bot.admin_morning_trade_cleanup_20260804 import delete_admin_morning_paper_trades_20260804
 from bot.live_gateway_display_sync_v1 import install_live_gateway_display_sync_patch
+from bot.live_gateway_direct_symbol_hotfix import apply_live_gateway_direct_symbol_hotfix
 from bot.live_daily_history_response_patch import install_live_daily_history_response_patch
 import os
 
@@ -129,12 +130,15 @@ apply_authoritative_profit_lock_runtime_patch()
 # Install after both routers are imported and after final runtime wrappers so the
 # gateway POSITION_SYNC event and live-trade response share one broker truth.
 install_live_gateway_display_sync_patch()
+# Prefer the self-describing gateway symbol/order identity over independent
+# local/cloud trade IDs, so Angel LTP heartbeats always update the right card.
+apply_live_gateway_direct_symbol_hotfix()
 # Daily Trade History uses the legacy user-panel response path even for LIVE
 # trades. Patch that response boundary directly so quantity/cost aliases are
 # repaired without depending on the mobile build or route monkey-patch order.
 install_live_daily_history_response_patch()
 
-RELEASE_VERSION = "live-daily-history-cost-repair-v1"
+RELEASE_VERSION = "live-gateway-ltp-cost-sync-v2"
 
 app = FastAPI(title="Option King AI — SaaS API", description="Multi-user F&O trading bot platform", version="1.0.0", docs_url="/docs", redoc_url="/redoc")
 app.add_middleware(BacktestActiveStrategyMiddleware)
