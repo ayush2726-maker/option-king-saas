@@ -1,18 +1,22 @@
 """Read-only, admin-facing P&L aggregation.
 
-The bot stores SaaS paper and broker-live positions in ``paper_trades`` and
-marks them with ``trading_mode``.  The optional static-IP gateway stores its
-orders in ``trades``.  This module combines both ledgers without changing any
-trade rows, and keeps paper/live plus realised/open values separate.
+Paper and LIVE are deliberately separated:
+- PAPER comes only from paper_trades rows whose trading_mode is paper.
+- LIVE comes only from the Angel/local-gateway `trades` ledger.
+
+This prevents the same LIVE trade being counted once from paper_trades and again
+from trades. Open Angel positions are priced from gateway_position.ltp when
+available, so admin cards use the same live quote truth as Active Live Trades.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 IST_OFFSET = timedelta(hours=5, minutes=30)
 OPEN_STATUSES = {"OPEN", "PENDING", "EXIT_PENDING"}
-IGNORED_STATUSES = {"FAILED", "CANCELLED"}
+IGNORED_STATUSES = {"FAILED", "CANCELLED", "CANCELED", "REJECTED"}
 
 
 def _value(row, key, default=None):
@@ -139,6 +143,71 @@ def _paper_trade_pnl(row, status, cost_calculator):
     return _number(_value(row, "pnl"), 0), True
 
 
+def _gateway_position(row):
+    try:
+        meta = json.loads(str(_value(row, "metadata_json", "{}") or "{}"))
+    except Exception:
+        meta = {}
+    pos = meta.get("gateway_position") if isinstance(meta, dict) else None
+    return pos if isinstance(pos, dict) else {}
+
+
+def _underlying(row):
+    saved = str(_value(row, "underlying", "") or "").upper()
+    if saved in {"NIFTY", "BANKNIFTY", "SENSEX"}:
+        return saved
+    symbol = str(_value(row, "symbol", "") or "").upper()
+    if "BANKNIFTY" in symbol:
+        return "BANKNIFTY"
+    if "SENSEX" in symbol:
+        return "SENSEX"
+    return "NIFTY"
+
+
+def _live_trade_pnl(row, status):
+    """Return Angel LIVE net P&L from actual fill/quote truth, once."""
+    entry = _number(_value(row, "entry_price"), 0)
+    qty = int(_number(_value(row, "quantity", _value(row, "qty", 0)), 0))
+    if entry <= 0 or qty <= 0:
+        saved = _value(row, "net_pnl", _value(row, "pnl"))
+        if saved is not None and status not in OPEN_STATUSES:
+            return _number(saved), True
+        return 0.0, False
+
+    if status in OPEN_STATUSES:
+        pos = _gateway_position(row)
+        current = _number(
+            pos.get("ltp")
+            if pos.get("ltp") is not None
+            else _value(row, "last_ltp"),
+            0,
+        )
+        if current <= 0:
+            return 0.0, False
+    else:
+        current = _number(_value(row, "exit_price"), 0)
+        if current <= 0:
+            saved = _value(row, "net_pnl", _value(row, "pnl"))
+            return (_number(saved), True) if saved is not None else (0.0, False)
+
+    try:
+        from bot.live_net_pnl_breakeven_patch import calculate_execution_costs
+
+        calc = calculate_execution_costs(
+            "angelone",
+            _underlying(row),
+            entry,
+            current,
+            qty,
+            include_slippage=False,
+        )
+        return _number(calc.get("net_pnl"), (current - entry) * qty), True
+    except Exception:
+        # Never mark a valid broker quote as unpriced merely because the cost
+        # calculator changed; gross is still a better truth than zero.
+        return (current - entry) * qty, True
+
+
 def _table_exists(conn, name):
     return bool(
         conn.execute(
@@ -161,7 +230,7 @@ def _select_rows(conn, table):
 
 
 def build_all_user_pnl_report(conn, now=None, cost_calculator=None):
-    """Return per-user and portfolio P&L without mutating the database."""
+    """Return per-user PAPER + authoritative Angel LIVE P&L without duplicates."""
     if cost_calculator is None:
         from bot.net_pnl_history_patch import calculate_row_net_costs
 
@@ -185,26 +254,24 @@ def build_all_user_pnl_report(conn, now=None, cost_calculator=None):
     ).fetchall()
     by_id = {int(row["id"]): _empty_user(row) for row in users}
 
+    # PAPER truth only. Legacy/live mirror rows are deliberately ignored here;
+    # Angel LIVE is counted exactly once from `trades` below.
     for row in _select_rows(conn, "paper_trades"):
+        if str(_value(row, "trading_mode", "paper") or "paper").lower() != "paper":
+            continue
         user = by_id.get(int(_number(_value(row, "user_id"), 0)))
         if not user:
             continue
         status = str(_value(row, "status", "CLOSED") or "CLOSED").upper()
         if status in IGNORED_STATUSES:
             continue
-        mode = (
-            "live"
-            if str(_value(row, "trading_mode", "paper") or "paper").lower() == "live"
-            else "paper"
-        )
         pnl, priced = _paper_trade_pnl(row, status, cost_calculator)
-        _add_trade(user[mode]["all_time"], status=status, pnl=pnl, priced=priced)
+        _add_trade(user["paper"]["all_time"], status=status, pnl=pnl, priced=priced)
         if _ist_date(_timestamp(row)) == today_ist:
-            _add_trade(user[mode]["today"], status=status, pnl=pnl, priced=priced)
+            _add_trade(user["paper"]["today"], status=status, pnl=pnl, priced=priced)
 
-    # Static-IP gateway trades are real broker trades and are not duplicated in
-    # paper_trades. Closed P&L is broker-reported; open rows have no live quote
-    # column, so they are counted but deliberately excluded from net P&L.
+    # LIVE truth only from Angel/local gateway ledger. Open positions are priced
+    # from gateway_position.ltp, the same source used by Active Live Trades.
     for row in _select_rows(conn, "trades"):
         user = by_id.get(int(_number(_value(row, "user_id"), 0)))
         if not user:
@@ -212,9 +279,7 @@ def build_all_user_pnl_report(conn, now=None, cost_calculator=None):
         status = str(_value(row, "status", "CLOSED") or "CLOSED").upper()
         if status in IGNORED_STATUSES:
             continue
-        is_open = status in OPEN_STATUSES
-        pnl = _number(_value(row, "net_pnl", _value(row, "pnl", 0)), 0)
-        priced = not is_open
+        pnl, priced = _live_trade_pnl(row, status)
         _add_trade(user["live"]["all_time"], status=status, pnl=pnl, priced=priced)
         if _ist_date(_timestamp(row)) == today_ist:
             _add_trade(user["live"]["today"], status=status, pnl=pnl, priced=priced)
@@ -240,9 +305,13 @@ def build_all_user_pnl_report(conn, now=None, cost_calculator=None):
             _round_period(user["live"][period_name])
             _round_period(user["combined"][period_name])
 
-        # Flat fields make the response easy for the current mobile app to use.
+        # Flat fields consumed by the current mobile admin cards.
         user["today_net_pnl"] = user["combined"]["today"]["net_pnl"]
         user["all_time_net_pnl"] = user["combined"]["all_time"]["net_pnl"]
+        user["today_pnl"] = user["combined"]["today"]["net_pnl"]
+        user["open_pnl"] = user["combined"]["all_time"]["open_pnl"]
+        user["paper_pnl"] = user["paper"]["all_time"]["net_pnl"]
+        user["live_pnl"] = user["live"]["all_time"]["net_pnl"]
 
     for period_name in ("today", "all_time"):
         for key in (
@@ -265,12 +334,12 @@ def build_all_user_pnl_report(conn, now=None, cost_calculator=None):
         "date_ist": today_ist,
         "as_of": now.astimezone(timezone.utc).isoformat(),
         "currency": "INR",
-        "pnl_basis": "NET_AFTER_EXECUTION_COSTS_WHEN_AVAILABLE",
+        "pnl_basis": "PAPER_FROM_PAPER_TRADES_PLUS_ANGEL_LIVE_TRADES_ONCE_NET_AFTER_COSTS",
         "user_count": len(by_id),
         "totals": totals,
         "users": list(by_id.values()),
         "notes": {
-            "unpriced_open_trades": "Excluded from open/net P&L until a live quote is available.",
-            "gateway_live": "Broker-reported realised P&L; open gateway positions are unpriced.",
+            "unpriced_open_trades": "Only counted as unpriced when Angel gateway has no current LTP.",
+            "gateway_live": "Angel `trades` is the sole LIVE ledger; legacy live mirrors in paper_trades are excluded.",
         },
     }
