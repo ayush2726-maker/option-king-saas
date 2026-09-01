@@ -4,6 +4,7 @@ from auth.routes import get_current_user
 from strategy.routes import DEFAULT_SETTINGS
 from telegram.routes import notify_user
 from bot.net_pnl_history_patch import backfill_closed_trade_costs
+from bot.trade_mode_truth import paper_truth_sql
 from datetime import datetime, timedelta
 import json
 
@@ -49,6 +50,7 @@ def _iso_utc_timestamp(value):
 
 def _paper_trade_view(row):
     trade = row_to_dict(row)
+    trade["trading_mode"] = "paper"
 
     for key in (
         "created_at",
@@ -86,8 +88,9 @@ def _paper_trade_view(row):
 
 def _paper_daily_summary(conn, user_id, limit=120):
     """Return only IST calendar dates on which this user actually traded."""
+    paper_filter = paper_truth_sql(conn, "paper_trades")
     rows = conn.execute(
-        """
+        f"""
         SELECT
             date(datetime(created_at, '+5 hours', '+30 minutes')) AS trade_date,
             COUNT(*) AS trade_count,
@@ -103,7 +106,7 @@ def _paper_daily_summary(conn, user_id, limit=120):
                      ELSE 0 END
             ), 0) AS day_pnl
         FROM paper_trades
-        WHERE user_id=? AND created_at IS NOT NULL
+        WHERE user_id=? AND created_at IS NOT NULL AND {paper_filter}
         GROUP BY trade_date
         HAVING trade_date IS NOT NULL
         ORDER BY trade_date DESC
@@ -303,8 +306,10 @@ def paper_history(authorization: str = Header(None)):
     conn = get_db()
     ensure_tables(conn)
 
+    paper_filter = paper_truth_sql(conn, "paper_trades")
+
     rows = conn.execute(
-        "SELECT * FROM paper_trades WHERE user_id=? ORDER BY id DESC LIMIT 250",
+        f"SELECT * FROM paper_trades WHERE user_id=? AND {paper_filter} ORDER BY id DESC LIMIT 250",
         (user["id"],)
     ).fetchall()
     trades = [_paper_trade_view(row) for row in rows]
@@ -346,12 +351,14 @@ def paper_history_day(date: str, authorization: str = Header(None)):
 
     conn = get_db()
     ensure_tables(conn)
+    paper_filter = paper_truth_sql(conn, "paper_trades")
     rows = conn.execute(
-        """
+        f"""
         SELECT *
         FROM paper_trades
         WHERE user_id=?
           AND date(datetime(created_at, '+5 hours', '+30 minutes'))=?
+          AND {paper_filter}
         ORDER BY id DESC
         """,
         (user["id"], requested_date),

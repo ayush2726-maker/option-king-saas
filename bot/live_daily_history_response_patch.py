@@ -133,14 +133,13 @@ def _repair_live_trade(trade):
         return trade
 
     data = dict(trade)
-    mode = str(data.get("trading_mode") or "paper").lower()
     entry_order_id = str(data.get("entry_order_id") or "").strip()
 
     # This decorator is installed on both PAPER and LIVE response views.  Only
     # broker-proven rows may receive LIVE cost accounting; otherwise an
     # unrelated Angel trade with the same symbol can overwrite a PAPER row's
     # P&L basis in Daily Trade History.
-    if mode != "live" and not entry_order_id:
+    if not entry_order_id:
         return data
 
     status = str(data.get("status") or "").upper()

@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from bot.trade_mode_truth import paper_truth_sql
+
 
 INSTRUMENTS = ("NIFTY", "BANKNIFTY", "SENSEX")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -110,8 +112,9 @@ def _load_rows(conn, user_id: int, requested_mode: str):
     rows = []
     if requested_mode in ("all", "paper"):
         try:
+            paper_filter = paper_truth_sql(conn, "paper_trades")
             paper_rows = conn.execute(
-                "SELECT * FROM paper_trades WHERE user_id=? ORDER BY id ASC",
+                f"SELECT * FROM paper_trades WHERE user_id=? AND {paper_filter} ORDER BY id ASC",
                 (int(user_id),),
             ).fetchall()
             rows.extend((row, "paper") for row in paper_rows)

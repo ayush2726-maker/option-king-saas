@@ -403,16 +403,23 @@ def get_trade_history(authorization: str = Header(None)):
                 settings.update(json.loads(settings_row["settings_json"] or "{}"))
         except Exception:
             pass
+        if str(settings.get("trading_mode", "paper") or "paper").lower() == "live":
+            from bot.live_mode_broker_truth_middleware import _history_payload
+            return _history_payload(user["id"])
+        from bot.trade_mode_truth import paper_truth_sql
+        paper_filter = paper_truth_sql(conn, "paper_trades")
         rows = conn.execute(
-            """
+            f"""
             SELECT * FROM paper_trades
-            WHERE user_id=?
+            WHERE user_id=? AND {paper_filter}
             ORDER BY id DESC
             LIMIT 250
             """,
             (user["id"],),
         ).fetchall()
         trades = [_trade_view(row) for row in rows]
+        for trade in trades:
+            trade["trading_mode"] = "paper"
         ledger = build_authoritative_ledger(conn, user["id"], settings)
     except Exception as exc:
         return {

@@ -169,6 +169,11 @@ def backfill_closed_trade_costs(user_id=None) -> int:
     repaired = 0
     try:
         _ensure_columns(conn)
+        try:
+            from bot.trade_mode_truth import reconcile_trade_modes
+            reconcile_trade_modes(conn, user_id)
+        except Exception:
+            pass
         sql = """
             SELECT * FROM paper_trades
             WHERE UPPER(COALESCE(status,''))='CLOSED'
@@ -179,6 +184,10 @@ def backfill_closed_trade_costs(user_id=None) -> int:
                  OR net_pnl IS NULL
                  OR COALESCE(pnl_basis,'')=''
                  OR COALESCE(total_charges,0)<=0
+                 OR (LOWER(COALESCE(trading_mode,'paper'))='paper'
+                     AND COALESCE(pnl_basis,'') LIKE 'LIVE_%')
+                 OR (LOWER(COALESCE(trading_mode,'paper'))='live'
+                     AND COALESCE(pnl_basis,'') LIKE 'PAPER_%')
               )
         """
         params = []

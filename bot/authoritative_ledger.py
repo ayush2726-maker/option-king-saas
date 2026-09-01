@@ -5,9 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from bot.trade_mode_truth import broker_proof_sql, reconcile_trade_modes
+
 
 IST = timezone(timedelta(hours=5, minutes=30))
-VERSION = "OKAI-AUTHORITATIVE-LEDGER-V3-STRICT-MODE-PROOF"
+VERSION = "OKAI-AUTHORITATIVE-LEDGER-V4-RECONCILED-BROKER-PROOF"
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -77,21 +79,7 @@ def _mode_clause(conn, mode: str, paper_columns: set[str]):
     symbol as LIVE made PAPER Today P&L and trade count disappear whenever the
     user also had an Angel trade for that symbol.
     """
-    has_mode = "trading_mode" in paper_columns
-    has_entry_order = "entry_order_id" in paper_columns
-
-    proof_parts = []
-    if has_mode:
-        proof_parts.append("LOWER(COALESCE(paper_trades.trading_mode,''))='live'")
-    if has_entry_order:
-        proof_parts.append("COALESCE(NULLIF(paper_trades.entry_order_id,''),'')<>''")
-
-    if not proof_parts:
-        if has_mode:
-            return "LOWER(COALESCE(paper_trades.trading_mode,'paper'))=?", [mode]
-        return "1=1", []
-
-    live_proof = "(" + " OR ".join(proof_parts) + ")"
+    live_proof = broker_proof_sql(conn, "paper_trades")
     return (live_proof, []) if mode == "live" else (f"NOT {live_proof}", [])
 
 
@@ -102,17 +90,20 @@ def build_authoritative_ledger(
     now: datetime | None = None,
 ) -> dict:
     settings = dict(settings or {})
+    try:
+        reconcile_trade_modes(conn, int(user_id))
+    except Exception:
+        pass
     columns = _columns(conn)
     mode = "live" if str(settings.get("trading_mode", "paper")).lower() == "live" else "paper"
 
     # Repair historical LIVE qty/cost before dashboard totals are read. This is
     # accounting-only and never changes entries, sizing or exit execution.
-    if mode == "live":
-        try:
-            from bot.net_pnl_history_patch import backfill_closed_trade_costs
-            backfill_closed_trade_costs(int(user_id))
-        except Exception:
-            pass
+    try:
+        from bot.net_pnl_history_patch import backfill_closed_trade_costs
+        backfill_closed_trade_costs(int(user_id))
+    except Exception:
+        pass
 
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     today_ist = current.astimezone(IST).date()
@@ -195,7 +186,7 @@ def build_authoritative_ledger(
 
     return {
         "version": VERSION,
-        "source": "PAPER_TRADES_DB_NET_PNL_WITH_STRICT_MODE_PROOF",
+        "source": "PAPER_TRADES_DB_NET_PNL_WITH_RECONCILED_BROKER_PROOF",
         "mode": mode,
         "pnl_basis": "NET_AFTER_EXECUTION_COSTS",
         "reset_at": _sql_time(reset_at) if reset_at else None,
@@ -215,7 +206,7 @@ def build_authoritative_ledger(
             "closed_pnl": today_realized,
             "open_pnl": open_pnl,
             "total_pnl": round(today_realized + open_pnl, 2),
-            "source": "AUTHORITATIVE_LEDGER_STRICT_MODE_PROOF",
+            "source": "AUTHORITATIVE_LEDGER_RECONCILED_BROKER_PROOF",
         },
         "capital_source": capital_source,
     }

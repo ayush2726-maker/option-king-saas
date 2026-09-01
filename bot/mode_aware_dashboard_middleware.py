@@ -11,6 +11,7 @@ from auth.utils import decrypt_credential
 from bot.brokers.factory import create_broker
 from database import get_db
 from broker.selection import get_selected_broker
+from bot.trade_mode_truth import paper_truth_sql
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -82,15 +83,19 @@ def _live_rows(conn, user_id, active_only=False, limit=250):
 
 
 def _paper_rows(conn, user_id, active_only=False, limit=250):
-    where = "AND UPPER(COALESCE(status,''))='OPEN'" if active_only else ""
+    active = "AND UPPER(COALESCE(paper_trades.status,''))='OPEN'" if active_only else ""
     try:
+        paper_filter = paper_truth_sql(conn, "paper_trades")
         rows = conn.execute(
-            f"SELECT * FROM paper_trades WHERE user_id=? {where} ORDER BY id DESC LIMIT ?",
+            f"SELECT * FROM paper_trades WHERE user_id=? AND {paper_filter} {active} ORDER BY id DESC LIMIT ?",
             (int(user_id), int(limit)),
         ).fetchall()
     except Exception:
         return []
-    return [_trade_dict(row, "paper") for row in rows]
+    output = [_trade_dict(row, "paper") for row in rows]
+    for trade in output:
+        trade["trading_mode"] = "paper"
+    return output
 
 
 def _realized_pnl(trades):
@@ -255,19 +260,23 @@ class ModeAwareDashboardMiddleware(BaseHTTPMiddleware):
 
                 if path == "/bot/signal":
                     data = _apply_signal_mode(data, user["id"], mode, settings, conn)
-                elif path == "/history/paper" and mode == "live":
-                    trades = _live_rows(conn, user["id"], False, 250)
+                elif path == "/history/paper":
+                    trades = (
+                        _live_rows(conn, user["id"], False, 250)
+                        if mode == "live"
+                        else _paper_rows(conn, user["id"], False, 250)
+                    )
                     data = {
                         "success": True,
                         "paper_trades": trades,
-                        "live_trades": trades,
+                        "live_trades": trades if mode == "live" else [],
                         "trades": trades,
                         "count": len(trades),
                         "daily_history": _daily_history(trades),
                         "daily_count": len(_daily_history(trades)),
                         "history_view": "DAILY_DRILLDOWN_V1",
-                        "history_mode": "live",
-                        "trade_history_label": "Live Trade History",
+                        "history_mode": mode,
+                        "trade_history_label": "Live Trade History" if mode == "live" else "Paper Trade History",
                         "pnl_basis": "NET_AFTER_EXECUTION_COSTS",
                         "timezone": "Asia/Kolkata",
                     }

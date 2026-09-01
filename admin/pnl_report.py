@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
+from bot.trade_mode_truth import broker_proof_sql, reconcile_trade_modes
+
 IST_OFFSET = timedelta(hours=5, minutes=30)
 OPEN_STATUSES = {"OPEN", "PENDING", "EXIT_PENDING"}
 IGNORED_STATUSES = {"FAILED", "CANCELLED", "CANCELED", "REJECTED"}
@@ -236,6 +238,10 @@ def build_all_user_pnl_report(conn, now=None, cost_calculator=None):
 
         cost_calculator = calculate_row_net_costs
     now = now or datetime.now(timezone.utc)
+    try:
+        reconcile_trade_modes(conn)
+    except Exception:
+        pass
     today_ist = (now.astimezone(timezone.utc) + IST_OFFSET).date().isoformat()
 
     user_columns = _table_columns(conn, "users")
@@ -256,9 +262,11 @@ def build_all_user_pnl_report(conn, now=None, cost_calculator=None):
 
     # PAPER truth only. Legacy/live mirror rows are deliberately ignored here;
     # Angel LIVE is counted exactly once from `trades` below.
-    for row in _select_rows(conn, "paper_trades"):
-        if str(_value(row, "trading_mode", "paper") or "paper").lower() != "paper":
-            continue
+    paper_proof = broker_proof_sql(conn, "paper_trades")
+    paper_rows = conn.execute(
+        f"SELECT * FROM paper_trades WHERE NOT {paper_proof} ORDER BY id ASC"
+    ).fetchall() if _table_exists(conn, "paper_trades") else []
+    for row in paper_rows:
         user = by_id.get(int(_number(_value(row, "user_id"), 0)))
         if not user:
             continue

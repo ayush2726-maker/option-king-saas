@@ -46,7 +46,7 @@ def test_today_total_and_capital_share_one_net_ledger():
     assert ledger["today"]["trades"] == 2
     assert ledger["total_trades"] == 2
     assert ledger["current_capital"] == 117600
-    assert ledger["source"] == "PAPER_TRADES_DB_NET_PNL_WITH_STRICT_MODE_PROOF"
+    assert ledger["source"] == "PAPER_TRADES_DB_NET_PNL_WITH_RECONCILED_BROKER_PROOF"
 
 
 def test_same_symbol_in_broker_table_does_not_hide_paper_pnl():
@@ -123,3 +123,30 @@ def test_entry_order_id_is_still_strict_live_proof():
     assert paper["realized_pnl"] == 0
     assert live["total_trades"] == 1
     assert live["realized_pnl"] == 450
+
+
+def test_wrong_saved_live_flag_without_broker_proof_is_repaired_to_paper():
+    conn = _conn()
+    conn.execute("ALTER TABLE paper_trades ADD COLUMN symbol TEXT")
+    conn.execute("ALTER TABLE paper_trades ADD COLUMN entry_order_id TEXT")
+    now = datetime(2026, 9, 1, 16, 0, tzinfo=timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO paper_trades
+          (id,user_id,symbol,status,pnl,net_pnl,trading_mode,entry_order_id,
+           created_at,exit_time,updated_at,entry_price,last_ltp,qty)
+        VALUES (1,1,'NIFTY01SEP2625000CE','CLOSED',1200,1100,'live','',
+                '2026-09-01T05:00:00Z','2026-09-01T05:30:00Z',
+                '2026-09-01T05:30:00Z',100,120,65)
+        """
+    )
+    conn.commit()
+
+    ledger = build_authoritative_ledger(
+        conn, 1, {"trading_mode": "paper", "paper_capital": 120000}, now=now
+    )
+
+    saved = conn.execute("SELECT trading_mode FROM paper_trades WHERE id=1").fetchone()
+    assert saved["trading_mode"] == "paper"
+    assert ledger["today"]["trades"] == 1
+    assert ledger["today"]["closed_pnl"] == 1100

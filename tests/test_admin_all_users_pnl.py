@@ -114,3 +114,25 @@ def test_report_does_not_change_trade_rows():
     )
     after = dict(conn.execute("SELECT * FROM paper_trades WHERE id=1").fetchone())
     assert after == before
+
+
+def test_wrong_live_flag_without_broker_proof_is_counted_as_paper_today():
+    conn = _db()
+    conn.execute(
+        """
+        INSERT INTO paper_trades
+        VALUES (1,1,100,120,10,200,180,'CLOSED','live',120,'upstox','NIFTY',
+                '2026-09-01T05:00:00+00:00')
+        """
+    )
+
+    report = build_all_user_pnl_report(
+        conn,
+        now=datetime(2026, 9, 1, 16, 0, tzinfo=timezone.utc),
+        cost_calculator=_costs,
+    )
+
+    ayush = report["users"][0]
+    assert ayush["paper"]["today"]["trade_count"] == 1
+    assert ayush["paper"]["today"]["net_pnl"] == 180
+    assert ayush["live"]["today"]["trade_count"] == 0
