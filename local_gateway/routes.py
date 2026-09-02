@@ -105,7 +105,16 @@ def _persist_funds_snapshot(user_id: int, funds):
         _number(funds.get("total_limit"), available_cash + used_margin),
     )
     broker = str(funds.get("broker") or "angelone").lower().strip()[:30]
-    if broker != "angelone":
+    broker = {
+        "angel": "angelone",
+        "angel-one": "angelone",
+        "angelone-local-gateway": "angelone",
+        "upstox-local-gateway": "upstox",
+    }.get(broker, broker)
+    # The gateway token already scopes the snapshot to one OKAI user. Accept
+    # both supported local brokers so an Upstox profile is not silently dropped
+    # after a successful authenticated heartbeat.
+    if broker not in {"angelone", "upstox"}:
         return None
 
     updated_at = datetime.now(timezone.utc).isoformat()
