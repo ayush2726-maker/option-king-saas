@@ -73,6 +73,26 @@ def _number(value, default=0.0):
         return float(default)
 
 
+def _gateway_open_positions(user_id: int):
+    """Return only this authenticated gateway user's server-open LIVE trades."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, underlying, symbol, option_type, quantity, entry_price,
+                   sl_price, target_price, status, broker_order_id, entry_time,
+                   symboltoken, exchange
+            FROM trades
+            WHERE user_id=? AND status IN ('open','exit_pending')
+            ORDER BY id
+            """,
+            (int(user_id),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
 def _persist_funds_snapshot(user_id: int, funds):
     """Persist only authenticated local-gateway broker funds for LIVE sizing."""
     if not isinstance(funds, dict):
@@ -244,7 +264,6 @@ def arm_local_gateway(body: dict, authorization: str = Header(None)):
 @router.post("/disarm")
 def disarm_local_gateway(authorization: str = Header(None)):
     user = get_current_user(authorization)
-    # Disarm is always allowed, including after a subscription expires.
     set_gateway_armed(user["id"], False)
     return {
         "success": True,
@@ -291,6 +310,7 @@ def gateway_heartbeat(
     return {
         "success": True,
         **status,
+        "open_positions": _gateway_open_positions(gateway["user_id"]),
         "funds_snapshot_received": bool(funds_snapshot),
         "funds_snapshot_updated_at": (
             funds_snapshot.get("updated_at") if funds_snapshot else None
@@ -306,19 +326,13 @@ def gateway_poll(
 ):
     gateway = authenticate_gateway(_gateway_token(x_gateway_token))
     observed_ip = _observed_client_ip(request)
-    # Poll requests are also heartbeats, but they must preserve the agent's
-    # real version reported by /heartbeat instead of replacing it with "poll".
     heartbeat = heartbeat_gateway(
         gateway,
         observed_ip,
         gateway["agent_version"] or "",
     )
     expected_ip = str(heartbeat.get("expected_static_ip") or "").strip()
-    ip_allowed = (
-        bool(heartbeat.get("static_ip_matches"))
-        if expected_ip
-        else False
-    )
+    ip_allowed = bool(heartbeat.get("static_ip_matches")) if expected_ip else False
     access_allowed = bool(heartbeat.get("gateway_access_allowed"))
     allow_entries = (
         bool(heartbeat.get("server_armed"))
@@ -372,7 +386,6 @@ def gateway_position_event(body: dict, x_gateway_token: str = Header(None)):
 @router.post("/exit-now")
 def exit_live_position(body: dict, authorization: str = Header(None)):
     user = get_current_user(authorization)
-    # Closing a user's own position is always allowed, even after expiry.
     trade_id = int(body.get("trade_id") or 0)
     if trade_id <= 0:
         raise HTTPException(status_code=400, detail="Valid trade_id is required")
