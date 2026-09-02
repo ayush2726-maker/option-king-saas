@@ -34,7 +34,7 @@ from backtest.realism_costs_patch import apply_backtest_realism_costs_patch
 from backtest.cost_idempotence_patch import apply_cost_idempotence_patch
 from backtest.monthly_job_start_patch import apply_monthly_job_start_patch
 from backtest.daily_job_start_patch import apply_daily_job_start_patch
-from backtest.normal_entry_cutoff_1445_patch import apply_normal_entry_cutoff_1445_patch
+from backtest.normal_entry_cutoff_1515_patch import apply_normal_entry_cutoff_1515_patch
 from backtest.real_option_premium_patch import prepare_real_option_premium_patch
 from backtest.real_option_premium_finalize_patch import finalize_real_option_premium_patch
 from bot.score_history_patch import apply_score_history_patch
@@ -70,10 +70,15 @@ from bot.entry_execution_safety_v1_patch import apply_entry_execution_safety_v1_
 from bot.qualified_entry_release_patch import apply_qualified_entry_release_patch
 from bot.pullback_continuation_entry_patch import apply_pullback_continuation_entry_patch
 from bot.choppy_market_guard_patch import apply_choppy_market_guard_patch
+from bot.market_regime_shield_v2 import apply_market_regime_shield_v2
 from bot.missed_trade_learning_v1 import apply_missed_trade_learning_patch
 from bot.final_correlated_risk_guard import apply_final_correlated_risk_guard
 from bot.expiry_day_risk_mode_patch import apply_expiry_day_risk_mode_patch
 from bot.authoritative_profit_lock_runtime_patch import apply_authoritative_profit_lock_runtime_patch
+from bot.full_sl_velocity_circuit_patch import apply_full_sl_velocity_circuit_patch
+from bot.normal_entry_cutoff_1515_runtime_patch import (
+    apply_normal_entry_cutoff_1515_runtime_patch,
+)
 from bot.admin_morning_trade_cleanup_20260804 import delete_admin_morning_paper_trades_20260804
 from bot.live_gateway_display_sync_v1 import install_live_gateway_display_sync_patch
 from bot.live_gateway_direct_symbol_hotfix import apply_live_gateway_direct_symbol_hotfix
@@ -108,7 +113,7 @@ apply_backtest_realism_costs_patch()
 apply_cost_idempotence_patch()
 apply_monthly_job_start_patch()
 apply_daily_job_start_patch()
-apply_normal_entry_cutoff_1445_patch()
+apply_normal_entry_cutoff_1515_patch()
 apply_capital_based_sizing_restore_patch()
 apply_expectancy_engine_v1_patch()
 apply_breakeven_4pct_patch()
@@ -123,10 +128,16 @@ apply_entry_execution_safety_v1_patch()
 apply_cas_closing_guard_patch()
 apply_pullback_continuation_entry_patch()
 apply_choppy_market_guard_patch()
+apply_market_regime_shield_v2()
 apply_missed_trade_learning_patch()
 apply_final_correlated_risk_guard()
 apply_expiry_day_risk_mode_patch()
 apply_authoritative_profit_lock_runtime_patch()
+# These are the final normal-AUTO order-boundary guards.  Keep them after all
+# legacy wrappers so replay, Paper and Live cannot restore permissive clocks or
+# bypass the count-based loss circuit. Hero Zero uses a separate runtime.
+apply_full_sl_velocity_circuit_patch()
+apply_normal_entry_cutoff_1515_runtime_patch()
 # Install after both routers are imported and after final runtime wrappers so the
 # gateway POSITION_SYNC event and live-trade response share one broker truth.
 install_live_gateway_display_sync_patch()
@@ -138,7 +149,7 @@ apply_live_gateway_direct_symbol_hotfix()
 # repaired without depending on the mobile build or route monkey-patch order.
 install_live_daily_history_response_patch()
 
-RELEASE_VERSION = "live-gateway-ltp-cost-sync-v2"
+RELEASE_VERSION = "market-regime-shield-v2-cutoff1515-20260902"
 
 app = FastAPI(title="Option King AI — SaaS API", description="Multi-user F&O trading bot platform", version="1.0.0", docs_url="/docs", redoc_url="/redoc")
 app.add_middleware(BacktestActiveStrategyMiddleware)

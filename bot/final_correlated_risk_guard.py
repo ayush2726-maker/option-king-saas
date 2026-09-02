@@ -20,7 +20,7 @@ COOLDOWN_REASON = "POST_ATR_SL_SAME_SIDE_COOLDOWN_15M"
 SAME_DIRECTION_REASON = "CORRELATED_SAME_DIRECTION_POSITION_OPEN"
 HEDGE_NOT_LOSING_REASON = "OPPOSITE_HEDGE_REQUIRES_EXISTING_LOSS"
 HEDGE_SAME_INDEX_REASON = "OPPOSITE_HEDGE_REQUIRES_DIFFERENT_INDEX"
-VERSION = "OKAI-FINAL-CORRELATED-RISK-GUARD-V2"
+VERSION = "OKAI-FINAL-CORRELATED-RISK-GUARD-V3-SAME-DIRECTION-ALLOWED"
 
 
 def _value(row: Any, key: str, default=None):
@@ -220,9 +220,9 @@ def apply_final_correlated_risk_guard() -> bool:
                 row for row in runtime._open_rows(conn, user_id)
                 if _mode(row) == current_mode and str(runtime._underlying(row) or "").upper() in CORRELATED_INDICES
             ]
-            # User choice: correlated indices may hold more than one trade in
-            # the same direction. The exact same-index/side post-loss cooldown
-            # above remains a hard 15-minute safety rule.
+            # Same-direction NIFTY/SENSEX positions are explicitly allowed.
+            # The exact same-index/side post-loss cooldown above and opposite
+            # hedge validation below remain hard safety rules.
             opposite = [
                 row for row in rows
                 if str(_value(row, "side", "")).upper() in {"CE", "PE"}

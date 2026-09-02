@@ -17,6 +17,9 @@ CHOPPY_ADX_MAX = 22.0
 CHOPPY_EMA_SPREAD_ATR_MAX = 0.25
 CHOPPY_VWAP_DISTANCE_ATR_MAX = 0.35
 CHOPPY_MIN_BODY_FLIPS = 3
+CHOPPY_VWAP_CROSS_WINDOW = 45
+CHOPPY_VWAP_CROSS_MIN = 3
+VERY_WEAK_ADX_MAX = 18.0
 CHOPPY_BREAKOUT_BUFFER_ATR = 0.08
 CHOPPY_BREAKOUT_MIN_SCORE = 88
 CHOPPY_BLOCK_REASON = "CHOPPY_RANGE_NO_BREAKOUT"
@@ -94,6 +97,7 @@ def _choppy_assessment(df, market, candidate, score, minimum):
     vwap_reliable = not bool(market.get("vwap_fallback_used", False))
 
     weak_adx = 0.0 < adx < CHOPPY_ADX_MAX
+    very_weak_adx = 0.0 < adx < VERY_WEAK_ADX_MAX
     ema_compressed = abs(ema9 - ema21) / atr <= CHOPPY_EMA_SPREAD_ATR_MAX
     near_vwap = bool(
         vwap_reliable
@@ -101,6 +105,7 @@ def _choppy_assessment(df, market, candidate, score, minimum):
     )
 
     body_flips = 0
+    vwap_crosses = 0
     breakout = False
     two_candle_momentum = False
     try:
@@ -141,9 +146,35 @@ def _choppy_assessment(df, market, candidate, score, minimum):
         breakout = False
         two_candle_momentum = False
 
+    try:
+        completed = df.iloc[-(CHOPPY_VWAP_CROSS_WINDOW + 1):-1]
+        if "VWAP" in completed.columns and len(completed) >= 4:
+            # Ignore tiny touches inside a two-percent ATR dead-band.  Only a
+            # real close from one side of VWAP to the other counts as a cross.
+            band = max(0.01, 0.02 * atr)
+            sides = []
+            for _, row in completed.iterrows():
+                distance = _f(row.get("close")) - _f(row.get("VWAP"))
+                side = 1 if distance > band else -1 if distance < -band else 0
+                if side:
+                    sides.append(side)
+            vwap_crosses = sum(
+                1 for left, right in zip(sides, sides[1:]) if left != right
+            )
+    except Exception:
+        vwap_crosses = 0
+
     repeated_flips = body_flips >= CHOPPY_MIN_BODY_FLIPS
+    repeated_vwap_crosses = vwap_crosses >= CHOPPY_VWAP_CROSS_MIN
     congestion_votes = sum((ema_compressed, near_vwap, repeated_flips))
-    choppy = bool(weak_adx and congestion_votes >= 2)
+    # ADX below 18 or three genuine VWAP crosses in the last 45 completed
+    # minutes is already a no-trade range signal.  The older two-vote test is
+    # retained for transition regimes between ADX 18 and 22.
+    choppy = bool(
+        very_weak_adx
+        or repeated_vwap_crosses
+        or (weak_adx and congestion_votes >= 2)
+    )
     strong_breakout = bool(
         candidate in {"CE", "PE"}
         and score >= max(minimum, CHOPPY_BREAKOUT_MIN_SCORE)
@@ -151,15 +182,26 @@ def _choppy_assessment(df, market, candidate, score, minimum):
         and breakout
         and two_candle_momentum
     )
+    # The strong-breakout escape hatch is intentionally disabled for the two
+    # clearest whipsaw regimes.  A low-ADX/VWAP-crossing market must first
+    # leave the range and rebuild ADX before AUTO can enter again.
+    strong_breakout = bool(
+        strong_breakout
+        and not very_weak_adx
+        and not repeated_vwap_crosses
+    )
     return {
         "choppy": choppy,
         "hard_block": bool(choppy and not strong_breakout),
         "strong_breakout_override": strong_breakout,
         "weak_adx": weak_adx,
+        "very_weak_adx": very_weak_adx,
         "ema_compressed": ema_compressed,
         "near_vwap": near_vwap,
         "repeated_body_flips": repeated_flips,
         "body_flips": body_flips,
+        "vwap_crosses_45m": vwap_crosses,
+        "repeated_vwap_crosses": repeated_vwap_crosses,
         "congestion_votes": congestion_votes,
         "breakout": breakout,
         "two_candle_momentum": two_candle_momentum,
