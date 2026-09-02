@@ -2,8 +2,8 @@
 
 PAPER sizing/current capital = configured seed + cumulative CLOSED net P&L after
 the latest explicit capital reset. Changing Set Capital starts a new cycle from
-that exact amount, so older profit/loss remains in history but no longer affects
-future quantity. LIVE mode remains isolated and broker-funded.
+that exact amount, so older profit/loss remains visible in trade/history reports
+but no longer affects future quantity. LIVE mode remains isolated and broker-funded.
 """
 
 from __future__ import annotations
