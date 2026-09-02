@@ -20,6 +20,7 @@ def test_live_current_capital_prefers_fresh_gateway_available_cash(monkeypatch):
     def snapshot_reader(db, user_id, current):
         captured.update(db=db, user_id=user_id, current=current)
         return {
+            "broker": "upstox",
             "available_cash": 18234.5,
             "used_margin": 1765.5,
             "total_limit": 20000,
@@ -45,7 +46,8 @@ def test_live_current_capital_prefers_fresh_gateway_available_cash(monkeypatch):
     assert result["current_equity"] == 20000
     assert result["starting_capital"] == 20000
     assert result["capital_sync_ok"] is True
-    assert result["capital_source"] == "LOCAL_GATEWAY_ANGEL_FRESH_SNAPSHOT"
+    assert result["capital_broker"] == "upstox"
+    assert result["capital_source"] == "LOCAL_GATEWAY_UPSTOX_FRESH_SNAPSHOT"
     assert result["broker_funds_age_seconds"] == 4.0
 
 
@@ -114,7 +116,8 @@ def test_live_signal_exposes_current_capital_top_level_and_in_account(monkeypatc
             "available_cash": 18234.5,
             "used_margin": 1765.5,
             "broker_total_limit": 20000,
-            "capital_source": "LOCAL_GATEWAY_ANGEL_FRESH_SNAPSHOT",
+            "capital_broker": "upstox",
+            "capital_source": "LOCAL_GATEWAY_UPSTOX_FRESH_SNAPSHOT",
             "capital_sync_ok": True,
         },
     )
@@ -122,7 +125,9 @@ def test_live_signal_exposes_current_capital_top_level_and_in_account(monkeypatc
     payload = live_signal._payload(7)
 
     assert payload["current_capital"] == 18234.5
+    assert payload["broker"] == "upstox"
     assert payload["capital"] == 18234.5
     assert payload["account"]["current_capital"] == 18234.5
     assert payload["account"]["available_cash"] == 18234.5
+    assert payload["account"]["broker"] == "upstox"
     assert payload["account"]["equity"] == 20000
