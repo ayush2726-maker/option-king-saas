@@ -1,17 +1,31 @@
-# OKAI Multi-User Static-IP Gateway
+# OKAI Single-Phone Multi-Account Gateway
 
-Each user runs one gateway on their own Android/Termux phone or Windows/Linux desktop. The device must use that user's own public static IPv4, registered in that user's own Angel One SmartAPI app.
+One Android/Termux phone can now run multiple OKAI accounts at the same time. Each account runs in an isolated child worker with its own gateway token, broker credentials, SQLite state, STOP file, command history and local positions.
 
-## What stays separate for every user
+Supported local brokers:
 
-- OKAI login and subscription
-- Angel One account and SmartAPI app
-- Public static IPv4
-- Gateway token
-- Broker credentials stored only on the user's device
-- Order command queue, live trades and arm/disarm state
+- Angel One — `okai_local_gateway_v3.py`
+- Upstox — `okai_local_gateway_upstox.py`
 
-## Android / Termux
+The supervisor is `okai_multi_account_agent.py`.
+
+## Isolation model
+
+For a profile named `ayush`, local files are stored under:
+
+```text
+~/.okai_multi/profiles/ayush/.okai/
+```
+
+For a profile named `rakesh`:
+
+```text
+~/.okai_multi/profiles/rakesh/.okai/
+```
+
+Because every worker receives a different HOME directory, the two accounts cannot share the same local gateway config, gateway token, STOP file or state database.
+
+## Android / Termux installation
 
 ```bash
 pkg update -y
@@ -19,76 +33,98 @@ pkg install python git tmux -y
 git clone https://github.com/ayush2726-maker/option-king-saas.git
 cd option-king-saas/local_gateway_agent
 python -m pip install -r requirements.txt
-python okai_local_gateway_v2.py setup
-python okai_local_gateway_v2.py doctor
 ```
 
-Start in the background:
+## Example: Ayush on Angel One + Rakesh on Upstox
+
+Add both profiles:
 
 ```bash
-mkdir -p ~/.okai
-tmux kill-session -t okai-gateway 2>/dev/null
-tmux new -d -s okai-gateway \
-  "cd $HOME/option-king-saas/local_gateway_agent && python -u okai_local_gateway_v2.py run 2>&1 | tee $HOME/.okai/gateway_v2.log"
+python okai_multi_account_agent.py add ayush --broker angelone
+python okai_multi_account_agent.py add rakesh --broker upstox
+python okai_multi_account_agent.py list
 ```
 
-Check:
+Pair and configure each account separately:
+
+```bash
+python okai_multi_account_agent.py setup ayush
+python okai_multi_account_agent.py doctor ayush
+
+python okai_multi_account_agent.py setup rakesh
+python okai_multi_account_agent.py doctor rakesh
+```
+
+Angel setup asks for that account's SmartAPI credentials. Upstox setup asks for that account's daily Access Token. Never reuse one account's broker token in the other profile.
+
+The SaaS gateway pairing currently requires a valid public static IPv4 for each paired OKAI account. When two accounts use the same phone/network they can use the same observed static IPv4, while gateway tokens and broker credentials remain separate.
+
+## Arm accounts separately
+
+Setup and doctor leave both accounts disarmed.
+
+```bash
+python okai_multi_account_agent.py arm ayush
+python okai_multi_account_agent.py arm rakesh
+```
+
+For each profile, type the existing exact live confirmation phrase when prompted.
+
+Disarm only one account without stopping the other:
+
+```bash
+python okai_multi_account_agent.py disarm ayush
+```
+
+or:
+
+```bash
+python okai_multi_account_agent.py disarm rakesh
+```
+
+## Start both from one command
+
+Foreground check:
+
+```bash
+python -u okai_multi_account_agent.py run-all
+```
+
+Background Termux session:
+
+```bash
+tmux kill-session -t okai-multi 2>/dev/null
+tmux new -d -s okai-multi \
+  "cd $HOME/option-king-saas/local_gateway_agent && python -u okai_multi_account_agent.py run-all"
+```
+
+Check supervisor:
 
 ```bash
 tmux ls
-tail -n 30 ~/.okai/gateway_v2.log
+python okai_multi_account_agent.py list
 ```
 
-## Windows desktop
-
-```powershell
-git clone https://github.com/ayush2726-maker/option-king-saas.git
-cd option-king-saas\local_gateway_agent
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python okai_local_gateway_v2.py setup
-python okai_local_gateway_v2.py doctor
-python okai_local_gateway_v2.py run
-```
-
-Keep the terminal open, or configure Windows Task Scheduler to start the final `run` command at login.
-
-## Linux desktop / VPS at the user's static IP
+Each worker writes its own log:
 
 ```bash
-git clone https://github.com/ayush2726-maker/option-king-saas.git
-cd option-king-saas/local_gateway_agent
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python okai_local_gateway_v2.py setup
-python okai_local_gateway_v2.py doctor
-python -u okai_local_gateway_v2.py run
+tail -n 40 ~/.okai_multi/profiles/ayush/.okai/multi_gateway.log
+tail -n 40 ~/.okai_multi/profiles/rakesh/.okai/multi_gateway.log
 ```
 
-## Live safety
+## Safety behavior
 
-Setup and doctor leave both local and server entry gates disarmed. Arm only from the gateway device:
+- One worker crash does not merge credentials or state with another profile.
+- `run-all` refuses to start if any enabled profile has not completed setup.
+- Arming/disarming remains per OKAI user.
+- Entry commands are leased by the authenticated per-user gateway token.
+- Existing local positions continue to use the local risk/exit engine for that profile.
+- Broker label in new gateway trades is normalized from the entry payload (`angelone` or `upstox`).
 
-```bash
-python okai_local_gateway_v2.py arm
-```
+## Important Upstox note
 
-Type exactly:
-
-```text
-ARM LIVE RISK SIZING
-```
-
-Emergency disarm:
-
-```bash
-python okai_local_gateway_v2.py disarm
-```
-
-Disarming blocks new entries. Existing local positions remain monitored for ATR SL, profit-lock trailing and EOD exit.
+Upstox uses a daily Access Token. Refresh the token in the Upstox profile when it expires before arming new entries. The current SaaS heartbeat funds table still accepts Angel One local-funds snapshots only; this does not mix accounts or change Upstox order routing, but the Upstox local-funds snapshot is not yet used by that table.
 
 ## Never share
 
-Never send the Angel API key, MPIN, OKAI password, TOTP secret, JWT, refresh token or gateway token in chat, screenshots or support messages.
+Never send an OKAI password, Angel API key/MPIN/TOTP, Upstox Access Token, JWT, refresh token or local gateway token in chat, screenshots or support messages.
