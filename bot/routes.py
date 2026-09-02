@@ -1078,7 +1078,7 @@ def get_signal(authorization: str = Header(None)):
             "current_capital": ledger["current_capital"],
             "current_equity": ledger["current_capital"],
             "open_pnl": ledger["open_pnl"],
-            "capital_source": ledger["source"],
+            "capital_source": ledger["capital_source"],
         }
     except Exception:
         ledger = None
