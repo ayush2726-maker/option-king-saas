@@ -1,0 +1,57 @@
+name: Validate Single-Phone Multi-Broker Agent
+
+on:
+  pull_request:
+    paths:
+      - "local_gateway/**"
+      - "local_gateway_agent/**"
+      - ".github/workflows/validate-single-phone-multi-broker-agent.yml"
+  push:
+    branches: [main]
+    paths:
+      - "local_gateway/**"
+      - "local_gateway_agent/**"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile gateway code
+        run: |
+          python -m py_compile \
+            local_gateway/multi_user_patch.py \
+            local_gateway_agent/okai_multi_account_agent.py \
+            local_gateway_agent/okai_local_gateway_upstox.py \
+            local_gateway_agent/okai_local_gateway_v3.py
+
+      - name: Verify isolated profile homes and broker routing
+        run: |
+          TEST_HOME="$(mktemp -d)"
+          export HOME="$TEST_HOME"
+          cd local_gateway_agent
+          python okai_multi_account_agent.py add ayush --broker angelone
+          python okai_multi_account_agent.py add rakesh --broker upstox
+          python okai_multi_account_agent.py list | tee /tmp/okai-profiles.txt
+          grep -q "ayush.*angelone.*setup-needed" /tmp/okai-profiles.txt
+          grep -q "rakesh.*upstox.*setup-needed" /tmp/okai-profiles.txt
+          test -d "$TEST_HOME/.okai_multi/profiles/ayush"
+          test -d "$TEST_HOME/.okai_multi/profiles/rakesh"
+          test "$TEST_HOME/.okai_multi/profiles/ayush" != "$TEST_HOME/.okai_multi/profiles/rakesh"
+
+      - name: Verify launcher refuses unconfigured live run
+        run: |
+          TEST_HOME="$(mktemp -d)"
+          export HOME="$TEST_HOME"
+          cd local_gateway_agent
+          python okai_multi_account_agent.py add ayush --broker angelone
+          if python okai_multi_account_agent.py run-all; then
+            echo "run-all unexpectedly accepted an unconfigured profile"
+            exit 1
+          fi
+          echo "Unconfigured profile correctly blocked"
