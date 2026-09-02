@@ -5,10 +5,10 @@ paper_trades/Upstox rows. Today P&L, total P&L, trade counts and open positions
 come from the Angel local-gateway-backed trades table, using the same cost model
 as LIVE history.
 
-V2 also exposes the legacy field names consumed by the AUTO Portfolio card
+V3 also exposes the legacy field names consumed by the AUTO Portfolio card
 (`active_positions`, `ltp`, `sl`, `pnl`) directly in this authoritative response.
-This removes middleware-order dependence and keeps the AUTO card on the exact
-same Angel quote/P&L object as Active Live Trades.
+It also reads Current Capital at this final response boundary from the fresh
+local-gateway Angel funds snapshot, removing middleware-order dependence.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from auth.routes import get_current_user
 from database import get_db
 from bot.angel_fetcher import get_user_bot_state
+from bot.authoritative_ledger import _fresh_live_funds_snapshot
 from bot.live_mode_broker_truth_middleware import (
     VERSION as BROKER_TRUTH_VERSION,
     _settings_mode,
@@ -25,7 +26,7 @@ from bot.live_mode_broker_truth_middleware import (
     _live_payload,
 )
 
-VERSION = "LIVE_SIGNAL_BROKER_TRUTH_V2_AUTO_CARD_20260901"
+VERSION = "LIVE_SIGNAL_BROKER_TRUTH_V3_CURRENT_CAPITAL_20260902"
 
 
 def _num(value, default=0.0):
@@ -97,6 +98,59 @@ def _capital_from_live_rows(user_id, open_pnl):
         conn.close()
 
 
+def _live_capital_payload(user_id, open_pnl, now=None):
+    """Prefer the current local-gateway broker balance for LIVE display.
+
+    ``/bot/signal`` is intercepted by this module before the older dashboard
+    middleware can enrich it.  Reading the fresh gateway snapshot here keeps a
+    flat LIVE account (no recent trade/capital_base row) from returning a null
+    Current Capital.  Paper capital is never used as a fallback.
+    """
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    conn = get_db()
+    try:
+        snapshot = _fresh_live_funds_snapshot(conn, int(user_id), current)
+    finally:
+        conn.close()
+
+    if snapshot is not None:
+        available = round(_num(snapshot.get("available_cash"), 0.0), 2)
+        used = round(_num(snapshot.get("used_margin"), 0.0), 2)
+        total = round(
+            _num(snapshot.get("total_limit"), available + used),
+            2,
+        )
+        return {
+            "starting_capital": total,
+            "current_capital": available,
+            "current_equity": total,
+            "live_capital": available,
+            "available_cash": available,
+            "used_margin": used,
+            "broker_total_limit": total,
+            "capital_source": "LOCAL_GATEWAY_ANGEL_FRESH_SNAPSHOT",
+            "capital_sync_ok": True,
+            "broker_funds_updated_at": snapshot.get("updated_at"),
+            "broker_funds_age_seconds": snapshot.get("age_seconds"),
+        }
+
+    current_capital, source = _capital_from_live_rows(user_id, open_pnl)
+    return {
+        "starting_capital": current_capital,
+        "current_capital": current_capital,
+        "current_equity": current_capital,
+        "live_capital": current_capital,
+        "available_cash": None,
+        "used_margin": None,
+        "broker_total_limit": None,
+        "capital_source": source,
+        "capital_sync_ok": False,
+        "capital_sync_error": "Waiting for fresh local-gateway broker funds",
+        "broker_funds_updated_at": None,
+        "broker_funds_age_seconds": None,
+    }
+
+
 def _auto_compat_position(position):
     """Expose one canonical LIVE position under every legacy AUTO-card alias."""
     item = dict(position or {})
@@ -161,9 +215,21 @@ def _payload(user_id):
     if active:
         signal = "HOLD_" + str(active[0].get("side") or "")
 
-    current_capital, capital_source = _capital_from_live_rows(
+    capital = _live_capital_payload(
         user_id, ledger.get("open_pnl", 0)
     )
+    account = {
+        "trading_mode": "live",
+        "broker": "angelone",
+        "current_capital": capital.get("current_capital"),
+        "live_capital": capital.get("live_capital"),
+        "available_cash": capital.get("available_cash"),
+        "used_margin": capital.get("used_margin"),
+        "current_equity": capital.get("current_equity"),
+        "equity": capital.get("current_equity"),
+        "capital_source": capital.get("capital_source"),
+        "capital_sync_ok": capital.get("capital_sync_ok"),
+    }
 
     first = active[0] if active else None
     return {
@@ -224,10 +290,10 @@ def _payload(user_id):
         "realized_pnl": round(float(ledger.get("realized_pnl") or 0), 2),
         "open_pnl": round(float(ledger.get("open_pnl") or 0), 2),
         "ledger": ledger,
-        "current_capital": current_capital,
-        "current_equity": current_capital,
-        "capital_source": capital_source,
-        "source": "ANGEL_LIVE_SIGNAL_BROKER_TRUTH_NATIVE_AUTO_V2",
+        **capital,
+        "capital": capital.get("current_capital"),
+        "account": account,
+        "source": "ANGEL_LIVE_SIGNAL_BROKER_TRUTH_NATIVE_AUTO_V3",
         "broker_truth_version": BROKER_TRUTH_VERSION,
         "version": VERSION,
         "updated_at": datetime.now(timezone.utc).isoformat(),
