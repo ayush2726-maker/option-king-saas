@@ -16,8 +16,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install test dependency
-        run: python -m pip install pytest
+      - name: Install test dependencies
+        run: python -m pip install pytest pyotp requests
       - name: Compile gateway files
         run: |
           python -m py_compile local_gateway_agent/okai_local_gateway_v2.py
