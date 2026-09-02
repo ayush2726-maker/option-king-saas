@@ -1,12 +1,9 @@
-"""Keep PAPER equity visible without compounding PAPER order sizing.
+"""Keep PAPER equity continuous inside each user-defined capital cycle.
 
-PAPER current capital/equity remains the configured seed plus cumulative closed
-net P&L after the latest explicit reset.  Order quantity, however, must always
-use the configured PAPER capital itself.  Profit or loss changes the displayed
-current capital only; it does not silently increase or decrease the next trade's
-sizing base.
-
-LIVE mode remains isolated from PAPER settings and continues to use broker funds.
+PAPER sizing/current capital = configured seed + cumulative CLOSED net P&L after
+the latest explicit capital reset. Changing Set Capital starts a new cycle from
+that exact amount, so older profit/loss remains in history but no longer affects
+future quantity. LIVE mode remains isolated and broker-funded.
 """
 
 from __future__ import annotations
@@ -43,10 +40,7 @@ def _has_column(conn, table: str, column: str) -> bool:
 
 
 def _paper_summary(conn, user_id: int, settings: dict) -> dict:
-    seed = max(
-        1.0,
-        _f(settings.get("paper_capital", 100000), 100000),
-    )
+    seed = max(1.0, _f(settings.get("paper_capital", 100000), 100000))
     reset_at = str(settings.get(RESET_KEY) or "").strip()
     pnl_expression = (
         "COALESCE(net_pnl, pnl, 0)"
@@ -54,10 +48,7 @@ def _paper_summary(conn, user_id: int, settings: dict) -> dict:
         else "COALESCE(pnl, 0)"
     )
 
-    where = [
-        "user_id=?",
-        "status='CLOSED'",
-    ]
+    where = ["user_id=?", "status='CLOSED'"]
     if _has_column(conn, "paper_trades", "trading_mode"):
         where.append("COALESCE(trading_mode, 'paper')='paper'")
 
@@ -87,15 +78,9 @@ def _paper_summary(conn, user_id: int, settings: dict) -> dict:
     }
 
 
-def _configured_paper_base(conn, user_id, settings):
-    """Return the fixed PAPER sizing base selected by the user."""
-    del conn, user_id
-    return max(1.0, _f(settings.get("paper_capital", 100000), 100000))
-
-
 def _continuous_paper_base(conn, user_id, settings):
-    """Backward-compatible alias: PAPER sizing is now fixed to configured capital."""
-    return _configured_paper_base(conn, user_id, settings)
+    """Next PAPER quantity uses current cycle equity (closed P&L only)."""
+    return _paper_summary(conn, int(user_id), settings)["equity"]
 
 
 def _replace_route(router, path: str, method: str, endpoint) -> None:
@@ -126,16 +111,16 @@ def _continuous_paper_account(authorization: str = Header(None)):
             "trading_mode": settings.get("trading_mode", "paper"),
             "paper_capital": summary["seed_capital"],
             "opening_capital": summary["seed_capital"],
-            "sizing_capital": summary["seed_capital"],
-            "paper_sizing_capital": summary["seed_capital"],
-            "sizing_capital_source": "CONFIGURED_PAPER_CAPITAL_FIXED",
+            "sizing_capital": summary["equity"],
+            "paper_sizing_capital": summary["equity"],
+            "sizing_capital_source": "PAPER_RESET_CYCLE_EQUITY",
             "total_pnl": summary["cumulative_net_pnl"],
             "equity": summary["equity"],
             "current_capital": summary["equity"],
             "current_equity": summary["equity"],
             "total_trades": summary["closed_trades"],
             "capital_carry_forward": True,
-            "capital_source": "PAPER_SEED_PLUS_NET_PNL_DISPLAY_ONLY",
+            "capital_source": "PAPER_SEED_PLUS_NET_PNL_SINCE_RESET",
             "paper_capital_reset_at": summary["reset_at"],
         },
     }
@@ -173,7 +158,7 @@ def _reset_continuous_paper_account(
         if open_trade:
             return {
                 "success": False,
-                "message": "Open PAPER trade close hone ke baad P&L reset karein.",
+                "message": "Open PAPER trade close hone ke baad capital reset karein.",
                 "paper_capital": capital,
             }
 
@@ -202,18 +187,18 @@ def _reset_continuous_paper_account(
     try:
         paper_routes.notify_user(
             int(user["id"]),
-            f"♻️ <b>Paper Account Reset</b>\nCapital: ₹{capital:,.0f}\n"
-            "Current Capital P&L ke saath dikhega, par sizing isi fixed capital se hogi.",
+            f"♻️ <b>Paper Capital Reset</b>\nCapital: ₹{capital:,.0f}\n"
+            "Naya sizing cycle isi amount se start hua; purana P&L history me rahega.",
         )
     except Exception:
         pass
 
     return {
         "success": True,
-        "message": "Paper account reset; fixed sizing capital saved",
+        "message": "Paper capital reset; new sizing cycle started",
         "paper_capital": capital,
         "sizing_capital": capital,
-        "sizing_capital_source": "CONFIGURED_PAPER_CAPITAL_FIXED",
+        "sizing_capital_source": "PAPER_RESET_CYCLE_EQUITY",
         "capital_carry_forward": True,
         "paper_capital_reset_at": now,
     }
@@ -224,30 +209,14 @@ def apply_capital_continuity_patch() -> None:
     if _INSTALLED:
         return
 
-    # PAPER display continues to carry P&L forward, but order sizing is pinned
-    # to the configured paper_capital.  No profit compounding into quantity.
-    runtime._paper_base = _configured_paper_base
+    runtime._paper_base = _continuous_paper_base
     runtime._okai_paper_capital_carry_forward_v1 = True
-    runtime._okai_paper_sizing_fixed_configured_capital_v1 = True
-
-    # LIVE remains broker-funded in auto_portfolio_runtime._open_common:
-    # first slot reads live_cash(), while an open live row preserves that same
-    # broker capital base for slot 2. PAPER settings never size LIVE orders.
+    runtime._okai_paper_sizing_source = "PAPER_RESET_CYCLE_EQUITY"
     runtime._okai_live_capital_source = "BROKER_AVAILABLE_FUNDS"
 
     paper_routes.paper_account = _continuous_paper_account
     paper_routes.reset_paper_account = _reset_continuous_paper_account
-    _replace_route(
-        paper_routes.router,
-        "/paper/account",
-        "GET",
-        _continuous_paper_account,
-    )
-    _replace_route(
-        paper_routes.router,
-        "/paper/reset",
-        "POST",
-        _reset_continuous_paper_account,
-    )
+    _replace_route(paper_routes.router, "/paper/account", "GET", _continuous_paper_account)
+    _replace_route(paper_routes.router, "/paper/reset", "POST", _reset_continuous_paper_account)
 
     _INSTALLED = True
