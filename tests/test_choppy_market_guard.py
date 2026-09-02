@@ -1,7 +1,7 @@
 import pandas as pd
 
 from bot.regime_accuracy_confirmation_patch import _choppy_assessment
-from bot.choppy_market_guard_patch import _apply_guard
+from bot.choppy_market_guard_patch import _apply_guard, apply_choppy_market_guard_patch
 
 
 def _frame(*, breakout=False):
@@ -45,7 +45,7 @@ def test_low_adx_congestion_and_candle_flips_block_choppy_entry():
 def test_score_88_two_candle_breakout_is_allowed_through_choppy_guard():
     result = _choppy_assessment(
         _frame(breakout=True),
-        _market(price=102.0),
+        _market(price=102.0, adx=20.0),
         "CE",
         90,
         82,
@@ -56,6 +56,37 @@ def test_score_88_two_candle_breakout_is_allowed_through_choppy_guard():
     assert result["two_candle_momentum"] is True
     assert result["strong_breakout_override"] is True
     assert result["hard_block"] is False
+
+
+def test_very_low_adx_cannot_use_breakout_override():
+    result = _choppy_assessment(
+        _frame(breakout=True),
+        _market(price=102.0, adx=16.0),
+        "CE",
+        90,
+        82,
+    )
+
+    assert result["very_weak_adx"] is True
+    assert result["strong_breakout_override"] is False
+    assert result["hard_block"] is True
+
+
+def test_three_real_vwap_crosses_in_45m_are_hard_blocked():
+    frame = _frame()
+    frame["VWAP"] = 100.0
+    frame["close"] = [99.0, 101.0, 99.0, 101.0, 101.2, 101.3, 101.4, 101.5, 101.6]
+    result = _choppy_assessment(
+        frame,
+        _market(price=101.5, adx=30.0),
+        "CE",
+        95,
+        82,
+    )
+
+    assert result["vwap_crosses_45m"] >= 3
+    assert result["repeated_vwap_crosses"] is True
+    assert result["hard_block"] is True
 
 
 def test_trending_adx_is_not_classified_as_choppy():
@@ -105,3 +136,18 @@ def test_final_guard_requires_matching_real_5m_for_breakout_override():
     assert allowed["signal_data"]["choppy_market_blocked"] is False
     assert blocked["signal_data"]["trade_allowed"] is False
     assert blocked["signal_data"]["choppy_market_blocked"] is True
+
+
+def test_production_replay_scan_cannot_bypass_choppy_guard(monkeypatch):
+    from bot import auto_portfolio_runtime as runtime
+    from bot import live_scan_history_fallback_patch as replay
+
+    monkeypatch.delattr(runtime, "_okai_choppy_market_guard_v2", raising=False)
+    monkeypatch.setattr(runtime, "_build_scan", lambda *args: _scan())
+    monkeypatch.setattr(replay, "_replay_scan", lambda *args: _scan())
+
+    assert apply_choppy_market_guard_patch() is True
+    result = replay._replay_scan(1, "NIFTY", _frame(), {}, "TEST", [])
+
+    assert result["signal_data"]["trade_allowed"] is False
+    assert result["execution_block_reason"] == "CHOPPY_RANGE_NO_BREAKOUT"

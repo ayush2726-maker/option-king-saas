@@ -1,7 +1,7 @@
-"""Backtest-only 14:45 Normal entry cutoff experiment.
+"""Backtest parity for the 15:15 Normal AUTO entry cutoff.
 
 This patch changes the existing Normal-entry cutoff used inside the historical
-signal loop from 15:00 to 14:45 IST. It does not post-filter completed trades,
+signal loop to 15:15 IST. It does not post-filter completed trades,
 so quantity, daily five-trade selection, compounding and P&L remain internally
 consistent.
 
@@ -13,11 +13,11 @@ from backtest import routes
 from backtest.range_capital_mode_patch import apply_range_capital_mode_patch
 
 
-NORMAL_ENTRY_CUTOFF_MINUTES = 14 * 60 + 45
+NORMAL_ENTRY_CUTOFF_MINUTES = 15 * 60 + 15
 
 
-def apply_normal_entry_cutoff_1445_patch():
-    if getattr(routes, "_okai_normal_entry_cutoff_1445_v2", False):
+def apply_normal_entry_cutoff_1515_patch():
+    if getattr(routes, "_okai_normal_entry_cutoff_1515_v1", False):
         # Range mode is independent of the entry-cutoff flag and may have been
         # added after an older deployment already marked this patch active.
         apply_range_capital_mode_patch()
@@ -27,8 +27,7 @@ def apply_normal_entry_cutoff_1445_patch():
     # Normal entry. Changing it here blocks the signal itself instead of
     # deleting already simulated trades afterwards.
     routes._OKAI_NORMAL_ENTRY_CUTOFF_MINUTES = NORMAL_ENTRY_CUTOFF_MINUTES
-    routes._okai_normal_entry_cutoff_1445_v1 = True
-    routes._okai_normal_entry_cutoff_1445_v2 = True
+    routes._okai_normal_entry_cutoff_1515_v1 = True
 
     # Date-range backtests can now compare continuous compounding with fixed
     # daily sizing capital without changing strategy entries, exits or lots.

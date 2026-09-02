@@ -11,7 +11,7 @@ from bot.regime_accuracy_confirmation_patch import (
 )
 
 
-VERSION = "OKAI-CHOPPY-MARKET-GUARD-V1"
+VERSION = "OKAI-CHOPPY-MARKET-GUARD-V2-REPLAY-ENFORCED"
 
 
 def _candidate(signal: dict[str, Any]) -> str:
@@ -83,7 +83,7 @@ def _apply_guard(scan: Any, frame: Any) -> Any:
 
 
 def apply_choppy_market_guard_patch() -> bool:
-    if getattr(runtime, "_okai_choppy_market_guard_v1", False):
+    if getattr(runtime, "_okai_choppy_market_guard_v2", False):
         return True
     previous_build_scan = runtime._build_scan
 
@@ -94,7 +94,43 @@ def apply_choppy_market_guard_patch() -> bool:
         )
 
     runtime._build_scan = build_scan_with_choppy_guard
+    # The production AUTO engine uses replay-first scans.  V1 wrapped only
+    # ``runtime._build_scan``, so the live replay path could bypass the choppy
+    # guard even though its unit tests passed.  Install the same final guard at
+    # the actual replay boundary.
+    try:
+        from bot import live_scan_history_fallback_patch as replay
+
+        previous_replay_scan = replay._replay_scan
+
+        def replay_scan_with_choppy_guard(
+            user_id,
+            underlying,
+            frame,
+            profile,
+            source,
+            notes,
+        ):
+            return _apply_guard(
+                previous_replay_scan(
+                    user_id,
+                    underlying,
+                    frame,
+                    profile,
+                    source,
+                    notes,
+                ),
+                frame,
+            )
+
+        replay._replay_scan = replay_scan_with_choppy_guard
+        replay._okai_choppy_market_guard_v2 = True
+    except Exception:
+        # Direct scans remain guarded and production diagnostics stay visible
+        # if the optional replay module is not present in a local build.
+        pass
     runtime._okai_choppy_market_guard_v1 = True
+    runtime._okai_choppy_market_guard_v2 = True
     return True
 
 
