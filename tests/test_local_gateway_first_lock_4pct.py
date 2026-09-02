@@ -1,3 +1,18 @@
+import sys
+import types
+
+# These tests exercise pure first-lock math only; avoid requiring the Angel SDK
+# on the CI runner just to import the local gateway module.
+smartapi_stub = types.ModuleType("SmartApi")
+
+
+class _SmartConnectStub:
+    pass
+
+
+smartapi_stub.SmartConnect = _SmartConnectStub
+sys.modules.setdefault("SmartApi", smartapi_stub)
+
 from local_gateway_agent.okai_local_gateway_v2 import (
     FIRST_LOCK_NET_PERCENT,
     cost_safe_breakeven,
