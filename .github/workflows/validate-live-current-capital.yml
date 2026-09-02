@@ -5,7 +5,9 @@ on:
     paths:
       - "bot/live_signal_broker_truth_middleware.py"
       - "bot/authoritative_ledger.py"
+      - "local_gateway/routes.py"
       - "tests/test_live_signal_current_capital_v3.py"
+      - "tests/test_gateway_funds_snapshot_multi_broker.py"
       - ".github/workflows/validate-live-current-capital.yml"
   workflow_dispatch:
 
@@ -29,11 +31,14 @@ jobs:
           python -m py_compile \
             bot/live_signal_broker_truth_middleware.py \
             bot/authoritative_ledger.py \
+            local_gateway/routes.py \
+            tests/test_gateway_funds_snapshot_multi_broker.py \
             tests/test_live_signal_current_capital_v3.py
 
       - name: Validate LIVE capital source and fallbacks
         run: |
           python -m pytest -q \
             tests/test_live_signal_current_capital_v3.py \
+            tests/test_gateway_funds_snapshot_multi_broker.py \
             tests/test_authoritative_ledger.py \
             tests/test_current_capital_status_v1.py

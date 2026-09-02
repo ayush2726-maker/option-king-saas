@@ -123,7 +123,7 @@ tail -n 40 ~/.okai_multi/profiles/rakesh/.okai/multi_gateway.log
 
 ## Important Upstox note
 
-Upstox uses a daily Access Token. Refresh the token in the Upstox profile when it expires before arming new entries. The current SaaS heartbeat funds table still accepts Angel One local-funds snapshots only; this does not mix accounts or change Upstox order routing, but the Upstox local-funds snapshot is not yet used by that table.
+Upstox uses a daily Access Token. Refresh the token in the Upstox profile when it expires before arming new entries. Authenticated heartbeat funds snapshots from both Angel One and Upstox are stored against the gateway token's own OKAI user, so LIVE Current Capital remains account-isolated.
 
 ## Never share
 

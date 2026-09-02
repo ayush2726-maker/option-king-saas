@@ -26,7 +26,7 @@ from bot.live_mode_broker_truth_middleware import (
     _live_payload,
 )
 
-VERSION = "LIVE_SIGNAL_BROKER_TRUTH_V3_CURRENT_CAPITAL_20260902"
+VERSION = "LIVE_SIGNAL_BROKER_TRUTH_V4_MULTI_BROKER_CAPITAL_20260902"
 
 
 def _num(value, default=0.0):
@@ -114,6 +114,7 @@ def _live_capital_payload(user_id, open_pnl, now=None):
         conn.close()
 
     if snapshot is not None:
+        broker = str(snapshot.get("broker") or "angelone").lower()
         available = round(_num(snapshot.get("available_cash"), 0.0), 2)
         used = round(_num(snapshot.get("used_margin"), 0.0), 2)
         total = round(
@@ -128,7 +129,8 @@ def _live_capital_payload(user_id, open_pnl, now=None):
             "available_cash": available,
             "used_margin": used,
             "broker_total_limit": total,
-            "capital_source": "LOCAL_GATEWAY_ANGEL_FRESH_SNAPSHOT",
+            "capital_broker": broker,
+            "capital_source": f"LOCAL_GATEWAY_{broker.upper()}_FRESH_SNAPSHOT",
             "capital_sync_ok": True,
             "broker_funds_updated_at": snapshot.get("updated_at"),
             "broker_funds_age_seconds": snapshot.get("age_seconds"),
@@ -143,6 +145,7 @@ def _live_capital_payload(user_id, open_pnl, now=None):
         "available_cash": None,
         "used_margin": None,
         "broker_total_limit": None,
+        "capital_broker": None,
         "capital_source": source,
         "capital_sync_ok": False,
         "capital_sync_error": "Waiting for fresh local-gateway broker funds",
@@ -218,9 +221,10 @@ def _payload(user_id):
     capital = _live_capital_payload(
         user_id, ledger.get("open_pnl", 0)
     )
+    capital_broker = str(capital.get("capital_broker") or "angelone").lower()
     account = {
         "trading_mode": "live",
-        "broker": "angelone",
+        "broker": capital_broker,
         "current_capital": capital.get("current_capital"),
         "live_capital": capital.get("live_capital"),
         "available_cash": capital.get("available_cash"),
@@ -239,8 +243,8 @@ def _payload(user_id):
         "status": "LIVE_RUNNING" if running else "LIVE_WAITING",
         "trading_mode": "live",
         "mode": "live",
-        "broker": "angelone",
-        "broker_name": "angelone",
+        "broker": capital_broker,
+        "broker_name": capital_broker,
         "signal": signal,
         "last_signal": signal,
         "score": score,
@@ -324,12 +328,13 @@ class LiveSignalBrokerTruthMiddleware:
             return
 
         try:
+            payload = _payload(user["id"])
             response = JSONResponse(
-                _payload(user["id"]),
+                payload,
                 headers={
                     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
                     "X-OKAI-Live-Signal-Authority": VERSION,
-                    "X-OKAI-Live-Broker": "angelone",
+                    "X-OKAI-Live-Broker": str(payload.get("broker") or "live"),
                 },
             )
         except Exception as exc:
