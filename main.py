@@ -149,7 +149,7 @@ apply_live_gateway_direct_symbol_hotfix()
 # repaired without depending on the mobile build or route monkey-patch order.
 install_live_daily_history_response_patch()
 
-RELEASE_VERSION = "market-regime-shield-v2-cutoff1515-20260902"
+RELEASE_VERSION = "live-current-capital-snapshot-v3-20260902"
 
 app = FastAPI(title="Option King AI — SaaS API", description="Multi-user F&O trading bot platform", version="1.0.0", docs_url="/docs", redoc_url="/redoc")
 app.add_middleware(BacktestActiveStrategyMiddleware)
