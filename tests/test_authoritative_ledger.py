@@ -150,3 +150,74 @@ def test_wrong_saved_live_flag_without_broker_proof_is_repaired_to_paper():
     assert saved["trading_mode"] == "paper"
     assert ledger["today"]["trades"] == 1
     assert ledger["today"]["closed_pnl"] == 1100
+
+
+def _create_live_funds_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE live_broker_funds (
+          user_id INTEGER PRIMARY KEY,
+          available_cash REAL,
+          used_margin REAL,
+          total_limit REAL,
+          broker TEXT,
+          updated_at TEXT
+        )
+        """
+    )
+
+
+def test_flat_live_account_uses_fresh_gateway_funds_for_current_capital():
+    conn = _conn()
+    _create_live_funds_table(conn)
+    now = datetime(2026, 9, 2, 5, 45, tzinfo=timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO live_broker_funds
+          (user_id, available_cash, used_margin, total_limit, broker, updated_at)
+        VALUES (1, 20000, 0, 20000, 'angelone', ?)
+        """,
+        (now.isoformat(),),
+    )
+    conn.commit()
+
+    ledger = build_authoritative_ledger(
+        conn,
+        1,
+        {"trading_mode": "live"},
+        now=now,
+    )
+
+    assert ledger["starting_capital"] == 20000
+    assert ledger["current_capital"] == 20000
+    assert ledger["capital_source"] == "LIVE_GATEWAY_TOTAL_LIMIT_PLUS_OPEN_PNL"
+    assert ledger["broker_available_cash"] == 20000
+    assert ledger["broker_total_limit"] == 20000
+    assert ledger["broker_funds_age_seconds"] == 0
+
+
+def test_flat_live_account_rejects_stale_gateway_funds():
+    conn = _conn()
+    _create_live_funds_table(conn)
+    now = datetime(2026, 9, 2, 5, 45, tzinfo=timezone.utc)
+    stale = now - timedelta(seconds=91)
+    conn.execute(
+        """
+        INSERT INTO live_broker_funds
+          (user_id, available_cash, used_margin, total_limit, broker, updated_at)
+        VALUES (1, 20000, 0, 20000, 'angelone', ?)
+        """,
+        (stale.isoformat(),),
+    )
+    conn.commit()
+
+    ledger = build_authoritative_ledger(
+        conn,
+        1,
+        {"trading_mode": "live"},
+        now=now,
+    )
+
+    assert ledger["starting_capital"] is None
+    assert ledger["current_capital"] is None
+    assert ledger["capital_source"] == "LIVE_BROKER_CAPITAL_UNAVAILABLE"
