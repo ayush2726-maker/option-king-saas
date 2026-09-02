@@ -55,3 +55,15 @@ jobs:
             exit 1
           fi
           echo "Unconfigured profile correctly blocked"
+
+      - name: Verify Termux boot installer output
+        run: |
+          TEST_HOME="$(mktemp -d)"
+          export HOME="$TEST_HOME"
+          cd local_gateway_agent
+          python okai_multi_account_agent.py install-boot
+          BOOT="$TEST_HOME/.termux/boot/start-okai-multi.sh"
+          test -x "$BOOT"
+          grep -q "tmux has-session -t okai-multi" "$BOOT"
+          grep -q "run-all" "$BOOT"
+          grep -q "termux-wake-lock" "$BOOT"
