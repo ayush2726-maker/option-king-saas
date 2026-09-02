@@ -54,7 +54,6 @@ def test_profit_after_reset_increases_next_paper_sizing_base():
         "paper_capital": 20000,
         "paper_capital_reset_at": "2026-09-02 09:00:00",
     }
-
     assert _configured_paper_sizing_base(conn, 1, settings) == 25000
     ledger = build_authoritative_ledger(conn, 1, settings)
     assert ledger["starting_capital"] == 20000
@@ -70,7 +69,6 @@ def test_loss_after_reset_reduces_next_paper_sizing_base():
         "paper_capital": 20000,
         "paper_capital_reset_at": "2026-09-02 09:00:00",
     }
-
     assert _configured_paper_sizing_base(conn, 1, settings) == 15000
     conn.close()
 
@@ -84,23 +82,17 @@ def test_old_profit_is_ignored_after_new_capital_reset():
         "paper_capital": 20000,
         "paper_capital_reset_at": "2026-09-02 09:00:00",
     }
-
-    # Old ₹30k remains in trade/history reporting, but the new sizing cycle is
-    # exactly ₹20k + ₹5k earned after reset.
     assert _configured_paper_sizing_base(conn, 1, settings) == 25000
     conn.close()
 
 
 def test_runtime_quantity_uses_cycle_equity():
-    # NIFTY lot 65 at premium 90 costs 5850 per lot.
-    # Slot 1 of 20k = 10k => 1 lot; slot 1 of 25k = 12.5k => 2 lots.
     base = _runtime_capital_size(
         20000, slot=1, premium=90, lot_size=65, rows=[], risk_points=None
     )
     after_profit = _runtime_capital_size(
         25000, slot=1, premium=90, lot_size=65, rows=[], risk_points=None
     )
-
     assert base["lots"] == 1
     assert base["qty"] == 65
     assert after_profit["lots"] == 2
@@ -129,7 +121,6 @@ def test_live_current_capital_uses_fresh_gateway_funds_when_flat():
         """
     )
     conn.commit()
-
     ledger = build_authoritative_ledger(
         conn, 1, {"trading_mode": "live", "paper_capital": 999999}
     )
