@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -24,6 +25,8 @@ SUPPORTED_BROKERS = {
     "angelone": "okai_local_gateway_v3.py",
     "upstox": "okai_local_gateway_upstox.py",
 }
+RESTART_BACKOFF_SECONDS = (2, 4, 8, 15, 30)
+STABLE_RUN_RESET_SECONDS = 120
 
 
 def _load_manifest():
@@ -127,6 +130,30 @@ def list_profiles():
         print(f"{name:16} {account.get('broker','?'):10} {enabled:8} {state}")
 
 
+def install_boot():
+    """Install a Termux:Boot script that keeps the multi gateway in tmux."""
+    boot_dir = Path.home() / ".termux" / "boot"
+    boot_dir.mkdir(parents=True, exist_ok=True)
+    script_path = boot_dir / "start-okai-multi.sh"
+    root_q = shlex.quote(str(ROOT))
+    python_q = shlex.quote(sys.executable)
+    launcher_q = shlex.quote(str(ROOT / "okai_multi_account_agent.py"))
+    script = f'''#!/data/data/com.termux/files/usr/bin/bash
+set -u
+command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock || true
+sleep 8
+cd {root_q} || exit 1
+if ! tmux has-session -t okai-multi 2>/dev/null; then
+  tmux new-session -d -s okai-multi "{python_q} -u {launcher_q} run-all"
+fi
+'''
+    script_path.write_text(script, encoding="utf-8")
+    os.chmod(script_path, 0o700)
+    print(f"✅ Termux boot script installed: {script_path}")
+    print("Install/open the Termux:Boot app once and allow battery/background permissions.")
+    print("On reboot, okai-multi will start automatically if no tmux session already exists.")
+
+
 def run_all():
     manifest = _load_manifest()
     selected = [
@@ -137,8 +164,16 @@ def run_all():
     if not selected:
         raise RuntimeError("No enabled profiles configured")
 
+    for name, _account in selected:
+        config_path = _profile_home(name) / ".okai" / "local_gateway.json"
+        if not config_path.exists():
+            raise RuntimeError(f"Profile {name} needs setup before run-all")
+
     children = {}
     log_handles = {}
+    restart_attempts = {name: 0 for name, _account in selected}
+    started_at = {}
+    account_map = dict(selected)
     stopping = False
 
     def stop_children(*_args):
@@ -150,13 +185,11 @@ def run_all():
             if proc.poll() is None:
                 proc.terminate()
 
-    signal.signal(signal.SIGINT, stop_children)
-    signal.signal(signal.SIGTERM, stop_children)
-
-    for name, account in selected:
-        config_path = _profile_home(name) / ".okai" / "local_gateway.json"
-        if not config_path.exists():
-            raise RuntimeError(f"Profile {name} needs setup before run-all")
+    def start_worker(name):
+        account = account_map[name]
+        old_handle = log_handles.pop(name, None)
+        if old_handle:
+            old_handle.close()
         log_dir = _profile_home(name) / ".okai"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_handle = open(log_dir / "multi_gateway.log", "a", encoding="utf-8", buffering=1)
@@ -169,23 +202,47 @@ def run_all():
         )
         children[name] = proc
         log_handles[name] = log_handle
+        started_at[name] = time.time()
         print(f"✅ STARTED | {name} | {account['broker']} | pid={proc.pid}")
 
-    print("Single-phone multi-account gateway running. Ctrl+C stops all workers.")
+    signal.signal(signal.SIGINT, stop_children)
+    signal.signal(signal.SIGTERM, stop_children)
+
+    for name, _account in selected:
+        start_worker(name)
+
+    print("Single-phone multi-account gateway running with auto-restart. Ctrl+C stops all workers.")
     try:
-        while children and not stopping:
+        while not stopping:
             time.sleep(2)
             for name, proc in list(children.items()):
                 code = proc.poll()
                 if code is None:
                     continue
-                print(f"⚠️ WORKER EXITED | {name} | code={code}")
-                log_handles.pop(name).close()
-                del children[name]
+                uptime = max(0.0, time.time() - started_at.get(name, time.time()))
+                print(f"⚠️ WORKER EXITED | {name} | code={code} | uptime={uptime:.0f}s")
+                handle = log_handles.pop(name, None)
+                if handle:
+                    handle.close()
+                if stopping:
+                    continue
+                if uptime >= STABLE_RUN_RESET_SECONDS:
+                    restart_attempts[name] = 0
+                attempt = restart_attempts[name]
+                delay = RESTART_BACKOFF_SECONDS[min(attempt, len(RESTART_BACKOFF_SECONDS) - 1)]
+                restart_attempts[name] = attempt + 1
+                print(f"🔄 AUTO-RESTART | {name} | in {delay}s | attempt={restart_attempts[name]}")
+                deadline = time.time() + delay
+                while time.time() < deadline and not stopping:
+                    time.sleep(min(1.0, deadline - time.time()))
+                if not stopping:
+                    start_worker(name)
     finally:
         stop_children()
         deadline = time.time() + 8
         for proc in children.values():
+            if proc.poll() is not None:
+                continue
             remaining = max(0.0, deadline - time.time())
             try:
                 proc.wait(timeout=remaining)
@@ -208,6 +265,7 @@ def main():
 
     sub.add_parser("list")
     sub.add_parser("run-all")
+    sub.add_parser("install-boot")
 
     for action in ("setup", "doctor", "arm", "disarm", "run"):
         item = sub.add_parser(action)
@@ -223,6 +281,8 @@ def main():
             list_profiles()
         elif args.command == "run-all":
             run_all()
+        elif args.command == "install-boot":
+            install_boot()
         else:
             run_one_action(args.profile, args.command)
     except KeyboardInterrupt:
