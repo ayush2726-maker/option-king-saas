@@ -28,9 +28,6 @@ def _runtime_capital_size(capital_base,slot,premium,lot_size,rows=None,risk_poin
 def _backtest_capital_size(capital,premium,lot_size,allocation):
     cv=max(0.0,_f(capital));p=max(0.0,_f(premium));lot=max(1,_i(lot_size,1));a=max(0.0,min(1.0,_f(allocation)));budget=cv*a;one=p*lot;aff=int(math.floor(budget/one)) if one>0 else 0;rb=cv*NORMAL_MAX_PLANNED_LOSS_PERCENT/100.0;prp=p*BACKTEST_CONSERVATIVE_PREMIUM_RISK_PERCENT/100.0;prl=prp*lot;rl=int(math.floor((rb+1e-9)/prl)) if prl>0 else 0;lots=min(aff,max(0,rl));q=lots*lot;used=round(p*q,2)
     return {"lots":lots,"quantity":q,"qty":q,"lot_size":lot,"allocation":a,"allocation_percent":round(a*100,2),"allocated_capital":round(budget,2),"usable_capital":round(budget,2),"one_lot_cost":round(one,2),"capital_used":used,"used_capital":used,"capital_left":round(max(0,budget-used),2),"capital_utilization_percent":round(used/max(.01,cv)*100,2),"slot_utilization_percent":round(used/max(.01,budget)*100,2) if budget>0 else 0,"affordable":lots>=1,"risk_cap_applied":lots<aff,"quantity_risk_cap_enabled":True,"quantity_preserved":lots==aff,"risk_sizing_mode":"CONSERVATIVE_PLANNED_SL_LOSS_CAP_10PCT","quantity_sizing_rule":"MIN_ALLOCATION_AND_10PCT_PLANNED_SL_RISK","max_planned_loss_percent":NORMAL_MAX_PLANNED_LOSS_PERCENT,"max_planned_loss_amount":round(rb,2),"planned_risk_points":round(prp,2),"planned_risk_per_lot":round(prl,2),"affordability_lots":aff,"risk_lots":rl}
-def _annotate_result(r):
-    if not isinstance(r,dict):return r
-    r["quantity_risk_cap_enabled"]=True;return r
 def _replace_route(router,path,method,endpoint):
     for r in getattr(router,"routes",[]):
         if getattr(r,"path",None)==path and method in getattr(r,"methods",set()):
