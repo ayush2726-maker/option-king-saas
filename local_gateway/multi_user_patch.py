@@ -1,10 +1,10 @@
-"""Multi-user access policy for the local static-IP order gateway.
+"""Multi-user and multi-broker policy for the local static-IP order gateway.
 
 Every OKAI user keeps a separate gateway token, expected public IPv4, command
-queue and trade rows.  New live entries require an active/trial subscription
-and the registration-time automated-order acknowledgement.  Gateway tokens
-remain usable for heartbeat/exit handling after expiry so an already-open
-position is never stranded.
+queue and trade rows. New live entries require an active/trial subscription and
+the registration-time automated-order acknowledgement. Gateway tokens remain
+usable for heartbeat/exit handling after expiry so an open position is never
+stranded.
 """
 
 import os
@@ -16,7 +16,8 @@ from database import get_db
 from local_gateway import service
 
 
-PATCH_VERSION = "MULTI_USER_LOCAL_GATEWAY_V1"
+PATCH_VERSION = "MULTI_USER_LOCAL_GATEWAY_V2_MULTI_BROKER"
+SUPPORTED_LOCAL_BROKERS = {"angelone", "upstox"}
 
 
 def _env_bool(name, default):
@@ -29,7 +30,6 @@ def multi_user_enabled():
 
 
 def admin_only_enabled():
-    # Explicit Railway override can restore owner-only mode immediately.
     return _env_bool("LOCAL_GATEWAY_ADMIN_ONLY", False)
 
 
@@ -106,14 +106,12 @@ def gateway_access(user_or_id):
             "reason": "USER_NOT_FOUND",
             "message": "User account was not found",
         }
-
     if not bool(user.get("is_active")):
         return {
             "allowed": False,
             "reason": "ACCOUNT_SUSPENDED",
             "message": "Account is suspended",
         }
-
     if bool(user.get("is_admin")):
         return {
             "allowed": True,
@@ -124,7 +122,6 @@ def gateway_access(user_or_id):
             "multi_user_enabled": multi_user_enabled(),
             "admin_only": admin_only_enabled(),
         }
-
     if admin_only_enabled():
         return {
             "allowed": False,
@@ -133,7 +130,6 @@ def gateway_access(user_or_id):
             "multi_user_enabled": multi_user_enabled(),
             "admin_only": True,
         }
-
     if not multi_user_enabled():
         return {
             "allowed": False,
@@ -148,7 +144,6 @@ def gateway_access(user_or_id):
     if status == "trial":
         trial_end = _parse_datetime(user.get("trial_ends_at"))
         subscription_allowed = bool(trial_end and trial_end > datetime.now(timezone.utc))
-
     if not subscription_allowed:
         return {
             "allowed": False,
@@ -170,7 +165,6 @@ def gateway_access(user_or_id):
             "multi_user_enabled": True,
             "admin_only": False,
         }
-
     return {
         "allowed": True,
         "reason": "ELIGIBLE",
@@ -214,14 +208,27 @@ def _authenticate_gateway(token):
     return row
 
 
+def _payload_broker(payload):
+    raw = str((payload or {}).get("broker") or (payload or {}).get("broker_name") or "angelone").strip().lower()
+    aliases = {
+        "angel": "angelone",
+        "angel-one": "angelone",
+        "angelone-local-gateway": "angelone",
+        "upstox-local-gateway": "upstox",
+    }
+    broker = aliases.get(raw, raw)
+    return broker if broker in SUPPORTED_LOCAL_BROKERS else "angelone"
+
+
 def apply_multi_user_gateway_patch():
-    if getattr(service, "_okai_multi_user_gateway_v1", False):
+    if getattr(service, "_okai_multi_user_gateway_v2", False):
         return
 
     original_heartbeat = service.heartbeat_gateway
     original_set_armed = service.set_gateway_armed
     original_get_status = service.get_gateway_status
     original_gateway_ready = service.gateway_ready
+    original_queue_entry = service.queue_live_entry
 
     def heartbeat_gateway(gateway, observed_ip, agent_version=""):
         status = original_heartbeat(gateway, observed_ip, agent_version)
@@ -261,6 +268,30 @@ def apply_multi_user_gateway_patch():
             return False, access.get("reason") or "GATEWAY_ACCESS_DENIED", status
         return original_gateway_ready(user_id)
 
+    def queue_live_entry(user_id, payload, idempotency_key, max_concurrent=1, max_trades_per_day=None):
+        payload = dict(payload or {})
+        broker = _payload_broker(payload)
+        payload["broker"] = broker
+        result = original_queue_entry(
+            user_id,
+            payload,
+            idempotency_key,
+            max_concurrent=max_concurrent,
+            max_trades_per_day=max_trades_per_day,
+        )
+        trade_id = int((result or {}).get("trade_id") or 0)
+        if trade_id > 0 and (result or {}).get("queued"):
+            conn = get_db()
+            try:
+                conn.execute(
+                    "UPDATE trades SET broker=? WHERE id=? AND user_id=?",
+                    (f"{broker}-local-gateway", trade_id, int(user_id)),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        return result
+
     service.admin_only_enabled = admin_only_enabled
     service.require_personal_user = require_gateway_user
     service.authenticate_gateway = _authenticate_gateway
@@ -268,6 +299,8 @@ def apply_multi_user_gateway_patch():
     service.set_gateway_armed = set_gateway_armed
     service.get_gateway_status = get_gateway_status
     service.gateway_ready = gateway_ready
+    service.queue_live_entry = queue_live_entry
     service.gateway_access = gateway_access
     service.multi_user_enabled = multi_user_enabled
     service._okai_multi_user_gateway_v1 = True
+    service._okai_multi_user_gateway_v2 = True
