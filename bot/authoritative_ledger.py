@@ -9,7 +9,8 @@ from bot.trade_mode_truth import broker_proof_sql, reconcile_trade_modes
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
-VERSION = "OKAI-AUTHORITATIVE-LEDGER-V4-RECONCILED-BROKER-PROOF"
+LIVE_FUNDS_MAX_AGE_SECONDS = 90
+VERSION = "OKAI-AUTHORITATIVE-LEDGER-V5-LIVE-FUNDS-SNAPSHOT"
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -51,6 +52,73 @@ def _parse(value: Any):
         return parsed.astimezone(timezone.utc)
     except Exception:
         return None
+
+
+
+def _fresh_live_funds_snapshot(
+    conn,
+    user_id: int,
+    current: datetime,
+    max_age_seconds: int = LIVE_FUNDS_MAX_AGE_SECONDS,
+) -> dict[str, Any] | None:
+    """Read the gateway-published Angel balance without calling Angel again."""
+    try:
+        row = conn.execute(
+            """
+            SELECT available_cash, used_margin, total_limit, broker, updated_at
+            FROM live_broker_funds
+            WHERE user_id=?
+            """,
+            (int(user_id),),
+        ).fetchone()
+    except Exception:
+        return None
+
+    if not row:
+        return None
+
+    updated_at = _parse(_value(row, "updated_at"))
+    if updated_at is None:
+        return None
+
+    age_seconds = max(
+        0.0,
+        (
+            current.astimezone(timezone.utc)
+            - updated_at
+        ).total_seconds(),
+    )
+    if age_seconds > max(1, int(max_age_seconds)):
+        return None
+
+    available_cash = max(
+        0.0,
+        _f(_value(row, "available_cash"), 0.0),
+    )
+    used_margin = max(
+        0.0,
+        _f(_value(row, "used_margin"), 0.0),
+    )
+    total_limit = max(
+        available_cash,
+        _f(
+            _value(
+                row,
+                "total_limit",
+                available_cash + used_margin,
+            ),
+            available_cash + used_margin,
+        ),
+    )
+
+    return {
+        "available_cash": round(available_cash, 2),
+        "used_margin": round(used_margin, 2),
+        "total_limit": round(total_limit, 2),
+        "broker": str(_value(row, "broker", "angelone") or "angelone"),
+        "updated_at": str(_value(row, "updated_at", "") or ""),
+        "age_seconds": round(age_seconds, 3),
+    }
 
 
 def _sql_time(value: datetime) -> str:
@@ -169,13 +237,26 @@ def build_authoritative_ledger(
         tuple(today_trade_params),
     ).fetchone()["count"])
 
+    live_funds_snapshot = None
     if mode == "paper":
         starting_capital = max(1.0, _f(settings.get("paper_capital", 100000), 100000))
         capital_source = "PAPER_SEED_PLUS_AUTHORITATIVE_NET_LEDGER"
     else:
         bases = [_f(_value(row, "capital_base"), 0) for row in open_rows]
         starting_capital = max([value for value in bases if value > 0] or [0.0]) or None
-        capital_source = "LIVE_BROKER_BASE_PLUS_AUTHORITATIVE_NET_LEDGER"
+        if starting_capital is not None:
+            capital_source = "LIVE_BROKER_BASE_PLUS_AUTHORITATIVE_NET_LEDGER"
+        else:
+            live_funds_snapshot = _fresh_live_funds_snapshot(
+                conn,
+                int(user_id),
+                current,
+            )
+            if live_funds_snapshot is not None:
+                starting_capital = float(live_funds_snapshot["total_limit"])
+                capital_source = "LIVE_GATEWAY_TOTAL_LIMIT_PLUS_OPEN_PNL"
+            else:
+                capital_source = "LIVE_BROKER_CAPITAL_UNAVAILABLE"
 
     current_capital = None
     if starting_capital is not None:
@@ -209,6 +290,31 @@ def build_authoritative_ledger(
             "source": "AUTHORITATIVE_LEDGER_RECONCILED_BROKER_PROOF",
         },
         "capital_source": capital_source,
+        "broker_available_cash": (
+            live_funds_snapshot["available_cash"]
+            if live_funds_snapshot is not None
+            else None
+        ),
+        "broker_used_margin": (
+            live_funds_snapshot["used_margin"]
+            if live_funds_snapshot is not None
+            else None
+        ),
+        "broker_total_limit": (
+            live_funds_snapshot["total_limit"]
+            if live_funds_snapshot is not None
+            else None
+        ),
+        "broker_funds_updated_at": (
+            live_funds_snapshot["updated_at"]
+            if live_funds_snapshot is not None
+            else None
+        ),
+        "broker_funds_age_seconds": (
+            live_funds_snapshot["age_seconds"]
+            if live_funds_snapshot is not None
+            else None
+        ),
     }
 
 
