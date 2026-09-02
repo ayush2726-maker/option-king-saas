@@ -4,7 +4,7 @@
 This wrapper keeps the battle-tested gateway command/Angel order flow and adds:
 - exact server-calculated capital/risk quantity validation on the user's device;
 - use of the server-provided ATR stop instead of recalculating a fixed stop;
-- first profit lock at entry + estimated round-trip charges + 2% profit;
+- first profit lock only after entry + estimated round-trip charges + 4% profit;
 - R-based dynamic profit trailing checked against option LTP every second;
 - fixed target disabled; remote structural exit depends on the active Railway release;
 - local SQLite migration, so open-position trail state survives restarts;
@@ -23,7 +23,8 @@ except ImportError:  # Direct script execution from local_gateway_agent/.
     import okai_local_gateway as base
 
 
-RISK_ENGINE_VERSION = "1.2.1-RISK-V2-FUNDS-SYNC"
+RISK_ENGINE_VERSION = "1.2.2-RISK-V2-4PCT-FIRST-LOCK"
+FIRST_LOCK_NET_PERCENT = 4.0
 
 # Conservative Angel One equity-option charge model. Rates are decimals.
 # Brokerage is charged per executed order. Slight over-estimation is intentional:
@@ -63,15 +64,17 @@ def estimate_round_trip_charges(entry_price, exit_price, quantity, exchange):
 
 
 def cost_safe_breakeven(entry_price, quantity, exchange):
+    """Exact local first-lock price: entry + 4% gross move + round-trip costs."""
     entry = float(entry_price or 0)
     qty = max(1, int(quantity or 1))
-    desired_exit = entry * 1.02
+    desired_exit = entry * (1.0 + FIRST_LOCK_NET_PERCENT / 100.0)
     charges = estimate_round_trip_charges(entry, desired_exit, qty, exchange)
     per_unit_charges = charges / qty
     return _ceil_tick(desired_exit + per_unit_charges), charges
 
 
 def dynamic_profit_lock(entry_price, initial_sl, peak_ltp, cost_safe_be):
+    """Do not trail before the exact charges+4% threshold has actually traded."""
     entry = float(entry_price or 0)
     initial = float(initial_sl or 0)
     peak = max(entry, float(peak_ltp or entry))
@@ -79,24 +82,34 @@ def dynamic_profit_lock(entry_price, initial_sl, peak_ltp, cost_safe_be):
         initial = entry * 0.88
     risk = max(0.05, entry - initial)
     peak_r = max(0.0, (peak - entry) / risk)
+    first_lock_price = max(entry, float(cost_safe_be or entry))
+    first_lock_triggered = peak + 1e-9 >= first_lock_price
+
     active_sl = initial
     stage = "INITIAL_ATR_SL"
 
-    if peak_r >= 0.8:
-        active_sl = max(active_sl, float(cost_safe_be or entry))
-        stage = "COST_SAFE_BE_PLUS_2PCT"
-    if peak_r >= 1.2:
-        active_sl = max(active_sl, entry + 0.5 * risk)
-        stage = "LOCK_0_5R"
-    if peak_r >= 1.8:
-        active_sl = max(active_sl, entry + risk, peak - 0.8 * risk)
-        stage = "DYNAMIC_TRAIL_0_8R"
+    # Critical rule: no 0.8R shortcut. The initial ATR SL is preserved byte-for-
+    # byte until the option itself trades at the charges + 4% threshold.
+    if first_lock_triggered:
+        active_sl = max(active_sl, first_lock_price)
+        stage = "COST_SAFE_BE_PLUS_4PCT"
+
+        # Higher R stages are allowed only after the first lock has armed.
+        if peak_r >= 1.2:
+            active_sl = max(active_sl, entry + 0.5 * risk)
+            stage = "LOCK_0_5R_AFTER_4PCT"
+        if peak_r >= 1.8:
+            active_sl = max(active_sl, entry + risk, peak - 0.8 * risk)
+            stage = "DYNAMIC_TRAIL_0_8R_AFTER_4PCT"
 
     return {
         "sl_price": _ceil_tick(active_sl),
         "stage": stage,
         "risk": round(risk, 4),
         "peak_r": round(peak_r, 4),
+        "first_lock_price": round(first_lock_price, 2),
+        "first_lock_triggered": bool(first_lock_triggered),
+        "first_lock_net_percent": FIRST_LOCK_NET_PERCENT,
     }
 
 
@@ -256,6 +269,7 @@ class RiskV2GatewayRunner(base.GatewayRunner):
             "sl_price": float(row["sl_price"]),
             "target_price": 0.0,
             "cost_safe_breakeven": float(row["breakeven_price"]),
+            "first_lock_net_percent": FIRST_LOCK_NET_PERCENT,
             "estimated_round_trip_charges": float(
                 row["estimated_round_trip_charges"] or 0
             ),
@@ -340,6 +354,9 @@ class RiskV2GatewayRunner(base.GatewayRunner):
                         "peak_ltp": peak,
                         "active_sl": active_sl,
                         "cost_safe_breakeven": cost_be,
+                        "first_lock_price": trail["first_lock_price"],
+                        "first_lock_triggered": trail["first_lock_triggered"],
+                        "first_lock_net_percent": FIRST_LOCK_NET_PERCENT,
                         "trail_stage": stage,
                         "peak_r": trail["peak_r"],
                         "risk_engine": RISK_ENGINE_VERSION,
@@ -415,8 +432,9 @@ def command_doctor_v2():
     print("Paper-rule capital/risk sizing: ENABLED ✅")
     print("Angel funds snapshot sync: ENABLED ✅")
     print("Initial stop: SERVER ATR SL ✅")
-    print("First lock: ENTRY + ROUND-TRIP CHARGES + 2% ✅")
-    print("Dynamic trail: 0.8R / 1.2R / 1.8R stages ✅")
+    print("First lock trigger: ENTRY + ROUND-TRIP CHARGES + 4% ✅")
+    print("Before first lock: INITIAL ATR SL ONLY ✅")
+    print("Higher R trail: enabled only after first 4% lock ✅")
     print("Fixed target: DISABLED ✅")
     print("Structural exit: SERVER RELEASE DEPENDENT ⚠️")
 
