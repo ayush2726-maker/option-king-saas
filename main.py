@@ -40,6 +40,7 @@ from backtest.real_option_premium_finalize_patch import finalize_real_option_pre
 from bot.score_history_patch import apply_score_history_patch
 from bot.upstox_live_candle_patch import apply_upstox_live_candle_patch
 from bot.live_scan_history_fallback_patch import apply_live_scan_history_fallback_patch
+from bot.early_live_score_warmup_patch import apply_early_live_score_warmup_patch
 from bot.default_strategy_patch import apply_default_strategy_patch, migrate_default_strategy_profiles
 from bot.bullish_balance_cas_guard_patch import apply_balanced_momentum_patch, apply_cas_closing_guard_patch
 from bot.fresh_entry_guard_patch import apply_fresh_entry_guard_patch
@@ -89,6 +90,7 @@ apply_broker_session_reset_patch()
 apply_score_history_patch()
 apply_upstox_live_candle_patch()
 apply_live_scan_history_fallback_patch()
+apply_early_live_score_warmup_patch()
 apply_default_strategy_patch()
 apply_balanced_momentum_patch()
 apply_fresh_entry_guard_patch()
@@ -149,7 +151,7 @@ apply_live_gateway_direct_symbol_hotfix()
 # repaired without depending on the mobile build or route monkey-patch order.
 install_live_daily_history_response_patch()
 
-RELEASE_VERSION = "upstox-live-capital-snapshot-v1-20260902"
+RELEASE_VERSION = "early-live-score-warmup-v1-20260903"
 
 app = FastAPI(title="Option King AI — SaaS API", description="Multi-user F&O trading bot platform", version="1.0.0", docs_url="/docs", redoc_url="/redoc")
 app.add_middleware(BacktestActiveStrategyMiddleware)
