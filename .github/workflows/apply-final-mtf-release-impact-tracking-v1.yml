@@ -1,0 +1,60 @@
+name: Apply Final MTF Release Impact Tracking V1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/triggers/final-mtf-release-impact-tracking-v1.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Wire tracking patch into main
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('main.py')
+          text = p.read_text(encoding='utf-8')
+          imp = 'from bot.final_mtf_release_impact_tracking_patch import apply_final_mtf_release_impact_tracking_patch\n'
+          anchor_imp = 'from bot.final_mtf_misaligned_release_patch import apply_final_mtf_misaligned_release_patch\n'
+          if imp not in text:
+              if anchor_imp not in text:
+                  raise SystemExit('final MTF release import anchor not found')
+              text = text.replace(anchor_imp, anchor_imp + imp, 1)
+          call = 'apply_final_mtf_release_impact_tracking_patch()\n'
+          anchor_call = 'apply_final_mtf_misaligned_release_patch()\n'
+          if call not in text:
+              if anchor_call not in text:
+                  raise SystemExit('final MTF release call anchor not found')
+              text = text.replace(anchor_call, anchor_call + call, 1)
+          old = 'RELEASE_VERSION = "final-mtf-misaligned-release-v1-20260903"'
+          if old in text:
+              text = text.replace(old, 'RELEASE_VERSION = "final-mtf-release-impact-tracking-v1-20260903"', 1)
+          p.write_text(text, encoding='utf-8')
+          PY
+      - name: Validate
+        run: |
+          python -m py_compile bot/final_mtf_release_impact_tracking_patch.py main.py
+          git diff --check
+      - name: Commit
+        run: |
+          if git diff --quiet; then
+            echo 'Already wired'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add main.py
+          git commit -m 'Track profit loss from final MTF block release'
+          git push origin HEAD:main
