@@ -1,0 +1,1 @@
+Deploy actual profit/loss tracking for trades opened because FINAL VWAP ST EMA MTF MISALIGNED was released.
