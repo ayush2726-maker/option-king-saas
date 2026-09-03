@@ -1,7 +1,7 @@
 """Authoritative smooth R-based runtime profit lock.
 
-The first protected stop now arms only at charges + 4% net profit. Before that
-threshold the initial ATR stop is left untouched. At charges + 4%, the protected
+The first protected stop now arms only at charges + 7% net profit. Before that
+threshold the initial ATR stop is left untouched. At charges + 7%, the protected
 stop is capped so the observed peak retains at least 0.50R breathing room, then
 the existing R-based runner stages take over. This keeps room for a winner while
 preventing a meaningful observed profit from returning to an unprotected loss.
@@ -28,11 +28,11 @@ from bot.trade_visibility_metrics_patch import apply_trade_visibility_metrics_pa
 
 
 TICK_SIZE = 0.05
-COST_COVER_NET_PROFIT_PERCENT = 4.0
-EARLY_PROTECTION_TRIGGER_NET_PERCENT = 4.0
+COST_COVER_NET_PROFIT_PERCENT = 7.0
+EARLY_PROTECTION_TRIGGER_NET_PERCENT = 7.0
 EARLY_PROTECTION_LOCK_NET_PERCENT = 0.0
 FOUR_PCT_MIN_LOCK_NET_PERCENT = 1.0
-FOUR_PCT_LOCK_NET_PERCENT = 4.0
+FOUR_PCT_LOCK_NET_PERCENT = 7.0
 FOUR_PCT_MIN_PEAK_ROOM_R = 0.50
 EXPIRY_EARLY_FLOOR_MIN_PEAK_R = 0.75
 FIRST_LOCK_TRIGGER_R = 1.00
@@ -53,7 +53,7 @@ SMOOTH_TRAIL_DISTANCE_R = 0.55
 TIGHT_TRAIL_TRIGGER_R = 4.00
 TIGHT_TRAIL_MIN_LOCK_R = 3.00
 TIGHT_TRAIL_DISTANCE_R = 0.45
-AUTHORITY_VERSION = "AUTHORITATIVE_4PCT_PEAK70_PROFIT_RATCHET_V9"
+AUTHORITY_VERSION = "AUTHORITATIVE_7PCT_PEAK70_PROFIT_RATCHET_V10"
 PAPER_FILL_VERSION = "PAPER_STOP_ONE_TICK_FILL_V1"
 
 
