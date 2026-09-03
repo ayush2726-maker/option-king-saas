@@ -73,6 +73,7 @@ from bot.pullback_continuation_entry_patch import apply_pullback_continuation_en
 from bot.choppy_market_guard_patch import apply_choppy_market_guard_patch
 from bot.market_regime_shield_v2 import apply_market_regime_shield_v2
 from bot.missed_trade_learning_v1 import apply_missed_trade_learning_patch
+from bot.block_performance_report_patch import apply_block_performance_report_patch
 from bot.final_correlated_risk_guard import apply_final_correlated_risk_guard
 from bot.expiry_day_risk_mode_patch import apply_expiry_day_risk_mode_patch
 from bot.authoritative_profit_lock_runtime_patch import apply_authoritative_profit_lock_runtime_patch
@@ -132,6 +133,7 @@ apply_pullback_continuation_entry_patch()
 apply_choppy_market_guard_patch()
 apply_market_regime_shield_v2()
 apply_missed_trade_learning_patch()
+apply_block_performance_report_patch()
 apply_final_correlated_risk_guard()
 apply_expiry_day_risk_mode_patch()
 apply_authoritative_profit_lock_runtime_patch()
@@ -151,7 +153,7 @@ apply_live_gateway_direct_symbol_hotfix()
 # repaired without depending on the mobile build or route monkey-patch order.
 install_live_daily_history_response_patch()
 
-RELEASE_VERSION = "early-live-score-warmup-v1-20260903"
+RELEASE_VERSION = "block-performance-report-v1-20260903"
 
 app = FastAPI(title="Option King AI — SaaS API", description="Multi-user F&O trading bot platform", version="1.0.0", docs_url="/docs", redoc_url="/redoc")
 app.add_middleware(BacktestActiveStrategyMiddleware)
