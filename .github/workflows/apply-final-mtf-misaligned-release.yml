@@ -1,0 +1,69 @@
+name: Apply Final MTF Misaligned Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-final-mtf-misaligned-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Wire targeted release after strategy guards
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('main.py')
+          text = path.read_text(encoding='utf-8')
+          import_line = 'from bot.final_mtf_misaligned_release_patch import apply_final_mtf_misaligned_release_patch\n'
+          anchor = 'from bot.expiry_day_risk_mode_patch import apply_expiry_day_risk_mode_patch\n'
+          if import_line not in text:
+              if anchor not in text:
+                  raise SystemExit('import anchor missing')
+              text = text.replace(anchor, anchor + import_line, 1)
+
+          call = 'apply_final_mtf_misaligned_release_patch()\n'
+          call_anchor = 'apply_expiry_day_risk_mode_patch()\n'
+          if call not in text:
+              if call_anchor not in text:
+                  raise SystemExit('call anchor missing')
+              text = text.replace(call_anchor, call_anchor + call, 1)
+
+          import re
+          text = re.sub(
+              r'RELEASE_VERSION = "[^"]+"',
+              'RELEASE_VERSION = "final-mtf-misaligned-release-v1-20260903"',
+              text,
+              count=1,
+          )
+          path.write_text(text, encoding='utf-8')
+          PY
+      - name: Validate
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m py_compile bot/final_mtf_misaligned_release_patch.py main.py
+          git diff --check
+      - name: Commit
+        run: |
+          if git diff --quiet; then
+            echo 'Already applied'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add main.py
+          git commit -m 'Remove final VWAP ST EMA MTF misaligned veto only'
+          git push origin HEAD:main
