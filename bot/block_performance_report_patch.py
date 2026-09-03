@@ -30,10 +30,17 @@ def _load_dict(value):
 
 def _normalize_reason(value):
     text = " ".join(str(value or "").strip().upper().replace("_", " ").split())
-    # Keep all historical/runtime spellings of this gate in one stable row.
     if "SWING" in text and "BREAK" in text and ("FRESH" in text or "2 CANDLE" in text):
         return FRESH_SWING_REASON
     return text
+
+
+def _has_fresh_swing_marker(*values):
+    for value in values:
+        text = str(value or "").upper().replace("_", " ")
+        if "SWING" in text and "BREAK" in text and ("FRESH" in text or "2 CANDLE" in text):
+            return True
+    return False
 
 
 def _candidate_pnl(row):
@@ -56,12 +63,17 @@ def _recommendation(samples, missed_profit, saved_loss, net_if_taken):
 
 
 def get_block_performance(user_id: int, horizon_minutes: int = 15):
-    """Aggregate each recorded strategy block reason against exact option P&L."""
+    """Aggregate each recorded strategy block reason against exact option P&L.
+
+    Fresh 2-candle swing-break misses are intentionally recovered even when an
+    older runtime stored them under QUALIFIED_NOT_SELECTED or another decision
+    kind instead of STRATEGY_BLOCKED. This only changes analytics/reporting.
+    """
     conn = get_db()
     try:
         rows = conn.execute(
             """
-            SELECT m.id,m.underlying,m.candidate_side,m.block_stage,
+            SELECT m.id,m.underlying,m.candidate_side,m.decision_kind,m.block_stage,
                    m.block_reasons_json,m.signal_json,m.advanced_decision_id,
                    o.ce_net_pnl,o.pe_net_pnl,o.training_eligible
             FROM ai_missed_trade_signals_v1 m
@@ -69,7 +81,12 @@ def get_block_performance(user_id: int, horizon_minutes: int = 15):
               ON o.decision_id=m.advanced_decision_id
              AND o.horizon_minutes=?
             WHERE m.user_id=?
-              AND m.decision_kind='STRATEGY_BLOCKED'
+              AND (
+                    m.decision_kind='STRATEGY_BLOCKED'
+                    OR UPPER(COALESCE(m.block_stage,'')) LIKE '%SWING%BREAK%'
+                    OR UPPER(COALESCE(m.block_reasons_json,'')) LIKE '%SWING%BREAK%'
+                    OR UPPER(COALESCE(m.signal_json,'')) LIKE '%SWING%BREAK%'
+                  )
             ORDER BY datetime(m.created_at),m.rowid
             """,
             (int(horizon_minutes), int(user_id)),
@@ -99,23 +116,42 @@ def get_block_performance(user_id: int, horizon_minutes: int = 15):
             pnl = float(pnl)
         except Exception:
             continue
+
         reasons = _loads(row.get("block_reasons_json"))
         signal = _load_dict(row.get("signal_json"))
-        # Older rows sometimes carried this gate only in pullback_entry_reason,
-        # while the UI correctly displayed it. Recover it for analytics so old
-        # and new samples are counted together without changing trade behavior.
+
         pullback_reason = signal.get("pullback_entry_reason")
-        if pullback_reason:
-            normalized_pullback = _normalize_reason(pullback_reason)
-            if normalized_pullback == FRESH_SWING_REASON:
-                reasons.append(FRESH_SWING_REASON)
+        if pullback_reason and _normalize_reason(pullback_reason) == FRESH_SWING_REASON:
+            reasons.append(FRESH_SWING_REASON)
+
+        # Some historical rows displayed the swing-break reason in the app but
+        # were saved under a non-STRATEGY_BLOCKED decision kind. Recover the
+        # exact gate from any persisted text field so its 15m P&L is not lost.
+        if _has_fresh_swing_marker(
+            row.get("block_stage"),
+            row.get("block_reasons_json"),
+            row.get("signal_json"),
+            pullback_reason,
+        ):
+            reasons.append(FRESH_SWING_REASON)
+
+        # Keep generic fallback only for actual strategy-blocked rows. This
+        # prevents unrelated QUALIFIED_NOT_SELECTED rows from polluting stats.
         if not reasons:
+            if str(row.get("decision_kind") or "").upper() != "STRATEGY_BLOCKED":
+                continue
             reasons = [row.get("block_stage") or "UNSPECIFIED_BLOCK"]
+
         unique = []
         for value in reasons:
             reason = _normalize_reason(value)
             if reason and reason not in unique:
                 unique.append(reason)
+
+        # For recovered non-strategy rows, count only the fresh swing gate.
+        if str(row.get("decision_kind") or "").upper() != "STRATEGY_BLOCKED":
+            unique = [reason for reason in unique if reason == FRESH_SWING_REASON]
+
         for reason in unique:
             item = stats[reason]
             item["total_blocked"] += 1
