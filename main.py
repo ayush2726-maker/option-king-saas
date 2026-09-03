@@ -76,6 +76,7 @@ from bot.missed_trade_learning_v1 import apply_missed_trade_learning_patch
 from bot.block_performance_report_patch import apply_block_performance_report_patch
 from bot.final_correlated_risk_guard import apply_final_correlated_risk_guard
 from bot.expiry_day_risk_mode_patch import apply_expiry_day_risk_mode_patch
+from bot.final_mtf_misaligned_release_patch import apply_final_mtf_misaligned_release_patch
 from bot.authoritative_profit_lock_runtime_patch import apply_authoritative_profit_lock_runtime_patch
 from bot.full_sl_velocity_circuit_patch import apply_full_sl_velocity_circuit_patch
 from bot.normal_entry_cutoff_1515_runtime_patch import (
@@ -136,6 +137,7 @@ apply_missed_trade_learning_patch()
 apply_block_performance_report_patch()
 apply_final_correlated_risk_guard()
 apply_expiry_day_risk_mode_patch()
+apply_final_mtf_misaligned_release_patch()
 apply_authoritative_profit_lock_runtime_patch()
 # These are the final normal-AUTO order-boundary guards.  Keep them after all
 # legacy wrappers so replay, Paper and Live cannot restore permissive clocks or
@@ -153,7 +155,7 @@ apply_live_gateway_direct_symbol_hotfix()
 # repaired without depending on the mobile build or route monkey-patch order.
 install_live_daily_history_response_patch()
 
-RELEASE_VERSION = "block-performance-report-v1-20260903"
+RELEASE_VERSION = "final-mtf-misaligned-release-v1-20260903"
 
 app = FastAPI(title="Option King AI — SaaS API", description="Multi-user F&O trading bot platform", version="1.0.0", docs_url="/docs", redoc_url="/redoc")
 app.add_middleware(BacktestActiveStrategyMiddleware)
