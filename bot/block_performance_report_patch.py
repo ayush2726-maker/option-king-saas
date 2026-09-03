@@ -9,6 +9,8 @@ from collections import defaultdict
 
 from database import get_db
 
+FRESH_SWING_REASON = "FRESH 2 CANDLES SWING BREAK REQUIRED"
+
 
 def _loads(value):
     try:
@@ -16,6 +18,22 @@ def _loads(value):
         return data if isinstance(data, list) else []
     except Exception:
         return []
+
+
+def _load_dict(value):
+    try:
+        data = json.loads(str(value or "{}"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _normalize_reason(value):
+    text = " ".join(str(value or "").strip().upper().replace("_", " ").split())
+    # Keep all historical/runtime spellings of this gate in one stable row.
+    if "SWING" in text and "BREAK" in text and ("FRESH" in text or "2 CANDLE" in text):
+        return FRESH_SWING_REASON
+    return text
 
 
 def _candidate_pnl(row):
@@ -44,7 +62,7 @@ def get_block_performance(user_id: int, horizon_minutes: int = 15):
         rows = conn.execute(
             """
             SELECT m.id,m.underlying,m.candidate_side,m.block_stage,
-                   m.block_reasons_json,m.advanced_decision_id,
+                   m.block_reasons_json,m.signal_json,m.advanced_decision_id,
                    o.ce_net_pnl,o.pe_net_pnl,o.training_eligible
             FROM ai_missed_trade_signals_v1 m
             JOIN ai_advanced_v2_contract_outcomes o
@@ -82,11 +100,20 @@ def get_block_performance(user_id: int, horizon_minutes: int = 15):
         except Exception:
             continue
         reasons = _loads(row.get("block_reasons_json"))
+        signal = _load_dict(row.get("signal_json"))
+        # Older rows sometimes carried this gate only in pullback_entry_reason,
+        # while the UI correctly displayed it. Recover it for analytics so old
+        # and new samples are counted together without changing trade behavior.
+        pullback_reason = signal.get("pullback_entry_reason")
+        if pullback_reason:
+            normalized_pullback = _normalize_reason(pullback_reason)
+            if normalized_pullback == FRESH_SWING_REASON:
+                reasons.append(FRESH_SWING_REASON)
         if not reasons:
             reasons = [row.get("block_stage") or "UNSPECIFIED_BLOCK"]
         unique = []
         for value in reasons:
-            reason = str(value or "").strip().upper()
+            reason = _normalize_reason(value)
             if reason and reason not in unique:
                 unique.append(reason)
         for reason in unique:
@@ -158,6 +185,5 @@ def apply_block_performance_report_patch() -> None:
         return report
 
     missed.get_missed_trade_summary = wrapped
-    # ai_routes imported the function by name, so update that reference too.
     ai_routes.get_missed_trade_summary = wrapped
     missed._okai_block_performance_v1 = True
