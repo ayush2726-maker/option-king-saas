@@ -1,0 +1,1 @@
+Apply authoritative profit lock trigger migration from charges + 4% net to charges + 7% net. Keep all other trail behavior unchanged.
