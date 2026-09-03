@@ -23,6 +23,10 @@ from strategy.routes import router as strategy_router
 from strategy.profile_routes import router as strategy_profile_router
 from bot.market_routes import router as market_router
 from bot.sector_rotation_routes import router as sector_rotation_router
+# Install adaptive feature extensions before ai_routes imports advanced_intelligence_v2,
+# because that module binds feature_vector at import time.
+from bot.bollinger_shadow_features_patch import apply_bollinger_shadow_features_patch
+apply_bollinger_shadow_features_patch()
 from bot.ai_routes import router as ai_router
 from backtest.routes import router as backtest_router
 from backtest.range_routes import router as backtest_range_router
@@ -157,7 +161,7 @@ apply_live_gateway_direct_symbol_hotfix()
 # repaired without depending on the mobile build or route monkey-patch order.
 install_live_daily_history_response_patch()
 
-RELEASE_VERSION = "final-mtf-release-impact-tracking-v1-20260903"
+RELEASE_VERSION = "bollinger-shadow-ai-features-v1-20260903"
 
 app = FastAPI(title="Option King AI — SaaS API", description="Multi-user F&O trading bot platform", version="1.0.0", docs_url="/docs", redoc_url="/redoc")
 app.add_middleware(BacktestActiveStrategyMiddleware)
