@@ -1,0 +1,54 @@
+name: Apply Profit Lock 7 Percent V10
+
+on:
+  push:
+    paths:
+      - '.github/triggers/profit-lock-7pct-v10.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch trigger from 4 percent to 7 percent
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('bot/authoritative_profit_lock_runtime_patch.py')
+          s = p.read_text()
+          required = [
+              'COST_COVER_NET_PROFIT_PERCENT = 4.0',
+              'EARLY_PROTECTION_TRIGGER_NET_PERCENT = 4.0',
+              'FOUR_PCT_LOCK_NET_PERCENT = 4.0',
+              'AUTHORITY_VERSION = "AUTHORITATIVE_4PCT_PEAK70_PROFIT_RATCHET_V9"',
+          ]
+          missing = [x for x in required if x not in s]
+          if missing:
+              raise SystemExit(f'Refusing unsafe patch; expected V9 markers missing: {missing}')
+          s = s.replace('COST_COVER_NET_PROFIT_PERCENT = 4.0', 'COST_COVER_NET_PROFIT_PERCENT = 7.0', 1)
+          s = s.replace('EARLY_PROTECTION_TRIGGER_NET_PERCENT = 4.0', 'EARLY_PROTECTION_TRIGGER_NET_PERCENT = 7.0', 1)
+          s = s.replace('FOUR_PCT_LOCK_NET_PERCENT = 4.0', 'FOUR_PCT_LOCK_NET_PERCENT = 7.0', 1)
+          s = s.replace('AUTHORITY_VERSION = "AUTHORITATIVE_4PCT_PEAK70_PROFIT_RATCHET_V9"', 'AUTHORITY_VERSION = "AUTHORITATIVE_7PCT_PEAK70_PROFIT_RATCHET_V10"', 1)
+          s = s.replace('The first protected stop now arms only at charges + 4% net profit.', 'The first protected stop now arms only at charges + 7% net profit.', 1)
+          s = s.replace('At charges + 4%, the protected', 'At charges + 7%, the protected', 1)
+          p.write_text(s)
+          PY
+      - name: Syntax check
+        run: python -m py_compile bot/authoritative_profit_lock_runtime_patch.py
+      - name: Verify exact trigger constants
+        run: |
+          grep -q 'COST_COVER_NET_PROFIT_PERCENT = 7.0' bot/authoritative_profit_lock_runtime_patch.py
+          grep -q 'EARLY_PROTECTION_TRIGGER_NET_PERCENT = 7.0' bot/authoritative_profit_lock_runtime_patch.py
+          grep -q 'AUTHORITY_VERSION = "AUTHORITATIVE_7PCT_PEAK70_PROFIT_RATCHET_V10"' bot/authoritative_profit_lock_runtime_patch.py
+      - name: Commit
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add bot/authoritative_profit_lock_runtime_patch.py
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Raise authoritative profit lock trigger to 7% net'
+          git push
