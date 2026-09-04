@@ -237,6 +237,17 @@ def connect_broker(req: BrokerConnectRequest, authorization: str = Header(None))
     _stop_stale_broker_runtime(user["id"])
     _invalidate_test_result(user["id"], broker_name)
 
+    if broker_name == "upstox":
+        # A successful first/manual token save enrolls this account in the
+        # supported daily approval flow. API Key and Secret remain encrypted;
+        # only the short-lived access token is replaced by the notifier.
+        try:
+            from broker.upstox_token_automation import enable_for_saved_upstox
+
+            enable_for_saved_upstox(user["id"], True)
+        except Exception:
+            pass
+
     return {
         "success": True,
         "message": msg + ". Start Bot dobara dabayein.",
@@ -269,6 +280,16 @@ def list_brokers(authorization: str = Header(None)):
     for row in rows:
         item = dict(row)
         item["selected"] = bool(item.get("is_active"))
+        if str(item.get("broker_name") or "").lower() == "upstox":
+            try:
+                from broker.upstox_token_automation import token_status_for_user
+
+                item["daily_auth"] = token_status_for_user(user["id"])
+            except Exception:
+                item["daily_auth"] = {
+                    "configured": True,
+                    "status": "temporarily_unavailable",
+                }
         brokers.append(item)
 
     return {

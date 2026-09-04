@@ -12,6 +12,12 @@ from broker.selected_broker_control import (
     router as broker_selection_router,
     repair_admin_angel_selection_once,
 )
+from broker.upstox_token_automation import (
+    ensure_upstox_token_schema,
+    public_router as upstox_public_router,
+    router as upstox_token_router,
+    schedule_upstox_token_requests,
+)
 from subscription.routes import router as subscription_router
 from admin.routes import router as admin_router
 from bot.routes import router as bot_router, ensure_tables as ensure_bot_tables
@@ -161,7 +167,7 @@ apply_live_gateway_direct_symbol_hotfix()
 # repaired without depending on the mobile build or route monkey-patch order.
 install_live_daily_history_response_patch()
 
-RELEASE_VERSION = "trail-1p5r-lock-1r-v1-20260904"
+RELEASE_VERSION = "upstox-daily-approval-token-v1-20260904"
 
 app = FastAPI(title="Option King AI — SaaS API", description="Multi-user F&O trading bot platform", version="1.0.0", docs_url="/docs", redoc_url="/redoc")
 app.add_middleware(BacktestActiveStrategyMiddleware)
@@ -182,6 +188,9 @@ def startup():
         bot_conn.close()
     ensure_recovery_schema()
     ensure_local_gateway_schema()
+    ensure_upstox_token_schema()
+    token_scheduler_started = schedule_upstox_token_requests()
+    print(f"Upstox daily token scheduler | started={token_scheduler_started} | request=08:30 IST")
     from database import init_bot_status_table
     init_bot_status_table()
     testing_init = initialize_testing_access_and_cleanup()
@@ -221,6 +230,8 @@ app.include_router(auth_router)
 app.include_router(recovery_router)
 app.include_router(broker_router)
 app.include_router(broker_selection_router)
+app.include_router(upstox_token_router)
+app.include_router(upstox_public_router)
 app.include_router(local_gateway_router)
 app.include_router(subscription_router)
 app.include_router(admin_router)

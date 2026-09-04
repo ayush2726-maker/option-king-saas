@@ -62,8 +62,8 @@ class UpstoxBroker(BaseBroker):
             },
             {
                 "key": "api_secret",
-                "label": "Daily Access Token",
-                "hint": "Developer Apps me Generate karke token copy karein",
+                "label": "Access Token (first connection)",
+                "hint": "First time token save karein; baad me daily sirf Upstox approval chahiye",
                 "optional": False,
             },
         ]
@@ -80,8 +80,9 @@ class UpstoxBroker(BaseBroker):
             "app_name": "Option King AI",
             "redirect_url": "https://option-king-saas-production.up.railway.app/upstox/callback",
             "postback_url": "https://option-king-saas-production.up.railway.app/upstox/postback",
+            "notifier_url": "https://option-king-saas-production.up.railway.app/upstox/notifier",
             "token_type": "Standard daily Access Token",
-            "token_expiry_note": "Standard token agle din 3:30 AM tak valid hota hai.",
+            "token_expiry_note": "Token agle din 3:30 AM tak valid hai; Option King request bhejega aur aap sirf Upstox me Approve karenge.",
             "static_ip_note": "Live API orders ke liye registered static IP required ho sakti hai.",
             "steps": [
                 {
@@ -110,20 +111,20 @@ class UpstoxBroker(BaseBroker):
                 },
                 {
                     "step": 5,
-                    "title": "Generate Token",
-                    "description": "Generate dabakar standard daily Access Token copy karein.",
+                    "title": "Notifier URL",
+                    "description": "Notifier Webhook me guide wali /upstox/notifier URL exact save karein.",
                     "url": None,
                 },
                 {
                     "step": 6,
-                    "title": "Fill OKAI",
-                    "description": "API Key, API Secret aur Daily Access Token bharein. TOTP nahi chahiye.",
+                    "title": "First Connection",
+                    "description": "Pehli baar API Key, API Secret aur valid Access Token bharein. TOTP nahi chahiye.",
                     "url": None,
                 },
                 {
                     "step": 7,
-                    "title": "Save and Test",
-                    "description": "Save Credentials aur Test Broker Connection dabayein.",
+                    "title": "Daily Approval",
+                    "description": "Subah Option King request bhejega; Upstox app/WhatsApp me sirf Approve karein. Token automatic save hoga.",
                     "url": None,
                 },
             ],
