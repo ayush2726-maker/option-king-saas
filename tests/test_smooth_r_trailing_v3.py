@@ -74,6 +74,8 @@ def test_gradual_lock_stages_ratchet_without_choking_runner():
     assert before["stage"] == "FOUR_PCT_LOCK_WITH_0_50R_ROOM"
     assert before["sl_price"] == before["four_pct_room_cap_price"]
     assert at_one_and_half["stage"] == "LOCK_70PCT_PEAK_PROFIT_AFTER_1_50R"
+    assert smooth.LOCK_2_R == 1.0
+    assert at_one_and_half["locked_r"] >= 1.0
     assert at_one_and_half["sl_price"] >= 110.5
     assert at_two["stage"] == "LOCK_70PCT_PEAK_PROFIT_AFTER_1_50R"
     assert at_two["sl_price"] >= 114.0

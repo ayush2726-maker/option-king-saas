@@ -23,7 +23,7 @@ except ImportError:  # Direct script execution from local_gateway_agent/.
     import okai_local_gateway as base
 
 
-RISK_ENGINE_VERSION = "1.2.2-RISK-V2-4PCT-FIRST-LOCK"
+RISK_ENGINE_VERSION = "1.2.3-RISK-V2-1P5R-LOCK1R"
 FIRST_LOCK_NET_PERCENT = 4.0
 
 # Conservative Angel One equity-option charge model. Rates are decimals.
@@ -98,6 +98,9 @@ def dynamic_profit_lock(entry_price, initial_sl, peak_ltp, cost_safe_be):
         if peak_r >= 1.2:
             active_sl = max(active_sl, entry + 0.5 * risk)
             stage = "LOCK_0_5R_AFTER_4PCT"
+        if peak_r >= 1.5:
+            active_sl = max(active_sl, entry + risk)
+            stage = "LOCK_1R_AFTER_1_5R"
         if peak_r >= 1.8:
             active_sl = max(active_sl, entry + risk, peak - 0.8 * risk)
             stage = "DYNAMIC_TRAIL_0_8R_AFTER_4PCT"

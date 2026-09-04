@@ -161,7 +161,7 @@ apply_live_gateway_direct_symbol_hotfix()
 # repaired without depending on the mobile build or route monkey-patch order.
 install_live_daily_history_response_patch()
 
-RELEASE_VERSION = "bollinger-shadow-ai-features-v1-20260903"
+RELEASE_VERSION = "trail-1p5r-lock-1r-v1-20260904"
 
 app = FastAPI(title="Option King AI — SaaS API", description="Multi-user F&O trading bot platform", version="1.0.0", docs_url="/docs", redoc_url="/redoc")
 app.add_middleware(BacktestActiveStrategyMiddleware)

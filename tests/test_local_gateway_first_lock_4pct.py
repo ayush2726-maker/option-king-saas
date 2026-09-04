@@ -52,6 +52,7 @@ def test_first_lock_arms_only_after_exact_threshold_is_seen():
     assert result["stage"] in {
         "COST_SAFE_BE_PLUS_4PCT",
         "LOCK_0_5R_AFTER_4PCT",
+        "LOCK_1R_AFTER_1_5R",
         "DYNAMIC_TRAIL_0_8R_AFTER_4PCT",
     }
     assert result["sl_price"] >= first_lock
@@ -68,3 +69,19 @@ def test_old_point_eight_r_shortcut_cannot_arm_trail():
     assert result["first_lock_triggered"] is False
     assert result["stage"] == "INITIAL_ATR_SL"
     assert result["sl_price"] == initial_sl
+
+
+def test_one_and_half_r_locks_one_r_profit():
+    entry = 100.0
+    initial_sl = 90.0
+    risk = entry - initial_sl
+    result = dynamic_profit_lock(
+        entry,
+        initial_sl,
+        entry + 1.5 * risk,
+        104.0,
+    )
+
+    assert result["first_lock_triggered"] is True
+    assert result["stage"] == "LOCK_1R_AFTER_1_5R"
+    assert result["sl_price"] == 110.0

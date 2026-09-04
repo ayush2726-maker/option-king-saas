@@ -6,8 +6,9 @@ stop is capped so the observed peak retains at least 0.50R breathing room, then
 the existing R-based runner stages take over. This keeps room for a winner while
 preventing a meaningful observed profit from returning to an unprotected loss.
 
-From 1.50R onward at least 70% of the observed peak premium profit is retained.
-This caps giveback at 30% without reintroducing an early 2% trigger.
+From 1.50R onward at least 1.00R and 70% of the observed peak premium profit
+are retained. This caps giveback at 30% without reintroducing an early 2%
+trigger.
 
 A latched profit stop is authoritative over danger, structural and CAS exits. PAPER
 stop exits are simulated at the saved stop with at most one tick of adverse
@@ -41,7 +42,7 @@ LOCK_0_R = 0.25
 LOCK_1_TRIGGER_R = 1.00
 LOCK_1_R = 0.45
 LOCK_2_TRIGGER_R = 1.50
-LOCK_2_R = 0.80
+LOCK_2_R = 1.00
 PEAK_PROFIT_RETAIN_TRIGGER_R = 1.50
 PEAK_PROFIT_RETAIN_PERCENT = 70.0
 RUNNER_TRIGGER_R = 2.00
@@ -53,7 +54,7 @@ SMOOTH_TRAIL_DISTANCE_R = 0.55
 TIGHT_TRAIL_TRIGGER_R = 4.00
 TIGHT_TRAIL_MIN_LOCK_R = 3.00
 TIGHT_TRAIL_DISTANCE_R = 0.45
-AUTHORITY_VERSION = "AUTHORITATIVE_7PCT_PEAK70_PROFIT_RATCHET_V10"
+AUTHORITY_VERSION = "AUTHORITATIVE_7PCT_PEAK70_1P5R_LOCK1R_V11"
 PAPER_FILL_VERSION = "PAPER_STOP_ONE_TICK_FILL_V1"
 
 
@@ -365,7 +366,10 @@ def _authoritative_trail(trade, current_price: float) -> Dict[str, Any]:
             "four_pct_min_peak_room_r": FOUR_PCT_MIN_PEAK_ROOM_R,
             "lock_0_25r_trigger_r": LOCK_0_TRIGGER_R,
             "lock_0_45r_trigger_r": LOCK_1_TRIGGER_R,
+            # Keep the old key as a compatibility alias for older clients.
             "lock_0_80r_trigger_r": LOCK_2_TRIGGER_R,
+            "lock_1_00r_trigger_r": LOCK_2_TRIGGER_R,
+            "lock_1_00r_minimum_r": LOCK_2_R,
             "peak_profit_retain_trigger_r": PEAK_PROFIT_RETAIN_TRIGGER_R,
             "peak_profit_retain_percent": PEAK_PROFIT_RETAIN_PERCENT,
             "runner_trigger_r": RUNNER_TRIGGER_R,

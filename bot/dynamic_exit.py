@@ -212,6 +212,11 @@ def update_option_profit_lock(
             stage = "LOCK_0_5R_AFTER_TRUE_BE"
             locked_r = (new_sl - entry) / risk
 
+        if peak_r >= 1.5:
+            new_sl = max(new_sl, entry + risk)
+            stage = "LOCK_1R_AFTER_1_5R_TRUE_BE"
+            locked_r = (new_sl - entry) / risk
+
         if peak_r >= 1.8:
             new_sl = max(
                 new_sl,
