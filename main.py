@@ -5,6 +5,7 @@ from auth.routes import router as auth_router
 from auth.recovery_routes import router as recovery_router, ensure_recovery_schema
 from auth.registration_email_middleware import SafeRegistrationEmailVerificationMiddleware
 from local_gateway.routes import router as local_gateway_router
+from local_gateway.provisioning_routes import router as gateway_provisioning_router
 from local_gateway.service import ensure_local_gateway_schema
 from broker.routes import router as broker_router
 from broker.selection import normalize_all_selected_brokers
@@ -156,7 +157,7 @@ install_live_gateway_display_sync_patch()
 apply_live_gateway_direct_symbol_hotfix()
 install_live_daily_history_response_patch()
 
-RELEASE_VERSION = "split-trial-enforced-v2-20260905"
+RELEASE_VERSION = "aws-auto-gateway-provisioning-v1-20260905"
 
 app = FastAPI(title="Option King AI — SaaS API", description="Multi-user F&O trading bot platform", version="1.0.0", docs_url="/docs", redoc_url="/redoc")
 app.add_middleware(BacktestActiveStrategyMiddleware)
@@ -250,6 +251,7 @@ app.include_router(broker_selection_router)
 app.include_router(upstox_token_router)
 app.include_router(upstox_public_router)
 app.include_router(local_gateway_router)
+app.include_router(gateway_provisioning_router)
 app.include_router(subscription_router)
 app.include_router(razorpay_subscription_router)
 app.include_router(entitlement_router)
