@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 
 from auth.routes import get_current_user
 from database import get_db
@@ -15,11 +15,25 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _manager_token(value):
-    expected = str(os.getenv("OKAI_PROVISIONER_TOKEN") or "").strip()
+def _client_ipv4(request: Request):
+    real = str(request.headers.get("x-real-ip") or "").strip()
+    if real:
+        return real
+    forwarded = str(request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    return str(request.client.host if request.client else "").strip()
+
+
+def _manager_auth(request: Request, value):
+    expected_token = str(os.getenv("OKAI_PROVISIONER_TOKEN") or "").strip()
     supplied = str(value or "").strip()
-    if not expected or supplied != expected:
-        raise HTTPException(status_code=401, detail="Invalid provisioner token")
+    if expected_token and supplied and supplied == expected_token:
+        return
+    expected_ip = str(os.getenv("OKAI_PROVISIONER_IP") or "").strip()
+    if expected_ip and _client_ipv4(request) == expected_ip:
+        return
+    raise HTTPException(status_code=401, detail="Invalid provisioner identity")
 
 
 def ensure_schema():
@@ -91,8 +105,8 @@ def provisioning_status(authorization: str = Header(None)):
 
 
 @router.get("/lease")
-def lease_request(x_provisioner_token: str = Header(None)):
-    _manager_token(x_provisioner_token)
+def lease_request(request: Request, x_provisioner_token: str = Header(None)):
+    _manager_auth(request, x_provisioner_token)
     ensure_schema()
     conn = get_db()
     try:
@@ -119,8 +133,8 @@ def lease_request(x_provisioner_token: str = Header(None)):
 
 
 @router.post("/allocate")
-def allocate_callback(body: dict, x_provisioner_token: str = Header(None)):
-    _manager_token(x_provisioner_token)
+def allocate_callback(request: Request, body: dict, x_provisioner_token: str = Header(None)):
+    _manager_auth(request, x_provisioner_token)
     ensure_schema()
     user_id = int(body.get("user_id") or 0)
     static_ip = str(body.get("static_ip") or "").strip()
@@ -145,8 +159,8 @@ def allocate_callback(body: dict, x_provisioner_token: str = Header(None)):
 
 
 @router.post("/ready")
-def ready_callback(body: dict, x_provisioner_token: str = Header(None)):
-    _manager_token(x_provisioner_token)
+def ready_callback(request: Request, body: dict, x_provisioner_token: str = Header(None)):
+    _manager_auth(request, x_provisioner_token)
     ensure_schema()
     user_id = int(body.get("user_id") or 0)
     state = str(body.get("state") or "ready").strip().lower()
