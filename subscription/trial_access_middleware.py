@@ -9,17 +9,15 @@ from subscription.entitlements import entitlement_snapshot
 
 
 class TrialAccessMiddleware(BaseHTTPMiddleware):
-    """Server-side access guard for starting PAPER/LIVE bot sessions.
+    """Canonical split-trial access guard and legacy-status compatibility.
 
-    LIVE access expires after the 7-day trial. PAPER remains available for the
-    30-day trial. Paid/admin users retain both. This guard sits at the start
-    boundary so an old mobile build cannot bypass the entitlement UI.
+    LIVE access expires after 7 days. PAPER remains available for 30 days.
+    Older routes still inspect users.subscription_status, so while Paper trial
+    is valid we keep the overall account status as ``trial`` even after the
+    Live portion has expired. Entitlements remain the authority for Live/Paper.
     """
 
     async def dispatch(self, request, call_next):
-        if request.method.upper() != "POST" or request.url.path != "/bot/start":
-            return await call_next(request)
-
         auth = request.headers.get("authorization", "")
         if not auth.startswith("Bearer "):
             return await call_next(request)
@@ -37,6 +35,26 @@ class TrialAccessMiddleware(BaseHTTPMiddleware):
                 return await call_next(request)
             user = dict(row)
             access = entitlement_snapshot(user)
+
+            # Compatibility for legacy broker/account routes: the overall free
+            # trial is still active while Paper access remains. Do not touch
+            # paid/admin users and do not resurrect a cleared/expired trial.
+            status = str(user.get("subscription_status") or "").lower()
+            if (
+                not bool(user.get("is_admin"))
+                and status != "active"
+                and bool(access.get("paper_allowed"))
+                and status != "trial"
+            ):
+                conn.execute(
+                    "UPDATE users SET subscription_status='trial' WHERE id=?",
+                    (user_id,),
+                )
+                conn.commit()
+                user["subscription_status"] = "trial"
+
+            if request.method.upper() != "POST" or request.url.path != "/bot/start":
+                return await call_next(request)
 
             mode = "paper"
             try:
