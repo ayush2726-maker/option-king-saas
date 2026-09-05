@@ -1,0 +1,36 @@
+name: Fix Paytm Fixed Amount
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/fix_paytm_fixed_amount.py
+      - .github/workflows/fix-paytm-fixed-amount.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply patch
+        run: python scripts/fix_paytm_fixed_amount.py
+      - name: Commit patch
+        run: |
+          if git diff --quiet -- subscription/paytm_routes.py; then
+            echo "No changes needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add subscription/paytm_routes.py
+          git commit -m "Enforce fixed Paytm subscription amount"
+          git push
