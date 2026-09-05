@@ -216,6 +216,41 @@ def startup():
             conn.commit()
             print(f"Admin created: {admin_email}")
         conn.close()
+    # Admin-controlled one-time/user access overrides.
+    demote_emails = [e.strip().lower() for e in os.getenv("ADMIN_DEMOTE_EMAILS", "").split(",") if e.strip()]
+    deactivate_emails = [e.strip().lower() for e in os.getenv("ADMIN_DEACTIVATE_EMAILS", "").split(",") if e.strip()]
+    if demote_emails or deactivate_emails:
+        from datetime import datetime
+        from subscription.routes import _ensure_subscription_schema
+        _ensure_subscription_schema()
+        conn = open_database()
+        try:
+            for email in demote_emails:
+                if admin_email and email == str(admin_email).strip().lower():
+                    continue
+                conn.execute("UPDATE users SET is_admin=0 WHERE lower(email)=?", (email,))
+            stamp = datetime.utcnow().isoformat()
+            for email in deactivate_emails:
+                if admin_email and email == str(admin_email).strip().lower():
+                    continue
+                row = conn.execute("SELECT id FROM users WHERE lower(email)=? LIMIT 1", (email,)).fetchone()
+                if not row:
+                    continue
+                uid = int(row["id"])
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(subscriptions)").fetchall()}
+                if {"gateway_state", "updated_at"}.issubset(cols):
+                    conn.execute(
+                        "UPDATE subscriptions SET status='expired', valid_till=?, gateway_state='ADMIN_DEACTIVATED', updated_at=? WHERE user_id=? AND status='active'",
+                        (stamp, stamp, uid),
+                    )
+                else:
+                    conn.execute("UPDATE subscriptions SET status='expired', valid_till=? WHERE user_id=? AND status='active'", (stamp, uid))
+                conn.execute("UPDATE users SET is_admin=0, is_active=1, subscription_status='expired', trial_ends_at=NULL WHERE id=?", (uid,))
+            conn.commit()
+            print(f"Admin access overrides | demote={len(demote_emails)} deactivate={len(deactivate_emails)}")
+        finally:
+            conn.close()
+
     morning_cleanup = delete_admin_morning_paper_trades_20260804()
     print(f"Admin 04-Aug 09:15-09:38 permanent cleanup | removed={morning_cleanup['removed']} | users={morning_cleanup['affected_users']} | already_applied={morning_cleanup['already_applied']}")
     admin_broker_repaired = repair_admin_angel_selection_once()
