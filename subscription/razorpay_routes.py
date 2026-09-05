@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta
 import io
 import os
-from urllib.parse import urlencode
+from html import escape
+from urllib.parse import quote, urlencode
 
 import qrcode
 import requests
@@ -133,7 +134,7 @@ def manual_payment_details(authorization: str = Header(None)):
         "upi_uri": _manual_upi_uri() if configured else "",
         "qr_url": "https://option-king-saas-production.up.railway.app/subscription/razorpay/manual/qr" if configured else "",
         "user_reference": str(user["email"] or user["id"]),
-        "instructions": "Pay ₹5,000 using this UPI or QR. After payment, contact/admin confirmation is required. Account activation is manual for 30 days.",
+        "instructions": "Pay ₹5,000 using this UPI or QR. After payment, admin confirmation is required. Account activation is manual for 30 days.",
     }
 
 
@@ -148,6 +149,43 @@ def manual_payment_qr():
     return Response(content=output.getvalue(), media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
+@router.get("/manual-page", response_class=HTMLResponse)
+def manual_payment_page(ref: str = ""):
+    upi_id = _manual_upi_id()
+    upi_name = _manual_upi_name()
+    upi_uri = _manual_upi_uri()
+    configured = bool(upi_id)
+    safe_ref = escape(str(ref or ""))
+    if configured:
+        pay_button = f"<a href='{escape(upi_uri)}' style='display:block;background:#00d4a0;color:#06111a;text-decoration:none;font-weight:800;padding:14px 18px;border-radius:12px;margin-top:16px'>Open UPI App</a>"
+        qr = "<img src='/subscription/razorpay/manual/qr' alt='UPI QR' style='width:230px;height:230px;background:white;padding:10px;border-radius:16px;margin:16px auto;display:block'/>"
+        upi_html = f"<div style='font-size:14px;color:#aebbd0'>UPI ID</div><div style='font-size:20px;font-weight:800;word-break:break-all'>{escape(upi_id)}</div>"
+    else:
+        pay_button = ""
+        qr = ""
+        upi_html = "<div style='color:#ff6b7d;font-weight:700'>Payment UPI is not configured yet.</div>"
+    ref_html = f"<div style='margin-top:10px;color:#7f8da3;font-size:12px'>Reference: {safe_ref}</div>" if safe_ref else ""
+    return HTMLResponse(f"""
+<!doctype html>
+<html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>Option King AI Payment</title></head>
+<body style='margin:0;background:#070b12;color:#eef4ff;font-family:Arial,sans-serif;padding:20px'>
+  <div style='max-width:420px;margin:24px auto;background:#111827;border:1px solid #273449;border-radius:20px;padding:22px;box-shadow:0 16px 40px rgba(0,0,0,.35)'>
+    <div style='font-size:13px;color:#f5c842;font-weight:800'>OPTION KING AI</div>
+    <h2 style='margin:8px 0 4px'>30-Day Subscription</h2>
+    <div style='font-size:32px;font-weight:900;color:#00d4a0'>₹5,000</div>
+    <div style='color:#9aa8bd;margin-top:4px'>Manual UPI / QR payment</div>
+    {qr}
+    {upi_html}
+    {pay_button}
+    {ref_html}
+    <div style='margin-top:20px;padding:14px;border-radius:12px;background:#0b1220;border:1px solid #243248;color:#c5d1e2;font-size:13px;line-height:1.55'>
+      Payment karne ke baad account automatically activate nahi hoga. Admin payment confirm karke account ko 30 days ke liye manually activate karega.
+    </div>
+  </div>
+</body></html>
+""")
+
+
 @router.get("/config")
 def config(authorization: str = Header(None)):
     get_current_user(authorization)
@@ -157,48 +195,20 @@ def config(authorization: str = Header(None)):
 @router.post("/create-link")
 def create_link(body: dict = None, authorization: str = Header(None)):
     user = get_current_user(authorization)
-    _ensure_subscription_schema()
-    callback_base = str(os.getenv("RAZORPAY_CALLBACK_URL", "https://option-king-saas-production.up.railway.app/subscription/razorpay/return")).strip()
-    payload = {
-        "amount": int(PLAN["price"]),
-        "currency": "INR",
-        "accept_partial": False,
-        "description": "Option King AI - 30 Day Subscription",
-        "reference_id": f"OKAI-{int(user['id'])}-{int(datetime.utcnow().timestamp())}",
-        "customer": {
-            "name": str(user["name"] or "Option King User")[:64],
-            "email": str(user["email"] or "")[:100],
-        },
-        "notify": {"sms": False, "email": False},
-        "reminder_enable": False,
-        "notes": {"user_id": str(user["id"]), "plan": PLAN_ID},
-        "callback_url": callback_base,
-        "callback_method": "get",
+    if not _manual_upi_id():
+        raise HTTPException(status_code=503, detail="Manual UPI ID is not configured yet")
+    reference = str(user["email"] or user["id"])
+    checkout_url = "https://option-king-saas-production.up.railway.app/subscription/razorpay/manual-page?ref=" + quote(reference, safe="")
+    return {
+        "success": True,
+        "manual_payment": True,
+        "automatic_activation": False,
+        "checkout_url": checkout_url,
+        "amount_rupees": 5000,
+        "upi_supported": True,
+        "qr_supported": True,
+        "message": "Manual UPI/QR payment page created. Admin activation required after payment.",
     }
-    phone = str(user["phone"] if "phone" in user.keys() else "").strip()
-    digits = "".join(ch for ch in phone if ch.isdigit())
-    if len(digits) >= 10:
-        payload["customer"]["contact"] = digits[-10:]
-    data = _api("POST", "/payment_links", json=payload)
-    link_id = str(data.get("id") or "")
-    short_url = str(data.get("short_url") or "")
-    if not link_id or not short_url:
-        raise HTTPException(status_code=502, detail="Payment link was not created")
-    now = datetime.utcnow().isoformat()
-    conn = get_db()
-    try:
-        conn.execute(
-            """
-            INSERT INTO subscriptions(user_id, plan, amount, status, payment_gateway,
-              merchant_order_id, gateway_order_id, gateway_state, gateway_payload, checkout_url, updated_at)
-            VALUES (?, ?, ?, 'pending', 'razorpay_payment_link', ?, ?, 'created', ?, ?, ?)
-            """,
-            (int(user["id"]), PLAN_ID, int(PLAN["amount_rupees"]), payload["reference_id"], link_id, str(data)[:12000], short_url, now),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return {"success": True, "checkout_url": short_url, "payment_link_id": link_id, "amount_rupees": PLAN["amount_rupees"], "upi_supported": True, "qr_supported": True}
 
 
 @router.get("/status/{payment_link_id}")
@@ -213,17 +223,4 @@ def status(payment_link_id: str, authorization: str = Header(None)):
 
 @router.get("/return", response_class=HTMLResponse)
 def payment_return(razorpay_payment_link_id: str = "", razorpay_payment_link_status: str = ""):
-    link_id = str(razorpay_payment_link_id or "")
-    message = "Payment received. Return to Option King AI and tap Refresh Activation Status."
-    if link_id.startswith("plink_"):
-        try:
-            data = _api("GET", f"/payment_links/{link_id}")
-            notes = data.get("notes") or {}
-            user_id = int(notes.get("user_id") or 0)
-            if user_id:
-                result = _activate_if_paid(user_id, link_id, data)
-                if result.get("active"):
-                    message = "Payment verified successfully. Your Option King AI account is active for 30 days."
-        except Exception:
-            pass
-    return HTMLResponse(f"<html><body style='font-family:Arial;background:#07101b;color:#fff;padding:40px'><h2>Option King AI</h2><p>{message}</p><p>You may close this page.</p></body></html>")
+    return HTMLResponse("<html><body style='font-family:Arial;background:#07101b;color:#fff;padding:40px'><h2>Option King AI</h2><p>Automatic payment activation is disabled. Please use the manual UPI/QR payment page and contact admin after payment.</p></body></html>")
