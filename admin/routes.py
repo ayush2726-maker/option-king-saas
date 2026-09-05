@@ -135,14 +135,68 @@ def suspend_user(user_id: int, authorization: str = Header(None)):
 
 @router.post("/users/{user_id}/activate")
 def activate_user(user_id: int, authorization: str = Header(None)):
-    require_admin(authorization)
+    admin_user = require_admin(authorization)
+    from datetime import datetime, timedelta
+    from subscription.routes import _ensure_subscription_schema
 
+    _ensure_subscription_schema()
     conn = get_db()
-    conn.execute("UPDATE users SET is_active=1 WHERE id=?", (user_id,))
-    conn.commit()
-    conn.close()
+    try:
+        target = conn.execute(
+            "SELECT id, name, email FROM users WHERE id=? LIMIT 1", (user_id,)
+        ).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
 
-    return {"success": True, "message": f"User {user_id} activated"}
+        now = datetime.utcnow()
+        base_date = now
+        current = conn.execute(
+            """
+            SELECT valid_till FROM subscriptions
+            WHERE user_id=? AND status='active' AND valid_till IS NOT NULL
+            ORDER BY datetime(valid_till) DESC LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        if current and current["valid_till"]:
+            try:
+                current_till = datetime.fromisoformat(current["valid_till"])
+                if current_till > now:
+                    base_date = current_till
+            except Exception:
+                pass
+
+        valid_till = base_date + timedelta(days=30)
+        stamp = now.isoformat()
+        conn.execute(
+            """
+            INSERT INTO subscriptions(
+                user_id, plan, amount, status, payment_gateway,
+                gateway_state, valid_from, valid_till, activated_at, updated_at
+            ) VALUES (?, 'admin_manual_30d', 0, 'active', 'admin',
+                      'ADMIN_GRANTED', ?, ?, ?, ?)
+            """,
+            (user_id, stamp, valid_till.isoformat(), stamp, stamp),
+        )
+        conn.execute(
+            """
+            UPDATE users
+            SET is_active=1, subscription_status='active', trial_ends_at=NULL
+            WHERE id=?
+            """,
+            (user_id,),
+        )
+        conn.commit()
+        return {
+            "success": True,
+            "message": f"{target['name'] or target['email']} activated for 30 days",
+            "user_id": user_id,
+            "valid_till": valid_till.isoformat(),
+            "granted_by_admin_id": int(admin_user["id"]),
+            "manual_activation": True,
+        }
+    finally:
+        conn.close()
 
 
 @router.post("/users/{user_id}/extend-trial")

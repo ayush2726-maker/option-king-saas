@@ -334,7 +334,7 @@ async function loadUsers() {
         <td><span class="badge badge-${u.subscription_status}">${u.subscription_status}</span></td>
         <td>${u.trial_ends_at?.split('T')[0] || '-'}</td>
         <td style="display:flex;gap:6px">
-          <button class="btn-sm btn-green" onclick="userAction(${u.id},'activate')">Activate</button>
+          <button class="btn-sm btn-green" onclick="userAction(${u.id},'activate')">Activate 30 Days</button>
           <button class="btn-sm btn-red" onclick="userAction(${u.id},'suspend')">Suspend</button>
           <button class="btn-sm btn-orange" onclick="openExtend(${u.id})">+Trial</button>
           ${u.is_admin
@@ -360,8 +360,19 @@ async function makeAdmin(id) {
 }
 
 async function userAction(id, action) {
+  const user = loadedUsers.find(item => Number(item.id) === Number(id));
+  const label = user ? `${user.name || 'User'} (${user.email || `#${id}`})` : `User #${id}`;
+  if (action === 'activate') {
+    if (!confirm(`Activate ${label} for 30 days?\n\nThis is a manual admin activation. No payment will be recorded as revenue.`)) return;
+  }
   const data = await api('POST', `/admin/users/${id}/${action}`);
-  if (data.success) { loadUsers(); }
+  if (data.success) {
+    if (action === 'activate') alert(data.message || `${label} activated for 30 days`);
+    loadUsers();
+    loadDashboard();
+  } else {
+    alert(data?.detail || data?.message || 'Action failed');
+  }
 }
 
 function openExtend(id) {

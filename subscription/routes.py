@@ -20,13 +20,13 @@ from auth.routes import get_current_user
 
 router = APIRouter(prefix="/subscription", tags=["Subscription"])
 
-PLAN_ID = "monthly_1999"
+PLAN_ID = "monthly_5000"
 PLAN = {
     "id": PLAN_ID,
     "name": "OKAI Monthly Plan",
-    "price": 199900,
-    "amount_rupees": 1999,
-    "display_price": "₹1,999",
+    "price": 500000,
+    "amount_rupees": 5000,
+    "display_price": "₹5,000",
     "duration_days": 30,
     "renewal": "manual",
     "features": [
@@ -465,7 +465,7 @@ def phonepe_create_order(body: dict = None, authorization: str = Header(None)):
             "udf1": str(user["id"]),
             "udf2": PLAN_ID,
             "udf3": str(user["email"] or "")[:200],
-            "udf11": "OKAI_MONTHLY_1999",
+            "udf11": "OKAI_MONTHLY_5000",
         },
     }
     phone = _normalise_phone(user["phone"] if "phone" in user.keys() else "")
