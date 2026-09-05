@@ -1,0 +1,39 @@
+name: Apply Razorpay Subscription Router
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/apply-razorpay-subscription-router.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Apply patch
+        run: python scripts/patch_razorpay_router.py
+      - name: Validate
+        run: |
+          python -m py_compile main.py subscription/razorpay_routes.py
+          grep -q 'razorpay_subscription_router' main.py
+      - name: Commit patch
+        run: |
+          rm -f scripts/patch_razorpay_router.py
+          rm -f .github/workflows/apply-razorpay-subscription-router.yml
+          git config user.name "okai-payment-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Enable verified Razorpay UPI subscription flow"
+          git push origin HEAD:main
