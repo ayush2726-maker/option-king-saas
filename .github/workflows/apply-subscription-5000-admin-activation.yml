@@ -1,0 +1,54 @@
+name: Apply Subscription 5000 Admin Activation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/apply-subscription-5000-admin-activation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Apply patch
+        run: python scripts/apply_subscription_5000_admin_activation.py
+
+      - name: Validate
+        run: |
+          python -m py_compile admin/routes.py subscription/routes.py
+          python - <<'PY'
+          from subscription.routes import PLAN, PLAN_ID
+          assert PLAN_ID == 'monthly_5000'
+          assert PLAN['price'] == 500000
+          assert PLAN['amount_rupees'] == 5000
+          assert PLAN['display_price'] == '₹5,000'
+          panel = open('admin/panel.html', encoding='utf-8').read()
+          assert 'Activate 30 Days' in panel
+          routes = open('admin/routes.py', encoding='utf-8').read()
+          assert 'admin_manual_30d' in routes
+          print('validation OK')
+          PY
+
+      - name: Commit applied patch
+        run: |
+          rm -f scripts/apply_subscription_5000_admin_activation.py
+          rm -f .github/workflows/apply-subscription-5000-admin-activation.yml
+          git config user.name "okai-admin-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Set ₹5000 monthly plan and admin 30-day activation"
+          git push origin HEAD:main
