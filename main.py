@@ -72,7 +72,7 @@ from bot.expectancy_engine_v1_patch import apply_expectancy_engine_v1_patch
 from bot.broker_session_reset_patch import apply_broker_session_reset_patch, recover_persisted_running_user_engines
 from bot.signal_history_response_middleware import StrictSignalHistoryMiddleware
 from bot.mode_aware_dashboard_middleware import ModeAwareDashboardMiddleware
-from bot.eod_safety_testing_access_patch import TestingFullAccessAndFreshDataMiddleware, apply_eod_entry_guard_patch, initialize_testing_access_and_cleanup
+from bot.eod_safety_testing_access_patch import apply_eod_entry_guard_patch, cleanup_invalid_eod_paper_entries, cleanup_requested_admin_trade_dates
 from bot.active_strategy_score_patch import apply_active_strategy_score_patch
 from bot.decision_score_display_consistency_patch import apply_decision_score_display_consistency_patch
 from bot.canonical_cooldown_dedup_patch import apply_canonical_cooldown_dedup_patch
@@ -175,7 +175,6 @@ app.add_middleware(BacktestActiveStrategyMiddleware)
 app.add_middleware(StrictSignalHistoryMiddleware)
 app.add_middleware(ModeAwareDashboardMiddleware)
 app.add_middleware(SafeRegistrationEmailVerificationMiddleware)
-app.add_middleware(TestingFullAccessAndFreshDataMiddleware)
 app.add_middleware(TradeLiveRuntimeRecoveryMiddleware)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -194,8 +193,9 @@ def startup():
     print(f"Upstox daily token scheduler | started={token_scheduler_started} | request=08:30 IST")
     from database import init_bot_status_table
     init_bot_status_table()
-    testing_init = initialize_testing_access_and_cleanup()
-    print(f"Testing access/EOD cleanup | users={testing_init['testing_access_users_updated']} | removed={testing_init['invalid_eod_paper_trades_removed']}")
+    requested_cleanup = cleanup_requested_admin_trade_dates()
+    invalid_eod_removed = cleanup_invalid_eod_paper_entries()
+    print(f"Subscription authority enabled | testing_access_users_updated=0 | invalid_eod_removed={invalid_eod_removed} | requested_cleanup_removed={requested_cleanup['removed']}")
     repaired = normalize_all_selected_brokers()
     if repaired: print(f"Broker selection normalized for {repaired} user(s)")
     migrate_default_strategy_profiles()
