@@ -1,9 +1,12 @@
 from datetime import datetime, timedelta
+import io
 import os
+from urllib.parse import urlencode
 
+import qrcode
 import requests
 from fastapi import APIRouter, Header, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 
 from auth.routes import get_current_user
 from database import get_db
@@ -19,6 +22,27 @@ def _creds():
 def _configured():
     key, secret = _creds()
     return bool(key and secret)
+
+
+def _manual_upi_id():
+    return str(os.getenv("MANUAL_UPI_ID", "")).strip()
+
+
+def _manual_upi_name():
+    return str(os.getenv("MANUAL_UPI_NAME", "Option King AI")).strip() or "Option King AI"
+
+
+def _manual_upi_uri():
+    upi_id = _manual_upi_id()
+    if not upi_id:
+        return ""
+    return "upi://pay?" + urlencode({
+        "pa": upi_id,
+        "pn": _manual_upi_name(),
+        "am": "5000.00",
+        "cu": "INR",
+        "tn": "Option King AI 30 day subscription",
+    })
 
 
 def _api(method, path, **kwargs):
@@ -89,6 +113,39 @@ def _activate_if_paid(user_id, payment_link_id, payload):
         return {"active": True, "valid_till": valid_till.isoformat()}
     finally:
         conn.close()
+
+
+@router.get("/manual")
+def manual_payment_details(authorization: str = Header(None)):
+    user = get_current_user(authorization)
+    upi_id = _manual_upi_id()
+    configured = bool(upi_id)
+    return {
+        "success": True,
+        "configured": configured,
+        "mode": "manual",
+        "automatic_activation": False,
+        "amount_rupees": 5000,
+        "display_amount": "₹5,000",
+        "duration_days": 30,
+        "upi_id": upi_id if configured else "",
+        "upi_name": _manual_upi_name(),
+        "upi_uri": _manual_upi_uri() if configured else "",
+        "qr_url": "https://option-king-saas-production.up.railway.app/subscription/razorpay/manual/qr" if configured else "",
+        "user_reference": str(user["email"] or user["id"]),
+        "instructions": "Pay ₹5,000 using this UPI or QR. After payment, contact/admin confirmation is required. Account activation is manual for 30 days.",
+    }
+
+
+@router.get("/manual/qr")
+def manual_payment_qr():
+    uri = _manual_upi_uri()
+    if not uri:
+        raise HTTPException(status_code=503, detail="Manual UPI ID is not configured")
+    image = qrcode.make(uri)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return Response(content=output.getvalue(), media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @router.get("/config")
