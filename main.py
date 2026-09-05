@@ -20,6 +20,7 @@ from broker.upstox_token_automation import (
 )
 from subscription.routes import router as subscription_router
 from subscription.razorpay_routes import router as razorpay_subscription_router
+from subscription.entitlement_routes import router as entitlement_router
 from admin.routes import router as admin_router
 from bot.routes import router as bot_router, ensure_tables as ensure_bot_tables
 from bot.trade_live_routes import router as trade_live_router
@@ -30,8 +31,6 @@ from strategy.routes import router as strategy_router
 from strategy.profile_routes import router as strategy_profile_router
 from bot.market_routes import router as market_router
 from bot.sector_rotation_routes import router as sector_rotation_router
-# Install adaptive feature extensions before ai_routes imports advanced_intelligence_v2,
-# because that module binds feature_vector at import time.
 from bot.bollinger_shadow_features_patch import apply_bollinger_shadow_features_patch
 apply_bollinger_shadow_features_patch()
 from bot.ai_routes import router as ai_router
@@ -91,9 +90,7 @@ from bot.final_mtf_misaligned_release_patch import apply_final_mtf_misaligned_re
 from bot.final_mtf_release_impact_tracking_patch import apply_final_mtf_release_impact_tracking_patch
 from bot.authoritative_profit_lock_runtime_patch import apply_authoritative_profit_lock_runtime_patch
 from bot.full_sl_velocity_circuit_patch import apply_full_sl_velocity_circuit_patch
-from bot.normal_entry_cutoff_1515_runtime_patch import (
-    apply_normal_entry_cutoff_1515_runtime_patch,
-)
+from bot.normal_entry_cutoff_1515_runtime_patch import apply_normal_entry_cutoff_1515_runtime_patch
 from bot.admin_morning_trade_cleanup_20260804 import delete_admin_morning_paper_trades_20260804
 from bot.live_gateway_display_sync_v1 import install_live_gateway_display_sync_patch
 from bot.live_gateway_direct_symbol_hotfix import apply_live_gateway_direct_symbol_hotfix
@@ -152,23 +149,13 @@ apply_expiry_day_risk_mode_patch()
 apply_final_mtf_misaligned_release_patch()
 apply_final_mtf_release_impact_tracking_patch()
 apply_authoritative_profit_lock_runtime_patch()
-# These are the final normal-AUTO order-boundary guards.  Keep them after all
-# legacy wrappers so replay, Paper and Live cannot restore permissive clocks or
-# bypass the count-based loss circuit. Hero Zero uses a separate runtime.
 apply_full_sl_velocity_circuit_patch()
 apply_normal_entry_cutoff_1515_runtime_patch()
-# Install after both routers are imported and after final runtime wrappers so the
-# gateway POSITION_SYNC event and live-trade response share one broker truth.
 install_live_gateway_display_sync_patch()
-# Prefer the self-describing gateway symbol/order identity over independent
-# local/cloud trade IDs, so Angel LTP heartbeats always update the right card.
 apply_live_gateway_direct_symbol_hotfix()
-# Daily Trade History uses the legacy user-panel response path even for LIVE
-# trades. Patch that response boundary directly so quantity/cost aliases are
-# repaired without depending on the mobile build or route monkey-patch order.
 install_live_daily_history_response_patch()
 
-RELEASE_VERSION = "upstox-daily-approval-token-v1-20260904"
+RELEASE_VERSION = "split-trial-entitlements-v1-20260905"
 
 app = FastAPI(title="Option King AI — SaaS API", description="Multi-user F&O trading bot platform", version="1.0.0", docs_url="/docs", redoc_url="/redoc")
 app.add_middleware(BacktestActiveStrategyMiddleware)
@@ -216,7 +203,6 @@ def startup():
             conn.commit()
             print(f"Admin created: {admin_email}")
         conn.close()
-    # Admin-controlled one-time/user access overrides.
     demote_emails = [e.strip().lower() for e in os.getenv("ADMIN_DEMOTE_EMAILS", "").split(",") if e.strip()]
     deactivate_emails = [e.strip().lower() for e in os.getenv("ADMIN_DEACTIVATE_EMAILS", "").split(",") if e.strip()]
     if demote_emails or deactivate_emails:
@@ -226,23 +212,17 @@ def startup():
         conn = open_database()
         try:
             for email in demote_emails:
-                if admin_email and email == str(admin_email).strip().lower():
-                    continue
+                if admin_email and email == str(admin_email).strip().lower(): continue
                 conn.execute("UPDATE users SET is_admin=0 WHERE lower(email)=?", (email,))
             stamp = datetime.utcnow().isoformat()
             for email in deactivate_emails:
-                if admin_email and email == str(admin_email).strip().lower():
-                    continue
+                if admin_email and email == str(admin_email).strip().lower(): continue
                 row = conn.execute("SELECT id FROM users WHERE lower(email)=? LIMIT 1", (email,)).fetchone()
-                if not row:
-                    continue
+                if not row: continue
                 uid = int(row["id"])
                 cols = {r[1] for r in conn.execute("PRAGMA table_info(subscriptions)").fetchall()}
                 if {"gateway_state", "updated_at"}.issubset(cols):
-                    conn.execute(
-                        "UPDATE subscriptions SET status='expired', valid_till=?, gateway_state='ADMIN_DEACTIVATED', updated_at=? WHERE user_id=? AND status='active'",
-                        (stamp, stamp, uid),
-                    )
+                    conn.execute("UPDATE subscriptions SET status='expired', valid_till=?, gateway_state='ADMIN_DEACTIVATED', updated_at=? WHERE user_id=? AND status='active'", (stamp, stamp, uid))
                 else:
                     conn.execute("UPDATE subscriptions SET status='expired', valid_till=? WHERE user_id=? AND status='active'", (stamp, uid))
                 conn.execute("UPDATE users SET is_admin=0, is_active=1, subscription_status='expired', trial_ends_at=NULL WHERE id=?", (uid,))
@@ -250,7 +230,6 @@ def startup():
             print(f"Admin access overrides | demote={len(demote_emails)} deactivate={len(deactivate_emails)}")
         finally:
             conn.close()
-
     morning_cleanup = delete_admin_morning_paper_trades_20260804()
     print(f"Admin 04-Aug 09:15-09:38 permanent cleanup | removed={morning_cleanup['removed']} | users={morning_cleanup['affected_users']} | already_applied={morning_cleanup['already_applied']}")
     admin_broker_repaired = repair_admin_angel_selection_once()
@@ -271,6 +250,7 @@ app.include_router(upstox_public_router)
 app.include_router(local_gateway_router)
 app.include_router(subscription_router)
 app.include_router(razorpay_subscription_router)
+app.include_router(entitlement_router)
 app.include_router(admin_router)
 app.include_router(bot_router)
 app.include_router(trade_live_router)
