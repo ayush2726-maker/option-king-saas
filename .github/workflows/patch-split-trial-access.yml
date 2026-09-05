@@ -1,0 +1,43 @@
+name: Patch Split Trial Access
+
+on:
+  push:
+    paths:
+      - 'scripts/patch_split_trial_access.py'
+      - '.github/workflows/patch-split-trial-access.yml'
+      - 'subscription/entitlements.py'
+      - 'subscription/entitlement_routes.py'
+      - 'subscription/trial_access_middleware.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python scripts/patch_split_trial_access.py
+      - name: Verify
+        run: |
+          python -m py_compile subscription/entitlements.py subscription/entitlement_routes.py subscription/trial_access_middleware.py
+          grep -q 'TrialAccessMiddleware' main.py
+          grep -q 'entitlement_router' main.py
+          git diff --check
+      - name: Commit generated patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add main.py
+          if git diff --cached --quiet; then
+            echo 'No patch changes needed'
+          else
+            git commit -m 'Enforce 7-day live and 30-day paper trial'
+            git push
+          fi
