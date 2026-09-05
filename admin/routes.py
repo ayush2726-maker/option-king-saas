@@ -199,6 +199,64 @@ def activate_user(user_id: int, authorization: str = Header(None)):
         conn.close()
 
 
+@router.post("/users/{user_id}/deactivate-subscription")
+def deactivate_subscription(user_id: int, authorization: str = Header(None)):
+    admin_user = require_admin(authorization)
+    from datetime import datetime
+    from subscription.routes import _ensure_subscription_schema
+
+    _ensure_subscription_schema()
+    conn = get_db()
+    try:
+        target = conn.execute(
+            "SELECT id, name, email, is_admin FROM users WHERE id=? LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        if int(target["id"]) == int(admin_user["id"]):
+            raise HTTPException(status_code=400, detail="You cannot deactivate your own admin subscription")
+        if bool(target["is_admin"]):
+            raise HTTPException(status_code=400, detail="Remove admin access before deactivating subscription")
+
+        stamp = datetime.utcnow().isoformat()
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(subscriptions)").fetchall()}
+        if {"gateway_state", "updated_at"}.issubset(columns):
+            conn.execute(
+                """
+                UPDATE subscriptions
+                SET status='expired', valid_till=?, gateway_state='ADMIN_DEACTIVATED', updated_at=?
+                WHERE user_id=? AND status='active'
+                """,
+                (stamp, stamp, user_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE subscriptions SET status='expired', valid_till=? WHERE user_id=? AND status='active'",
+                (stamp, user_id),
+            )
+
+        # Keep login enabled so the customer can open Billing and renew.
+        conn.execute(
+            """
+            UPDATE users
+            SET is_active=1, subscription_status='expired', trial_ends_at=NULL
+            WHERE id=?
+            """,
+            (user_id,),
+        )
+        conn.commit()
+        return {
+            "success": True,
+            "message": f"{target['name'] or target['email']} subscription deactivated",
+            "user_id": user_id,
+            "subscription_status": "expired",
+            "login_enabled": True,
+        }
+    finally:
+        conn.close()
+
+
 @router.post("/users/{user_id}/extend-trial")
 def extend_trial(user_id: int, body: dict, authorization: str = Header(None)):
     require_admin(authorization)
