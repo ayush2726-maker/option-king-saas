@@ -29,6 +29,10 @@ def _manual_upi_id():
     return str(os.getenv("MANUAL_UPI_ID", "")).strip()
 
 
+def _manual_payment_link():
+    return str(os.getenv("PAYTM_SUBSCRIPTION_LINK", "")).strip()
+
+
 def _manual_upi_name():
     return str(os.getenv("MANUAL_UPI_NAME", "Option King AI")).strip() or "Option King AI"
 
@@ -195,14 +199,29 @@ def config(authorization: str = Header(None)):
 @router.post("/create-link")
 def create_link(body: dict = None, authorization: str = Header(None)):
     user = get_current_user(authorization)
+    paytm_link = _manual_payment_link()
+    if paytm_link:
+        return {
+            "success": True,
+            "manual_payment": True,
+            "automatic_activation": False,
+            "gateway": "paytm_payment_link",
+            "checkout_url": paytm_link,
+            "amount_rupees": 5000,
+            "upi_supported": True,
+            "qr_supported": True,
+            "user_reference": str(user["email"] or user["id"]),
+            "message": "Paytm payment link opened. Admin activation required after payment.",
+        }
     if not _manual_upi_id():
-        raise HTTPException(status_code=503, detail="Manual UPI ID is not configured yet")
+        raise HTTPException(status_code=503, detail="Manual payment link or UPI ID is not configured yet")
     reference = str(user["email"] or user["id"])
     checkout_url = "https://option-king-saas-production.up.railway.app/subscription/razorpay/manual-page?ref=" + quote(reference, safe="")
     return {
         "success": True,
         "manual_payment": True,
         "automatic_activation": False,
+        "gateway": "manual_upi",
         "checkout_url": checkout_url,
         "amount_rupees": 5000,
         "upi_supported": True,
