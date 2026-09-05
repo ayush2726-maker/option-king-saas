@@ -21,6 +21,7 @@ from broker.upstox_token_automation import (
 from subscription.routes import router as subscription_router
 from subscription.razorpay_routes import router as razorpay_subscription_router
 from subscription.entitlement_routes import router as entitlement_router
+from subscription.trial_access_middleware import TrialAccessMiddleware
 from admin.routes import router as admin_router
 from bot.routes import router as bot_router, ensure_tables as ensure_bot_tables
 from bot.trade_live_routes import router as trade_live_router
@@ -155,7 +156,7 @@ install_live_gateway_display_sync_patch()
 apply_live_gateway_direct_symbol_hotfix()
 install_live_daily_history_response_patch()
 
-RELEASE_VERSION = "split-trial-entitlements-v1-20260905"
+RELEASE_VERSION = "split-trial-enforced-v2-20260905"
 
 app = FastAPI(title="Option King AI — SaaS API", description="Multi-user F&O trading bot platform", version="1.0.0", docs_url="/docs", redoc_url="/redoc")
 app.add_middleware(BacktestActiveStrategyMiddleware)
@@ -163,6 +164,7 @@ app.add_middleware(StrictSignalHistoryMiddleware)
 app.add_middleware(ModeAwareDashboardMiddleware)
 app.add_middleware(SafeRegistrationEmailVerificationMiddleware)
 app.add_middleware(TradeLiveRuntimeRecoveryMiddleware)
+app.add_middleware(TrialAccessMiddleware)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 @app.on_event("startup")
