@@ -30,18 +30,12 @@ jobs:
       - name: Validate
         run: |
           python -m py_compile admin/routes.py subscription/routes.py
-          python - <<'PY'
-          from subscription.routes import PLAN, PLAN_ID
-          assert PLAN_ID == 'monthly_5000'
-          assert PLAN['price'] == 500000
-          assert PLAN['amount_rupees'] == 5000
-          assert PLAN['display_price'] == '₹5,000'
-          panel = open('admin/panel.html', encoding='utf-8').read()
-          assert 'Activate 30 Days' in panel
-          routes = open('admin/routes.py', encoding='utf-8').read()
-          assert 'admin_manual_30d' in routes
-          print('validation OK')
-          PY
+          grep -F 'PLAN_ID = "monthly_5000"' subscription/routes.py
+          grep -F '"price": 500000' subscription/routes.py
+          grep -F '"amount_rupees": 5000' subscription/routes.py
+          grep -F '"display_price": "₹5,000"' subscription/routes.py
+          grep -F 'admin_manual_30d' admin/routes.py
+          grep -F 'Activate 30 Days' admin/panel.html
 
       - name: Commit applied patch
         run: |
