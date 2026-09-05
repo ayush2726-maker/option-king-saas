@@ -1,0 +1,38 @@
+name: Fix Subscription Authority
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/fix_subscription_authority.py"
+      - ".github/workflows/fix-subscription-authority.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch backend subscription authority
+        run: |
+          python3 scripts/fix_subscription_authority.py
+          python3 -m py_compile main.py
+          git diff --check
+          grep -q "Subscription authority enabled" main.py
+          if grep -q "TestingFullAccessAndFreshDataMiddleware" main.py; then exit 1; fi
+      - name: Persist backend fix
+        run: |
+          if git diff --quiet -- main.py; then
+            echo "main.py already patched"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add main.py
+          git commit -m "Make subscription state authoritative"
+          git push origin HEAD:main
