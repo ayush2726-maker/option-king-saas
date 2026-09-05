@@ -166,8 +166,8 @@ def request_gateway(body: dict = None, authorization: str = Header(None)):
     selected_name = str((selected or {}).get("broker_name") or "").strip().lower()
     existing_name = str((existing or {}).get("broker_name") or "").strip().lower()
     broker_name = requested or selected_name or existing_name
-    if broker_name not in SUPPORTED_CLOUD_BROKERS:
-        raise HTTPException(status_code=400, detail="Choose Angel One or Upstox before secure IP allocation")
+    if broker_name and broker_name not in SUPPORTED_CLOUD_BROKERS:
+        raise HTTPException(status_code=400, detail="Dedicated cloud gateway currently supports Angel One and Upstox")
 
     now = _now()
     conn = get_db()
@@ -196,7 +196,12 @@ def request_gateway(body: dict = None, authorization: str = Header(None)):
             current = dict(conn.execute("SELECT * FROM gateway_provision_requests WHERE user_id=?", (int(user["id"]),)).fetchone())
     finally:
         conn.close()
-    return {"success": True, "broker": broker_name, "provisioning": current, "gateway": _reconcile_ready(user["id"])}
+    return {
+        "success": True,
+        "broker": broker_name or None,
+        "provisioning": current,
+        "gateway": _reconcile_ready(user["id"]),
+    }
 
 
 @router.get("/status")

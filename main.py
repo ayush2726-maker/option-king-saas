@@ -157,7 +157,7 @@ install_live_gateway_display_sync_patch()
 apply_live_gateway_direct_symbol_hotfix()
 install_live_daily_history_response_patch()
 
-RELEASE_VERSION = "aws-auto-gateway-provisioning-v1-20260905"
+RELEASE_VERSION = "static-ip-before-broker-v1-20260905"
 
 app = FastAPI(title="Option King AI — SaaS API", description="Multi-user F&O trading bot platform", version="1.0.0", docs_url="/docs", redoc_url="/redoc")
 app.add_middleware(BacktestActiveStrategyMiddleware)

@@ -5,15 +5,14 @@ Goal: normal customers never manage Termux, Railway IPs, gateway tokens, or a ph
 ## Runtime flow
 
 1. Customer creates an Option King AI account.
-2. Customer connects Angel One or Upstox in the app.
-3. Paper trading is tested first.
-4. Option King backend requests a dedicated AWS gateway for that OKAI user.
-5. AWS creates or reuses one EC2 worker tagged `OKAIUserId=<user_id>`.
-6. AWS creates or reuses one Elastic IP tagged to the same user and attaches it to that instance.
-7. Backend stores that IP as the user's expected gateway IP.
-8. App shows the assigned IP in Step 4 so the customer can register it in the broker developer portal.
-9. The worker runs the existing `local_gateway_agent` as a systemd service and heartbeats to Railway.
-10. Live is enabled only when entitlement + broker + gateway heartbeat + static-IP match are all ready and the customer explicitly confirms LIVE.
+2. With active Live access, the customer requests a dedicated AWS gateway before entering broker credentials.
+3. AWS creates or reuses one EC2 worker tagged `OKAIUserId=<user_id>`.
+4. AWS creates or reuses one Elastic IP tagged to the same user and attaches it to that instance.
+5. Backend stores that IP as the user's expected gateway IP and the app displays it in Step 2.
+6. Customer registers that exact IP in the Angel One or Upstox developer portal, then saves and verifies the broker credentials in Step 3.
+7. Paper trading is tested in Step 4.
+8. The worker completes bootstrap when broker credentials are available, runs the existing `local_gateway_agent` as a systemd service, and heartbeats to Railway.
+9. Live is enabled only when entitlement + broker + gateway heartbeat + static-IP match are all ready and the customer explicitly confirms LIVE.
 
 ## Railway environment required
 
