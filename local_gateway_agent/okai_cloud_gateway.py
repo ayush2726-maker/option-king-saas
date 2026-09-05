@@ -34,7 +34,7 @@ def _bootstrap():
         API + "/local-gateway/provision/bootstrap",
         headers={
             "X-Gateway-Token": GATEWAY_TOKEN,
-            "User-Agent": "OKAI-Cloud-Gateway/1.0",
+            "User-Agent": "OKAI-Cloud-Gateway/1.1",
         },
         timeout=25,
     )
@@ -54,11 +54,9 @@ def _config_from_bootstrap(data):
         "gateway_token": GATEWAY_TOKEN,
         "device_name": str(data.get("device_name") or "OKAI AWS Dedicated Gateway"),
         "expected_static_ip": str(data.get("expected_static_ip") or "").strip(),
-        # Dedicated cloud worker is locally ready at boot. Real entries are still
-        # gated by server_armed, which requires the user's explicit Live action.
         "local_armed": True,
         "broker": broker,
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "created_at": "cloud-managed",
         "cloud_managed": True,
     }
     broker_cfg = data.get("broker_config") or {}
@@ -80,7 +78,9 @@ def _config_from_bootstrap(data):
 
 
 def _fingerprint(config, script):
-    raw = json.dumps({"config": config, "script": script}, sort_keys=True, separators=(",", ":"))
+    stable = dict(config)
+    stable.pop("created_at", None)
+    raw = json.dumps({"config": stable, "script": script}, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
