@@ -10,8 +10,10 @@ AMI = os.getenv("OKAI_GATEWAY_AMI_ID", "ami-0c0fd09cfe77b59dc")
 SUBNET = os.getenv("OKAI_GATEWAY_SUBNET_ID", "subnet-0433b4048f14cd4c4")
 SECURITY_GROUP = os.getenv("OKAI_GATEWAY_SECURITY_GROUP_ID", "sg-02caaa734cccbb139")
 INSTANCE_TYPE = os.getenv("OKAI_GATEWAY_INSTANCE_TYPE", "t3.micro")
+WORKER_PROFILE = os.getenv("OKAI_GATEWAY_WORKER_PROFILE", "OptionKingGatewayWorkerProfile")
 REPO = os.getenv("OKAI_GATEWAY_REPO_URL", "https://github.com/ayush2726-maker/option-king-saas.git")
 PROVISIONER_TOKEN = str(os.getenv("OKAI_PROVISIONER_TOKEN") or "").strip()
+WORKER_REVISION = "cloud-gateway-v2"
 
 EC2 = boto3.client("ec2", region_name=REGION)
 
@@ -22,6 +24,10 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y python3 python3-pip python3-venv git ca-certificates
+if command -v snap >/dev/null 2>&1; then
+  snap install amazon-ssm-agent --classic || true
+  systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+fi
 cd /opt
 rm -rf option-king-saas
 git clone --depth 1 {REPO} option-king-saas
@@ -150,8 +156,7 @@ def process(user_id):
         EC2.start_instances(InstanceIds=[worker["InstanceId"]])
 
     if worker:
-        # Existing worker already owns its gateway token. Do not rotate it during
-        # harmless retries; just restore the same EIP and let heartbeat recover.
+        # Keep the customer's permanent EIP and existing token on harmless retries.
         instance_id = worker["InstanceId"]
         _wait_running(instance_id)
         EC2.associate_address(
@@ -180,6 +185,7 @@ def process(user_id):
         MaxCount=1,
         SubnetId=SUBNET,
         SecurityGroupIds=[SECURITY_GROUP],
+        IamInstanceProfile={"Name": WORKER_PROFILE},
         UserData=_worker_user_data(user_id, gateway_token),
         MetadataOptions={"HttpTokens": "required", "HttpEndpoint": "enabled"},
         BlockDeviceMappings=[{
@@ -193,6 +199,7 @@ def process(user_id):
                     {"Key": "Name", "Value": f"okai-gateway-u{int(user_id)}"},
                     {"Key": "OKAIUserId", "Value": str(int(user_id))},
                     {"Key": "OKAIRole", "Value": "worker"},
+                    {"Key": "OKAIRevision", "Value": WORKER_REVISION},
                     {"Key": "ManagedBy", "Value": "OptionKingAI"},
                 ],
             }
