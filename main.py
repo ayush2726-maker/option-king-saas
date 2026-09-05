@@ -19,6 +19,7 @@ from broker.upstox_token_automation import (
     schedule_upstox_token_requests,
 )
 from subscription.routes import router as subscription_router
+from subscription.razorpay_routes import router as razorpay_subscription_router
 from admin.routes import router as admin_router
 from bot.routes import router as bot_router, ensure_tables as ensure_bot_tables
 from bot.trade_live_routes import router as trade_live_router
@@ -234,6 +235,7 @@ app.include_router(upstox_token_router)
 app.include_router(upstox_public_router)
 app.include_router(local_gateway_router)
 app.include_router(subscription_router)
+app.include_router(razorpay_subscription_router)
 app.include_router(admin_router)
 app.include_router(bot_router)
 app.include_router(trade_live_router)
