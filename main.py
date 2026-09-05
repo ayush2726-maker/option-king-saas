@@ -6,6 +6,7 @@ from auth.recovery_routes import router as recovery_router, ensure_recovery_sche
 from auth.registration_email_middleware import SafeRegistrationEmailVerificationMiddleware
 from local_gateway.routes import router as local_gateway_router
 from local_gateway.provisioning_routes import router as gateway_provisioning_router
+from local_gateway.bootstrap_ip_middleware import GatewayBootstrapIPMiddleware
 from local_gateway.service import ensure_local_gateway_schema
 from broker.routes import router as broker_router
 from broker.selection import normalize_all_selected_brokers
@@ -157,7 +158,7 @@ install_live_gateway_display_sync_patch()
 apply_live_gateway_direct_symbol_hotfix()
 install_live_daily_history_response_patch()
 
-RELEASE_VERSION = "static-ip-before-broker-v1-20260905"
+RELEASE_VERSION = "cloud-bootstrap-ip-bound-v1-20260905"
 
 app = FastAPI(title="Option King AI — SaaS API", description="Multi-user F&O trading bot platform", version="1.0.0", docs_url="/docs", redoc_url="/redoc")
 app.add_middleware(BacktestActiveStrategyMiddleware)
@@ -166,6 +167,7 @@ app.add_middleware(ModeAwareDashboardMiddleware)
 app.add_middleware(SafeRegistrationEmailVerificationMiddleware)
 app.add_middleware(TradeLiveRuntimeRecoveryMiddleware)
 app.add_middleware(TrialAccessMiddleware)
+app.add_middleware(GatewayBootstrapIPMiddleware)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 @app.on_event("startup")
