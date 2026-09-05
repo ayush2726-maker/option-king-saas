@@ -451,6 +451,8 @@ def create_paytm_link(body: dict = None, authorization: str = Header(None)):
         "customerContact": customer_contact,
         "statusCallbackUrl": _url_with_order(_callback_base_url(), merchant_request_id),
         "maxPaymentsAllowed": "1",
+        "singleTransactionOnly": True,
+        "linkOrderId": merchant_request_id[:50],
         "linkNotes": merchant_request_id,
         "redirectionUrlSuccess": _url_with_order(_return_base_url(), merchant_request_id),
         "redirectionUrlFailure": _url_with_order(_return_base_url(), merchant_request_id),
@@ -459,8 +461,21 @@ def create_paytm_link(body: dict = None, authorization: str = Header(None)):
     response_body = response.get("body") or response
     short_url = str(response_body.get("shortUrl") or "").strip()
     link_id = str(response_body.get("linkId") or "").strip()
+    returned_type = str(response_body.get("linkType") or "").strip().upper()
+    returned_amount = _decimal_amount(response_body.get("amount"))
+    expected_amount = _expected_amount()
     if not short_url or not link_id:
         raise HTTPException(status_code=502, detail="Paytm payment link was not returned")
+    # Never send a generic/editable-amount Paytm link to the customer.
+    # Paytm's FIXED link must echo FIXED and the exact plan amount.
+    if returned_type != "FIXED" or returned_amount != expected_amount:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Paytm did not create a fixed ₹5,000 payment link. "
+                "Please retry; no editable-amount link will be opened."
+            ),
+        )
 
     conn = get_db()
     try:
