@@ -18,6 +18,7 @@ from local_gateway.service import (
 from subscription.entitlements import entitlement_snapshot
 
 router = APIRouter(prefix="/local-gateway/provision", tags=["Gateway Provisioning"])
+SUPPORTED_CLOUD_BROKERS = {"angelone", "upstox"}
 
 
 def _now_dt():
@@ -57,6 +58,7 @@ def ensure_schema():
             CREATE TABLE IF NOT EXISTS gateway_provision_requests (
                 user_id INTEGER PRIMARY KEY,
                 state TEXT NOT NULL DEFAULT 'requested',
+                broker_name TEXT,
                 static_ip TEXT,
                 instance_id TEXT,
                 last_error TEXT,
@@ -68,6 +70,8 @@ def ensure_schema():
             """
         )
         cols = {r[1] for r in conn.execute("PRAGMA table_info(gateway_provision_requests)").fetchall()}
+        if "broker_name" not in cols:
+            conn.execute("ALTER TABLE gateway_provision_requests ADD COLUMN broker_name TEXT")
         if "broker_ip_confirmed_at" not in cols:
             conn.execute("ALTER TABLE gateway_provision_requests ADD COLUMN broker_ip_confirmed_at TEXT")
         conn.commit()
@@ -98,18 +102,12 @@ def _provision_row(user_id):
 
 
 def _reconcile_ready(user_id):
-    """Promote bootstrapping -> ready only after the dedicated worker is truly online."""
     ensure_schema()
     gateway = get_gateway_status(int(user_id))
     expected = str(gateway.get("expected_static_ip") or "").strip()
     observed = str(gateway.get("observed_ip") or "").strip()
     ip_matches = bool(expected and observed and expected == observed)
-    ready = bool(
-        gateway.get("paired")
-        and gateway.get("enabled")
-        and gateway.get("online")
-        and ip_matches
-    )
+    ready = bool(gateway.get("paired") and gateway.get("enabled") and gateway.get("online") and ip_matches)
     if ready:
         conn = get_db()
         try:
@@ -154,34 +152,45 @@ def _set_trading_mode(user_id, mode):
 
 
 @router.post("/request")
-def request_gateway(authorization: str = Header(None)):
+def request_gateway(body: dict = None, authorization: str = Header(None)):
+    """Choose broker + request a dedicated IP before API credentials are created."""
     user = dict(get_current_user(authorization))
     access = entitlement_snapshot(user)
     if not bool(user.get("is_admin")) and not bool(access.get("live_allowed")):
         raise HTTPException(status_code=403, detail="Live access is required before allocating a secure execution IP")
-    broker = _selected_broker(user["id"])
-    if not broker:
-        raise HTTPException(status_code=409, detail="Connect and select a broker before secure IP allocation")
-    broker_name = str(broker.get("broker_name") or "").strip().lower()
-    if broker_name not in {"angelone", "upstox"}:
-        raise HTTPException(status_code=409, detail="Dedicated cloud gateway currently supports Angel One and Upstox")
 
     ensure_schema()
+    existing = _provision_row(user["id"])
+    selected = _selected_broker(user["id"])
+    requested = str((body or {}).get("broker_name") or "").strip().lower()
+    selected_name = str((selected or {}).get("broker_name") or "").strip().lower()
+    existing_name = str((existing or {}).get("broker_name") or "").strip().lower()
+    broker_name = requested or selected_name or existing_name
+    if broker_name not in SUPPORTED_CLOUD_BROKERS:
+        raise HTTPException(status_code=400, detail="Choose Angel One or Upstox before secure IP allocation")
+
     now = _now()
     conn = get_db()
     try:
         row = conn.execute("SELECT * FROM gateway_provision_requests WHERE user_id=?", (int(user["id"]),)).fetchone()
         if row and str(row["state"] or "") in {"requested", "allocating", "bootstrapping", "ready"}:
-            current = dict(row)
+            if str(row["broker_name"] or "").strip().lower() != broker_name:
+                conn.execute(
+                    "UPDATE gateway_provision_requests SET broker_name=?, updated_at=? WHERE user_id=?",
+                    (broker_name, now, int(user["id"])),
+                )
+                conn.commit()
+            current = dict(conn.execute("SELECT * FROM gateway_provision_requests WHERE user_id=?", (int(user["id"]),)).fetchone())
         else:
             conn.execute(
                 """
-                INSERT INTO gateway_provision_requests(user_id,state,requested_at,updated_at)
-                VALUES(?, 'requested', ?, ?)
+                INSERT INTO gateway_provision_requests(user_id,state,broker_name,requested_at,updated_at)
+                VALUES(?, 'requested', ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
-                    state='requested', last_error=NULL, requested_at=excluded.requested_at, updated_at=excluded.updated_at
+                    state='requested', broker_name=excluded.broker_name, last_error=NULL,
+                    requested_at=excluded.requested_at, updated_at=excluded.updated_at
                 """,
-                (int(user["id"]), now, now),
+                (int(user["id"]), broker_name, now, now),
             )
             conn.commit()
             current = dict(conn.execute("SELECT * FROM gateway_provision_requests WHERE user_id=?", (int(user["id"]),)).fetchone())
@@ -199,6 +208,7 @@ def provisioning_status(authorization: str = Header(None)):
         "success": True,
         "provisioning": row or {
             "state": "not_requested",
+            "broker_name": None,
             "static_ip": None,
             "instance_id": None,
             "broker_ip_confirmed_at": None,
@@ -213,15 +223,18 @@ def confirm_broker_ip(body: dict, authorization: str = Header(None)):
     phrase = str((body or {}).get("confirmation") or "").strip().upper()
     if phrase != "IP REGISTERED":
         raise HTTPException(status_code=400, detail="Confirm that the shown static IP has been registered in your broker app")
+    if not _selected_broker(user["id"]):
+        raise HTTPException(status_code=409, detail="Connect and verify your broker before confirming the static IP")
     row = _provision_row(user["id"])
     static_ip = str((row or {}).get("static_ip") or "").strip()
     if not static_ip:
         raise HTTPException(status_code=409, detail="Dedicated static IP is not allocated yet")
     conn = get_db()
     try:
+        stamp = _now()
         conn.execute(
             "UPDATE gateway_provision_requests SET broker_ip_confirmed_at=?, updated_at=? WHERE user_id=?",
-            (_now(), _now(), int(user["id"])),
+            (stamp, stamp, int(user["id"])),
         )
         conn.commit()
     finally:
@@ -242,20 +255,12 @@ def enable_live(body: dict, authorization: str = Header(None)):
         raise HTTPException(status_code=409, detail="Connect a broker before enabling Live Trading")
     row = _provision_row(user["id"])
     if not row or not row.get("broker_ip_confirmed_at"):
-        raise HTTPException(status_code=409, detail="Register the dedicated static IP in your broker app and confirm Step 4 first")
+        raise HTTPException(status_code=409, detail="Register the dedicated static IP in your broker app and confirm it first")
     ready, reason, gateway = gateway_ready(user["id"])
     if not ready and reason == "LOCAL_GATEWAY_NOT_ARMED":
-        # gateway_ready includes server_armed; for the pre-arm check we require
-        # every infrastructure condition except the arm flag itself.
         expected = str(gateway.get("expected_static_ip") or "").strip()
         observed = str(gateway.get("observed_ip") or "").strip()
-        ready = bool(
-            gateway.get("paired")
-            and gateway.get("enabled")
-            and gateway.get("online")
-            and expected
-            and expected == observed
-        )
+        ready = bool(gateway.get("paired") and gateway.get("enabled") and gateway.get("online") and expected and expected == observed)
     if not ready:
         raise HTTPException(status_code=409, detail=f"Secure Live Connection is not ready: {reason}")
 
@@ -316,7 +321,7 @@ def lease_request(request: Request, x_provisioner_token: str = Header(None)):
             (_now(), int(row["user_id"])),
         )
         conn.commit()
-        return {"success": True, "job": {"user_id": int(row["user_id"])}}
+        return {"success": True, "job": {"user_id": int(row["user_id"]), "broker_name": row["broker_name"]}}
     finally:
         conn.close()
 
@@ -342,13 +347,9 @@ def allocate_callback(request: Request, body: dict, x_provisioner_token: str = H
 
     conn = get_db()
     try:
-        existing = conn.execute(
-            "SELECT static_ip FROM gateway_provision_requests WHERE user_id=?",
-            (user_id,),
-        ).fetchone()
+        existing = conn.execute("SELECT static_ip FROM gateway_provision_requests WHERE user_id=?", (user_id,)).fetchone()
         old_ip = str(existing["static_ip"] or "").strip() if existing else ""
-        confirmed = None if old_ip != static_ip else "KEEP"
-        if confirmed == "KEEP":
+        if old_ip == static_ip:
             conn.execute(
                 """
                 UPDATE gateway_provision_requests
@@ -394,10 +395,8 @@ def ready_callback(request: Request, body: dict, x_provisioner_token: str = Head
         conn.execute(
             """
             UPDATE gateway_provision_requests
-            SET state=?, last_error=?,
-                instance_id=COALESCE(NULLIF(?,''), instance_id),
-                static_ip=COALESCE(NULLIF(?,''), static_ip),
-                updated_at=?
+            SET state=?, last_error=?, instance_id=COALESCE(NULLIF(?,''), instance_id),
+                static_ip=COALESCE(NULLIF(?,''), static_ip), updated_at=?
             WHERE user_id=?
             """,
             (state, err, instance_id, static_ip, _now(), user_id),
@@ -410,14 +409,14 @@ def ready_callback(request: Request, body: dict, x_provisioner_token: str = Head
 
 @router.get("/bootstrap")
 def gateway_bootstrap(x_gateway_token: str = Header(None)):
-    """Private worker-only bootstrap. Never expose this route through customer UI."""
+    """Private worker-only bootstrap. Credentials never go to the customer UI."""
     gateway = authenticate_gateway(x_gateway_token)
     user_id = int(gateway["user_id"])
     conn = get_db()
     try:
         cred = get_selected_broker(conn, user_id)
         if cred is None:
-            raise HTTPException(status_code=409, detail="No selected broker credentials")
+            raise HTTPException(status_code=409, detail="Broker credentials not connected yet; worker is waiting")
         broker_name = str(cred["broker_name"] or "").strip().lower()
         api_key = decrypt_credential(cred["api_key"]) if cred["api_key"] else ""
         api_secret = decrypt_credential(cred["api_secret"]) if cred["api_secret"] else ""
@@ -438,12 +437,7 @@ def gateway_bootstrap(x_gateway_token: str = Header(None)):
         if not all([client_id, api_key, api_secret, totp]):
             raise HTTPException(status_code=409, detail="Angel One credentials are incomplete")
         base["agent_script"] = "okai_local_gateway_v3.py"
-        base["broker_config"] = {
-            "api_key": api_key,
-            "client_id": client_id,
-            "password": api_secret,
-            "totp_secret": totp,
-        }
+        base["broker_config"] = {"api_key": api_key, "client_id": client_id, "password": api_secret, "totp_secret": totp}
         return base
     if broker_name == "upstox":
         if not api_secret:
